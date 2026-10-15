@@ -1,0 +1,7 @@
+build/
+build-stress/
+dist/
+firmware/
+__pycache__/
+*.pyc
+.easy_install.conf

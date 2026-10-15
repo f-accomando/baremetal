@@ -1,0 +1,1178 @@
+# bm - bare metal console for Raspberry Pi Zero / Zero W (BCM2835);
+# the same kernel runs on the Pi 1 (A, B, A+, B+). The Pi Zero 2 W
+# (BCM2710A1, Cortex-A53) has its own build of the same sources, kernel7.img
+#
+# make TARGET=rgb30: the PowKiddy RGB30 (RK3566, AArch64), see rgb30.mk
+ifeq ($(TARGET),rgb30)
+include rgb30.mk
+else
+
+CROSS   ?= arm-none-eabi-
+CC      := $(CROSS)gcc
+OBJCOPY := $(CROSS)objcopy
+OBJDUMP := $(CROSS)objdump
+QEMU    ?= qemu-system-arm
+PYTHON  ?= python3
+
+# BOOT=stress builds a kernel that runs the rendering stress test at boot
+# (its own build directory, so normal and stress objects never mix).
+BOOT    ?= normal
+ifeq ($(BOOT),stress)
+BUILD   := build-stress
+BOOT_DEFS := -DBM_BOOT_STRESS
+else
+BUILD   := build
+BOOT_DEFS :=
+endif
+DIST    := dist
+FW_DIR  := firmware
+
+# Serial port of the USB-TTL adapter, used by `make run-serial`.
+PORT    ?= /dev/ttyUSB0
+BAUD    ?= 115200
+
+VERSION := $(shell git describe --always --dirty 2>/dev/null || echo dev)
+# the branch, for the reports' names (CI checks out a commit: its variables say which)
+BRANCH := $(or $(GITHUB_HEAD_REF),$(GITHUB_REF_NAME),$(shell git rev-parse --abbrev-ref HEAD 2>/dev/null),unknown)
+
+ARCH    := -mcpu=arm1176jzf-s -marm -mfpu=vfp -mfloat-abi=hard
+# kernel7.img, the Pi Zero 2 W: ARMv7 in 32 bit (hardware divide, VFPv4 with
+# 32 registers, NEON) tuned for the Cortex-A53; ARMv7 and not ARMv8 so that
+# it also runs in QEMU's raspi2b (Cortex-A7, the same peripherals).
+# SOC=-DBM_ZERO2: the BCM2710's addresses (src/drivers/mmio.h).
+ARCH7   := -march=armv7ve -mtune=cortex-a53 -marm -mfpu=neon-vfpv4 -mfloat-abi=hard
+SOC     :=
+# The Pi Zero 2 W's build (kernel7.img) is off for now: make ZERO2=1 builds
+# it again, puts it on the card, in the image and in the release, and adds
+# its tests (test-hyp) to make test. make test-zero2 builds it anyway.
+ZERO2   ?= 0
+export ZERO2
+CLEAN_KERNEL ?= 0
+CLEAN_DEFS := $(if $(filter 1,$(CLEAN_KERNEL)),-DBM_CLEAN_KERNEL)
+K7      := $(if $(filter 1,$(ZERO2)),$(BUILD)/kernel7.img)
+COMMON  = $(ARCH) $(SOC) -std=c11 -O2 -Wall -Wextra -g -Isrc \
+          -ffunction-sections -fdata-sections \
+          -DUART_BAUD=$(BAUD) $(BOOT_DEFS) $(CLEAN_DEFS)
+# Kernel: hosted C on top of newlib (libc, libm), see src/lib/syscalls.c.
+CFLAGS  = $(COMMON) -D_DEFAULT_SOURCE -Ithird_party/lua \
+          -Ithird_party/lwip/src/include -Isrc/net \
+          -Ithird_party/mbedtls/include -DMBEDTLS_CONFIG_FILE='"bm_mbedtls.h"' $(WARN)
+# Chainloader: freestanding, no libc.
+LCFLAGS := $(COMMON) -Os -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns
+ASFLAGS = $(ARCH) $(SOC) $(CLEAN_DEFS) -g -Isrc -Isrc/kernel -Wa,-I$(BUILD)
+LDFLAGS = $(ARCH) -nostartfiles -Wl,--gc-sections
+LDLIBS  := -Wl,--start-group -lc -lm -lgcc -Wl,--end-group
+LLDLIBS := -nostdlib -lgcc
+
+LUA_SRCS    := $(wildcard third_party/lua/*.c)
+MBEDTLS_SRCS := $(wildcard third_party/mbedtls/library/*.c)
+LWIP_SRCS   := $(wildcard third_party/lwip/src/core/*.c third_party/lwip/src/core/ipv4/*.c) \
+               third_party/lwip/src/netif/ethernet.c third_party/lwip/src/apps/sntp/sntp.c
+KERNEL_SRCS := $(shell find src -path src/rgb30 -prune -o \( -name '*.c' -o -name '*.S' \) -print) $(LUA_SRCS) $(LWIP_SRCS) $(MBEDTLS_SRCS)
+LOADER_SRCS := $(wildcard chainloader/*.S chainloader/*.c) \
+               src/drivers/uart.c src/drivers/gpio.c src/drivers/mbox.c \
+               src/drivers/prop.c src/drivers/timer.c src/drivers/led.c src/drivers/board.c \
+               src/arch/cache.c src/lib/crc32.c
+
+KERNEL_OBJS := $(patsubst %,$(BUILD)/k/%.o,$(KERNEL_SRCS))
+KERNEL7_OBJS := $(patsubst %,$(BUILD)/k7/%.o,$(KERNEL_SRCS))
+LOADER_OBJS := $(patsubst %,$(BUILD)/l/%.o,$(LOADER_SRCS))
+LUA_OBJS    := $(patsubst %,$(BUILD)/k/%.o,$(LUA_SRCS))
+LWIP_OBJS   := $(patsubst %,$(BUILD)/k/%.o,$(LWIP_SRCS))
+MBEDTLS_OBJS := $(patsubst %,$(BUILD)/k/%.o,$(MBEDTLS_SRCS))
+THIRD7_OBJS := $(patsubst %,$(BUILD)/k7/%.o,$(LUA_SRCS) $(LWIP_SRCS) $(MBEDTLS_SRCS))
+
+# The objects of kernel7.img (Pi Zero 2 W): the same sources, other flags.
+$(BUILD)/k7/% $(BUILD)/kernel7.elf: ARCH := $(ARCH7)
+$(BUILD)/k7/%: SOC := -DBM_ZERO2
+
+# The version string lives in one object, rebuilt when `git describe` changes.
+VERSION_STAMP := $(BUILD)/version.txt
+$(VERSION_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@echo '$(VERSION) $(BRANCH)' | cmp -s - $@ || echo '$(VERSION) $(BRANCH)' > $@
+$(BUILD)/k/src/kernel/version.c.o $(BUILD)/k7/src/kernel/version.c.o: $(VERSION_STAMP)
+$(BUILD)/k/src/kernel/version.c.o $(BUILD)/k7/src/kernel/version.c.o: CFLAGS += -DBM_VERSION=\"$(VERSION)\" \
+    -DBM_BRANCH=\"$(BRANCH)\"
+FORCE:
+
+# Third-party code: its own warning policy, not ours.
+$(LUA_OBJS) $(LWIP_OBJS) $(MBEDTLS_OBJS) $(THIRD7_OBJS): WARN := -w
+EMBED_TOOLS := $(if $(filter 1,$(CLEAN_KERNEL)),,$(BUILD)/editor.bm $(BUILD)/sound.bm \
+               $(BUILD)/studio.bm $(BUILD)/animator.bm $(BUILD)/mesh.bm $(BUILD)/pixel.bm \
+               $(BUILD)/assistant.bm $(BUILD)/code.bm)
+# Lua scripts embedded with .incbin
+$(BUILD)/k/src/script/embed.S.o $(BUILD)/k7/src/script/embed.S.o: $(wildcard src/script/*.lua) keys/release-pub.pem keys/market-pub.pem \
+                                 $(BUILD)/demo.bm $(BUILD)/stress.bm $(EMBED_TOOLS) \
+                                 $(BUILD)/assist.bin src/ai/assist.lua \
+                                 $(BUILD)/texroom.bm src/ai/predict.lua $(BUILD)/words.lua \
+                                 src/ai/padtype.lua
+
+# The development assistant (M30): knowledge base + trained network, built
+# into the kernel. The network is trained on the PC (numpy) by `make
+# ai-model` and committed, so `make` needs only Python's standard library.
+AI_KB := $(wildcard src/ai/kb/*.txt)
+$(BUILD)/assist.bin: $(AI_KB) src/ai/assist.weights scripts/mkassist.py scripts/assistlib.py
+	@mkdir -p $(dir $@) $(BUILD)/ai
+	$(PYTHON) scripts/mkassist.py -o $@ --ref $(BUILD)/ai/ref.txt --snippets $(BUILD)/ai/snippets.txt
+
+ai-model:
+	$(PYTHON) scripts/trainassist.py
+
+# The word completion (M30): its dictionaries, from the texts of
+# src/ai/words, the Lua of the games and the API of the knowledge base
+WORDS_SRC := $(wildcard src/ai/words/*.txt) $(wildcard carts/*/main.lua) \
+             $(AI_KB) scripts/mkwords.py
+$(BUILD)/words.lua: $(WORDS_SRC)
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkwords.py -o $@
+
+# bm Code, the code editor (Dev tab, monitor C)
+$(BUILD)/code.bm: carts/code/bm.info carts/code/main.lua carts/code/icon.png scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $(word 2,$^) --cover carts/code/icon.png --info carts/code/bm.info
+
+# The assistant on its own, in the Dev tab
+$(BUILD)/assistant.bm: carts/assistant/bm.info carts/assistant/main.lua carts/code/icon.png scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $(word 2,$^) --cover carts/code/icon.png --info carts/assistant/bm.info
+
+# The editor (M15), built into the kernel
+$(BUILD)/editor.bm: carts/editor/bm.info carts/editor/main.lua carts/editor/icon.png scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $(word 2,$^) --cover carts/editor/icon.png \
+	    --info carts/editor/bm.info
+
+# The Sound editor, built into the kernel: its own bank is the demo project
+$(BUILD)/sound.bm: carts/sound/bm.info carts/sound/main.lua carts/sound/icon.png carts/sound/demo.json scripts/mkbm.py scripts/bmaudio.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $(word 2,$^) --cover carts/sound/icon.png \
+	    --audio carts/sound/demo.json --info carts/sound/bm.info
+
+# bm Studio and bm Animator on the console (M22): the models, then their
+# skeletons and animations; their shared code is src/script/bm3d.lua. bm
+# Studio's sheet holds the starter tiles (made by the PC version, removed on
+# 2026-10-06: the PNG stays).
+$(BUILD)/studio.bm: carts/studio/bm.info carts/studio/main.lua carts/studio/icon.png carts/studio/assets/sheet.png scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $(word 2,$^) --cover carts/studio/icon.png \
+	    --sheet carts/studio/assets/sheet.png --sheet8 --info carts/studio/bm.info
+
+$(BUILD)/animator.bm: carts/animator/bm.info carts/animator/main.lua carts/animator/icon.png scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $(word 2,$^) --cover carts/animator/icon.png --info carts/animator/bm.info
+
+# bm Mesh: the meshes of a .bm (its models and those its code builds), on
+# the console.
+$(BUILD)/mesh.bm: carts/mesh/bm.info carts/mesh/main.lua carts/mesh/icon.png scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $(word 2,$^) --cover carts/mesh/icon.png --info carts/mesh/bm.info
+
+# bm Pixel: the pixel art of a .bm (its sprite sheet), on the console.
+$(BUILD)/pixel.bm: carts/pixel/bm.info carts/pixel/main.lua carts/pixel/icon.png scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $(word 2,$^) --cover carts/pixel/icon.png --info carts/pixel/bm.info
+
+$(BUILD)/stress.bm: carts/stress/main.lua scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< --title "bm stress test" --author bm
+
+# Texture Room (M14, M33): the 3D benchmark of the Dev tab, built into the
+# kernel; the benchmark runs it at 320x180 and 640x360 (bm_next_run)
+$(BUILD)/texroom.bm: carts/texroom/main.lua carts/texroom/sheet.png carts/texroom/cover.png scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< --title "Texture Room" --author bm --res 320x180 \
+	    --cover carts/texroom/cover.png --sheet carts/texroom/sheet.png
+
+# Native demo cartridge (.bm): Lua + sprite sheet + map
+DEMO_BM_SRC := carts/demo/main.lua carts/demo/sheet.png carts/demo/map.csv
+$(BUILD)/demo.bm: $(DEMO_BM_SRC) scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua carts/demo/main.lua --sheet carts/demo/sheet.png \
+	    --map carts/demo/map.csv --title "bm native demo" --author bm
+
+# Demo games (Lua only, sprites drawn in code): build/carts/<name>.bm
+GAMES := pong snake village typing write
+GAME_CARTS := $(patsubst %,$(BUILD)/carts/%.bm,$(GAMES))
+# Optional per game: carts/<game>/cover.png (printed on the cartridge in the
+# menu), sheet.png, map.csv, models.bm or models.glb (3D
+# models from bm Studio / bm Animator, sdk/: with their skeletons and
+# animations from a .bm; their sprite sheet too when there is no sheet.png),
+# res_<game> := 320x180 or 256x256, sheet8_<game> := 1 (the sheet with a
+# palette and runs: up to 256 colours, much smaller); the map's other layers
+# in carts/<game>/map_<name>.csv, in the order of layers_<game> := name ...
+# (R11), the flags of the tiles in flags.csv and named sprite zones in
+# sprites.txt (scripts/mkbm.py --flags, --sprites).
+# A migrated game keeps its assets in carts/<game>/assets/ (docs/PROJECT-LAYOUT.md); the others
+# keep them in carts/<game>/.
+asset = $(firstword $(wildcard carts/$(1)/assets/$(2) carts/$(1)/$(2)))
+.SECONDEXPANSION:
+$(BUILD)/carts/%.bm: carts/%/main.lua scripts/mkbm.py scripts/bmmesh.py \
+                      $$(wildcard carts/$$*/bm.info carts/$$*/cover.png \
+                                  $$(addprefix carts/$$*/,sheet.png map.csv models.glb models.bm flags.csv sprites.txt) \
+                                  $$(addprefix carts/$$*/assets/,sheet.png map.csv models.glb models.bm flags.csv sprites.txt)) \
+                      $$(foreach l,$$(layers_$$*),$$(call asset,$$*,map_$$(l).csv))
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< \
+	    $(if $(wildcard carts/$*/bm.info),--info carts/$*/bm.info,--title "$(title_$*)" --author bm --res $(or $(res_$*),640x360)) \
+	    $(if $(wildcard carts/$*/cover.png),--cover carts/$*/cover.png) \
+	    $(if $(call asset,$*,sheet.png),--sheet $(call asset,$*,sheet.png) $(if $(sheet8_$*),--sheet8)) \
+	    $(if $(call asset,$*,map.csv),--map $(call asset,$*,map.csv)) \
+	    $(foreach l,$(layers_$*),--map $(l)=$(call asset,$*,map_$(l).csv)) \
+	    $(if $(call asset,$*,flags.csv),--flags $(call asset,$*,flags.csv)) \
+	    $(if $(call asset,$*,sprites.txt),--sprites $(call asset,$*,sprites.txt)) \
+	    $(if $(call asset,$*,models.bm),--models $(call asset,$*,models.bm),$(if $(call asset,$*,models.glb),--models $(call asset,$*,models.glb)))
+
+# bm SDK (RGB30): the SDK's second edition, 360x360 and the pad, with its own
+# sources in carts/sdk_b16/ (layout.lua + main.lua, joined by its build.py). A tool
+# built into the RGB30's kernel (rgb30.mk, its Dev tab), not into the Pi's: here
+# only its script, for test-sdk-b16. The Pi's SDK stays carts/editor.
+SDK_B16_RES ?= 360x360
+SDK_B16_SRC := carts/sdk_b16/layout.lua carts/sdk_b16/main.lua carts/sdk_b16/build.py
+$(BUILD)/sdk_b16/main.lua: $(SDK_B16_SRC)
+	$(PYTHON) carts/sdk_b16/build.py $@
+
+$(BUILD)/carts/sdk_b16.bm: $(BUILD)/sdk_b16/main.lua carts/editor/icon.png scripts/mkbm.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< --cover carts/editor/icon.png \
+	    --title "bm SDK (RGB30)" --author bm --res $(SDK_B16_RES)
+
+# A Lua interpreter for the PC (the same Lua 5.4 as the console): host tests
+# of the Lua cartridges.
+$(BUILD)/host/luahost: tests/host/luahost.c $(LUA_SRCS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -w -Ithird_party/lua -o $@ tests/host/luahost.c $(LUA_SRCS) -lm
+
+# bmplay: a Lua cartridge played on the PC with the console's drawing (lights
+# by levels too) and sound, its buttons pressed by a bot in Lua;
+BMPLAY_SRCS := tools/bmplay/bmplay.c src/bm/gfx16.c src/bm/format.c src/lib/crc32.c src/gfx/font8x16.c \
+               src/gfx/font8x14.c src/gfx/font6x12.c src/audio/synth.c src/audio/player.c \
+               src/audio/presets.c src/audio/lua_tone.c
+$(BUILD)/host/bmplay: $(BMPLAY_SRCS) src/bm/*.h src/audio/*.h $(LUA_SRCS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -Ithird_party/lua -o $@ $(BMPLAY_SRCS) $(LUA_SRCS) -lm
+
+# The Sound editor in a fake bm: its banks are the console's format, byte for byte
+$(BUILD)/demo.bmau: carts/sound/demo.json scripts/bmaudio.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) scripts/bmaudio.py pack $< -o $@
+
+# The games' buttons by name (2026-10-04): keymap(), btn("ok"), controller(),
+# prompt() for a player, in bmhost with an input script (players on a
+# keyboard, a DS4, an Xbox pad)
+$(BUILD)/keymap-test.bm: tests/keymap/cart.lua scripts/mkbm.py
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< --title "keymap test"
+
+# The games' loading screen (src/bm/loading.c, 2026-10-04): the retro intro,
+# its jingle, the console's page then the game's; the frames in build/loading/
+$(BUILD)/host/test_loading: tests/bm/test_loading.c src/bm/loading.c src/bm/loading_logo.c src/bm/loading.h \
+                            src/bm/gfx16.c src/gfx/font6x12.c src/lib/printf.c src/audio/presets.c src/audio/synth.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -Isrc/bm -o $@ tests/bm/test_loading.c src/bm/loading.c \
+	    src/bm/loading_logo.c src/bm/gfx16.c src/gfx/font6x12.c src/lib/printf.c src/audio/presets.c src/audio/synth.c -lm
+
+test-loading: $(BUILD)/host/test_loading
+	@mkdir -p $(BUILD)/loading
+	$< $(BUILD)/loading
+
+# riff (require "riff", the language of patterns for music, M46): the
+# mini-notation, the functions, the scheduler on the sound's clock, the
+# live code and the bake, in bmhost; the sound in build/riff/riff.wav
+$(BUILD)/riff-test.bm: tests/riff/cart.lua scripts/mkbm.py
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< --title "riff test"
+
+test-riff: $(BUILD)/host/bmhost-bin $(BUILD)/riff-test.bm
+	@mkdir -p $(BUILD)/riff
+	$< $(BUILD)/riff-test.bm --seconds 7 --wav $(BUILD)/riff/riff.wav 2>&1 | tee $(BUILD)/riff-test.log | grep "^riff"
+	grep -q "^riff: \([0-9]*\)/\1 checks passed" $(BUILD)/riff-test.log
+
+test-keymap: $(BUILD)/host/bmhost-bin $(BUILD)/keymap-test.bm tests/keymap/input.txt
+	$< $(BUILD)/keymap-test.bm --input tests/keymap/input.txt --seconds 8 2>&1 | tee $(BUILD)/keymap-test.log | grep "^keymap"
+	grep -q "^keymap: \([0-9]*\)/\1 checks passed" $(BUILD)/keymap-test.log
+
+# The map's layers and the flags of its tiles (R11, 2026-10-04), the
+# sheet's named zones and bmlib (R10, require "bmlib"): one cartridge
+# checks them in bmhost, packed by mkbm.py from tests/gameapi/ (its
+# layers, flags and zones); a frame of it and of the pause in build/gameapi/
+GAMEAPI_SRC := tests/gameapi/cart.lua tests/gameapi/map.csv tests/gameapi/map_front.csv tests/gameapi/flags.csv \
+               tests/gameapi/sprites.txt
+$(BUILD)/gameapi/sheet.png: tests/gameapi/mksheet.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) $< $@
+$(BUILD)/gameapi-test.bm: $(GAMEAPI_SRC) $(BUILD)/gameapi/sheet.png scripts/mkbm.py
+	$(PYTHON) scripts/mkbm.py -o $@ --lua tests/gameapi/cart.lua --sheet $(BUILD)/gameapi/sheet.png \
+	    --map tests/gameapi/map.csv --map front=tests/gameapi/map_front.csv --flags tests/gameapi/flags.csv \
+	    --sprites tests/gameapi/sprites.txt --title "game api test" --author tests
+test-gameapi: $(BUILD)/host/bmhost-bin $(BUILD)/gameapi-test.bm tests/gameapi/input.txt
+	@mkdir -p $(BUILD)/gameapi
+	$< $(BUILD)/gameapi-test.bm --input tests/gameapi/input.txt --seconds 8 --shots $(BUILD)/gameapi 2>&1 \
+	    | tee $(BUILD)/gameapi-test.log | grep "^gameapi"
+	grep -q "^gameapi: \([0-9]*\)/\1 checks passed" $(BUILD)/gameapi-test.log
+
+# bm Write (carts/write, 2026-10-06): a document typed, styled, saved in
+# /docs and exported in bmhost, then opened again (the session, the
+# Markdown); tests/write/check.py reads the files (the PDF's xref too)
+test-write: $(BUILD)/host/bmhost-bin $(BUILD)/carts/write.bm tests/write/input.txt tests/write/reopen.txt \
+            tests/write/check.py
+	rm -rf $(BUILD)/write-sd $(BUILD)/write && mkdir -p $(BUILD)/write-sd $(BUILD)/write
+	$< $(BUILD)/carts/write.bm --sd $(BUILD)/write-sd --input tests/write/input.txt --seconds 14 \
+	    --shots $(BUILD)/write > $(BUILD)/write/run1.log 2>&1
+	$< $(BUILD)/carts/write.bm --sd $(BUILD)/write-sd --input tests/write/reopen.txt --seconds 2 \
+	    --shots $(BUILD)/write > $(BUILD)/write/run2.log 2>&1
+	$(PYTHON) tests/write/check.py $(BUILD)/write-sd/docs $(BUILD)/write
+# The dev kit's profiler of functions (R14, src/bm/profile.c): profile()
+# read by the game itself, on the PC's real time (--clock-scale 1)
+$(BUILD)/profile-test.bm: tests/profile/cart.lua scripts/mkbm.py
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< --title "profile test" --author tests
+
+test-profile: $(BUILD)/host/bmhost-bin $(BUILD)/profile-test.bm
+	$< $(BUILD)/profile-test.bm --seconds 10 --clock-scale 1 2>&1 | tee $(BUILD)/profile-test.log | grep "^profile"
+	grep -q "^profile: \([0-9]*\)/\1 checks passed" $(BUILD)/profile-test.log
+
+# PS in a game played online (online(), 2026-10-04): the question to the
+# player leaving over the game that goes on, back and Esc stay, PS again
+# leaves through _leave(); the screen of the question in build/online/
+$(BUILD)/online-test.bm: tests/online/cart.lua scripts/mkbm.py
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< --title "online test"
+
+test-online: $(BUILD)/host/bmhost-bin $(BUILD)/online-test.bm tests/online/input.txt
+	@mkdir -p $(BUILD)/online
+	$< $(BUILD)/online-test.bm --input tests/online/input.txt --shots $(BUILD)/online \
+	    --seconds 8 2>&1 | tee $(BUILD)/online-test.log | grep "^online"
+	grep -q "^online: \([0-9]*\)/\1 checks passed" $(BUILD)/online-test.log
+	grep -q "left the online game" $(BUILD)/online-test.log
+
+# bmnet (require "bmnet", games over the network): two bmhost on this PC,
+# the lobby, sure messages with a fifth of the packets lost, a lockstep
+# match that must be the same on both, a player leaving; on the LAN and
+# through the relay (tools/overbit_relay.py)
+test-bmnet: $(BUILD)/host/bmhost-bin tests/bmnet/cart.lua tests/bmnet/run.py src/script/bmnet.lua
+	$(PYTHON) tests/bmnet/run.py $(BUILD)
+
+test-sound: $(BUILD)/host/luahost $(BUILD)/demo.bmau carts/sound/main.lua
+	$< tests/sound/sim.lua carts/sound/main.lua $(BUILD)/demo.bmau
+
+# Resource files (docs/RISORSE.md, scripts/bmres.py): models, images, sounds,
+# maps and palettes out of a .bm and back in, conversions, broken files
+test-res: $(BUILD)/carts/village.bm $(BUILD)/demo.bm $(BUILD)/sound.bm scripts/bmres.py $(BUILD)/host/test_res
+	rm -rf $(BUILD)/res && $(PYTHON) tests/res/test_bmres.py $(BUILD)/carts/village.bm $(BUILD)/demo.bm \
+	    $(BUILD)/sound.bm $(BUILD)/res
+	$(BUILD)/host/test_res $(BUILD)/res $(BUILD)/carts/village.bm
+
+$(BUILD)/host/test_res: tests/bm/test_res.c src/bm/format.c src/lib/crc32.c src/bm/bm.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/bm/test_res.c src/bm/format.c src/lib/crc32.c
+
+# bmhost: a .bm cartridge on the PC with the console's own runtime (Lua,
+# gfx16, r3d, the sound player) and the kernel's services replaced
+# (tests/host/stubs.c): frames to PNG or raw video, sound to WAV, input from
+# a script. For the reels of the games and for tests with screenshots.
+BMHOST_RT := src/bm/runtime.c src/bm/tokens.c src/bm/gfx16.c src/bm/r3d.c src/bm/world3d.c src/bm/map3d.c src/bm/format.c src/bm/meshcap.c \
+             src/kernel/syskeys.c \
+             src/bm/require.c src/kernel/prompts.c src/gfx/font8x16.c src/gfx/font8x14.c \
+             src/gfx/font6x12.c src/lib/printf.c src/lib/crc32.c src/audio/audio.c src/audio/synth.c \
+             src/audio/player.c src/audio/presets.c src/audio/lua_tone.c src/ai/net.c src/ai/nn.c \
+             src/bm/decimate.c src/bm/cutout.c \
+             src/bm/glb.c src/bm/json.c src/bm/png.c src/bm/jpeg.c src/bm/loading.c src/bm/loading_logo.c \
+             src/bm/profile.c src/bm/project.c src/bm/shot.c
+BMHOST_LUA := $(filter-out third_party/lua/lua.c third_party/lua/luac.c,$(LUA_SRCS))
+BMHOST_OBJS := $(patsubst %,$(BUILD)/host/bmhost/%.o,$(BMHOST_RT) $(BMHOST_LUA))
+$(BUILD)/host/bmhost/%.c.o: %.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -std=c11 -O2 -g -w -Itests/host/shim -Isrc -Isrc/bm -Ithird_party/lua -c -o $@ $<
+$(BUILD)/host/bmhost/runtime-deps: $(wildcard src/bm/*.h src/audio/*.h src/kernel/*.h src/usb/hid.h)
+	@mkdir -p $(dir $@) && touch $@
+$(BMHOST_OBJS): $(BUILD)/host/bmhost/runtime-deps
+$(BUILD)/host/bmhost-bin: tests/host/bmhost.c tests/host/stubs.c tests/host/hostnet.c tests/host/host.h tests/audio/wavout.h tests/host/libs.S \
+                          $(BMHOST_OBJS) src/ai/assist.lua src/script/bm3d.lua src/script/bmlib.lua src/script/bmnet.lua src/ai/predict.lua $(BUILD)/words.lua src/ai/padtype.lua \
+                          src/script/riff.lua src/script/bmui.lua
+	$(HOSTCC) -O2 -g -Wall -Wextra -D_DEFAULT_SOURCE -Itests/host/shim -Isrc -Isrc/bm -Ithird_party/lua -I$(BUILD) \
+	    -o $@ tests/host/bmhost.c tests/host/stubs.c tests/host/hostnet.c tests/host/libs.S $(BMHOST_OBJS) -lm
+bmhost: $(BUILD)/host/bmhost-bin
+
+# bmhost-gpu: the same with the GPU's 3D (src/gpu/gpu3d.c) on the V3D
+# emulator of the tests (tests/gpu/v3d_emu.c): the frames as the GPU draws
+# them, to set them beside the ARM's (slower: the emulator is plain C)
+$(BUILD)/host/bmhost-gpu: tests/host/bmhost.c tests/host/stubs.c tests/host/hostnet.c tests/host/host.h tests/audio/wavout.h tests/host/libs.S \
+                          $(BMHOST_OBJS) src/ai/assist.lua src/script/bm3d.lua src/script/bmlib.lua src/script/bmnet.lua src/ai/predict.lua $(BUILD)/words.lua src/ai/padtype.lua \
+                          src/gpu/gpu3d.c src/gpu/v3d_cl.c \
+                          src/gpu/shaders.h tests/gpu/v3d_emu.c tests/gpu/v3d_emu.h
+	$(HOSTCC) -std=c11 -O2 -g -w -Isrc -Itests/gpu -Daligned_alloc=test_aligned_alloc -Dfree=test_free \
+	    -c src/gpu/gpu3d.c -o $@-gpu3d.o
+	$(HOSTCC) -O2 -g -Wall -Wextra -D_DEFAULT_SOURCE -DBMHOST_GPU -Itests/host/shim -Isrc -Isrc/bm -Itests/gpu \
+	    -Ithird_party/lua -I$(BUILD) -o $@ tests/host/bmhost.c tests/host/stubs.c tests/host/hostnet.c tests/host/libs.S \
+	    $(BMHOST_OBJS) $@-gpu3d.o src/gpu/v3d_cl.c src/gpu/etc1.c tests/gpu/v3d_emu.c -lm
+bmhost-gpu: $(BUILD)/host/bmhost-gpu
+
+# bmhost-ai: the same with the real assistant (the `ai` table: src/ai/lua_ai.c and the
+# C of the assistant), so bm Code's colours of the API words, the assistant panel (F6)
+# and the tools that ask it can be run and recorded on the PC
+BMHOST_AI_SRCS = src/ai/lua_ai.c src/ai/lua_music.c $(filter-out src/ai/nn.c,$(AI_SRCS))
+$(BUILD)/host/bmhost-ai: tests/host/bmhost.c tests/host/stubs.c tests/host/hostnet.c tests/host/host.h tests/audio/wavout.h tests/host/libs.S \
+                         $(BMHOST_OBJS) src/ai/assist.lua src/script/bm3d.lua src/script/bmlib.lua src/script/bmnet.lua src/ai/predict.lua $(BUILD)/words.lua src/ai/padtype.lua \
+                         src/script/riff.lua $(BMHOST_AI_SRCS) src/ai/*.h $(BUILD)/assist.bin
+	$(HOSTCC) -O2 -g -Wall -Wextra -D_DEFAULT_SOURCE -DBMHOST_AI -DBM_HOST_TEST -Itests/host/shim -Isrc -Isrc/bm -Ithird_party/lua -I$(BUILD) \
+	    -o $@ tests/host/bmhost.c tests/host/stubs.c tests/host/hostnet.c tests/host/libs.S $(BMHOST_OBJS) $(BMHOST_AI_SRCS) -lm
+bmhost-ai: $(BUILD)/host/bmhost-ai
+
+# the frame queue's 2D (M35): frames with the queue off and on, the same
+test-queue2d: $(BUILD)/host/bmhost-gpu
+	$(PYTHON) tests/gpu/queue2d.py $(BUILD)
+
+.DEFAULT_GOAL := all
+.PHONY: FORCE test-keymap test-gameapi test-write test-shot test-shot test-profile test-online test-bmnet test-loading test-smp test-qpu test-etc1 test-gpu3d test-impostor test-queue2d test-b3d test-v3d bench3d count-insns all clean firmware image \
+        image-pi1 sdcard install sdcard-chainloader sdcard-stress qemu qemu7 qemu-screenshot \
+        run-serial test test-map3d test-bm test-res test-ai test-img2mesh ai-model test-predict test-padtype predict-bench syllables test-usb test-audio \
+        test-music music-model \
+        test-fat test-sdk-b16 test-sound test-net test-http test-https test-release \
+        release disasm wav test-hyp test-zero2 \
+ bmhost bmhost-gpu bmhost-ai \
+        test-catalog test-github test-lan test-host test-qemu
+
+all: $(BUILD)/kernel.img $(K7) $(BUILD)/chainloader.img $(GAME_CARTS)
+
+# (one rule per directory: a pattern rule with several targets would be one
+# recipe making them all)
+$(BUILD)/k/%.S.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/l/%.S.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/k7/%.S.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/k/%.c.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD)/k7/%.c.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD)/l/%.c.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(LCFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD)/kernel.elf: $(KERNEL_OBJS) linker.ld
+	$(CC) $(LDFLAGS) -T linker.ld -Wl,-Map=$(BUILD)/kernel.map $(KERNEL_OBJS) $(LDLIBS) -o $@
+
+$(BUILD)/kernel7.elf: $(KERNEL7_OBJS) linker.ld
+	$(CC) $(LDFLAGS) -T linker.ld -Wl,-Map=$(BUILD)/kernel7.map $(KERNEL7_OBJS) $(LDLIBS) -o $@
+
+$(BUILD)/chainloader.elf: $(LOADER_OBJS) chainloader/linker.ld
+	$(CC) $(LDFLAGS) -T chainloader/linker.ld -Wl,-Map=$(BUILD)/chainloader.map $(LOADER_OBJS) $(LLDLIBS) -o $@
+
+$(BUILD)/%.img: $(BUILD)/%.elf
+	$(OBJCOPY) -O binary $< $@
+	@echo "$@: $$(stat -c %s $@) bytes"
+
+disasm: $(BUILD)/kernel.elf $(BUILD)/chainloader.elf
+	$(OBJDUMP) -d $(BUILD)/kernel.elf > $(BUILD)/kernel.lst
+	$(OBJDUMP) -d $(BUILD)/chainloader.elf > $(BUILD)/chainloader.lst
+
+firmware:
+	./scripts/fetch-firmware.sh $(FW_DIR)
+
+# FAT32 boot partition contents. KERNEL=chainloader puts the serial loader on
+# the card instead of the kernel (flash it once, then use `make run-serial`).
+# Cartridges go to carts/ (the menu also looks in the root directory).
+# Only the games: the native demo and the stress test live in the kernel
+# (monitor `n`, the Stress test of the Dev tab), not in the Games tab.
+# Both kernels go on the card (kernel7.img with ZERO2=1): config.txt makes
+# the firmware start kernel7.img on a Pi Zero 2 W and kernel.img on the
+# other boards, so one card works in every Pi bm runs on.
+KERNEL ?= kernel
+SD_CARTS := $(GAME_CARTS)
+# the WiFi and Bluetooth chips' firmware (make firmware), in bm/: the Zero
+# W's BCM43438, then the Zero 2 W's CYW43436 (two versions of the chip)
+RADIO_FW := BCM43430A1.hcd brcmfmac43430-sdio.bin brcmfmac43430-sdio.txt brcmfmac43430-sdio.clm_blob \
+            SYN43430A1.hcd SYN43430B0.hcd brcmfmac43436-sdio.bin brcmfmac43436-sdio.txt \
+            brcmfmac43436-sdio.clm_blob brcmfmac43436s-sdio.bin brcmfmac43436s-sdio.txt
+sdcard: $(BUILD)/$(KERNEL).img $(K7) $(SD_CARTS)
+	@test -f $(FW_DIR)/start.elf || { echo "Run 'make firmware' first"; exit 1; }
+	@mkdir -p $(DIST)/carts
+	cp $(FW_DIR)/bootcode.bin $(FW_DIR)/start.elf $(FW_DIR)/fixup.dat $(DIST)/
+	cp boot/config.txt $(DIST)/
+	cp $(BUILD)/$(KERNEL).img $(DIST)/kernel.img
+	$(if $(K7),cp $(K7) $(DIST)/kernel7.img,rm -f $(DIST)/kernel7.img)
+	rm -f $(DIST)/carts/*.bm       # the old extension (now .bm)
+	rm -f $(DIST)/carts/*.cart     # the old .cart format: bm no longer plays it
+	cp $(SD_CARTS) $(DIST)/carts/
+	mkdir -p $(DIST)/bm && cp boot/ca.pem $(DIST)/bm/ca.pem
+	@for f in $(RADIO_FW); do \
+	    if [ -f $(FW_DIR)/$$f ]; then mkdir -p $(DIST)/bm && cp $(FW_DIR)/$$f $(DIST)/bm/ && \
+	        echo "cp $$f -> $(DIST)/bm/"; fi; done
+	@echo "Copy the contents of $(DIST)/ ($(KERNEL)$(if $(K7), and kernel7)) to the root of a FAT32 SD card."
+
+# Whole SD card image (MBR + FAT32): firmware, config, both kernels and the
+# cartridges. Write it with Raspberry Pi Imager ("Use custom"), balenaEtcher
+# or dd. Needs dosfstools and mtools. kernel.img is the same for every
+# BCM2835 board, kernel7.img (ZERO2=1) is the Pi Zero 2 W's; image-pi1 leaves out the
+# WiFi/Bluetooth chips' firmware and kernel7.img (the Pi 1 has no radio; on
+# the B / B+ the network is the Ethernet).
+IMAGE_FILES = $(FW_DIR)/bootcode.bin=bootcode.bin $(FW_DIR)/start.elf=start.elf \
+              $(FW_DIR)/fixup.dat=fixup.dat boot/config.txt=config.txt \
+              $(BUILD)/kernel.img=kernel.img \
+              $(foreach c,$(SD_CARTS),$(c)=carts/$(notdir $(c))) \
+              boot/ca.pem=bm/ca.pem
+image: $(BUILD)/kernel.img $(K7) $(SD_CARTS)
+	@test -f $(FW_DIR)/start.elf || { echo "Run 'make firmware' first"; exit 1; }
+	@mkdir -p $(DIST)
+	$(PYTHON) scripts/mksd.py $(DIST)/bm.img --size-mib 64 --label BM $(IMAGE_FILES) \
+	    $(if $(K7),$(K7)=kernel7.img) \
+	    $(foreach f,$(RADIO_FW),$(if $(wildcard $(FW_DIR)/$(f)),$(FW_DIR)/$(f)=bm/$(f)))
+
+image-pi1: $(BUILD)/kernel.img $(SD_CARTS)
+	@test -f $(FW_DIR)/start.elf || { echo "Run 'make firmware' first"; exit 1; }
+	@mkdir -p $(DIST)
+	$(PYTHON) scripts/mksd.py $(DIST)/bm-pi1.img --size-mib 64 --label BM $(IMAGE_FILES)
+
+# The files of a release (M19), in $(DIST)/release: kernel.img and
+# kernel7.img (the Pi Zero 2 W's, ZERO2=1), the games, bm/ca.pem and manifest.txt
+# with where each goes, its size and SHA-256,
+# signed (manifest.sig) with the key in BM_RELEASE_KEY (the environment;
+# on GitHub the repository's secret). CI on a tag v*:
+#   make release VERSION=v0.1.0 RELEASE_FLAGS=--require-key
+# The signature must match keys/release-pub.pem, the key in the kernel.
+RELEASE_DIR := $(DIST)/release
+RELEASE_PUB ?= keys/release-pub.pem
+# RGB30_KERNEL=build/rgb30/kernel8.img (made first with make TARGET=rgb30):
+# the RGB30's manifest-rgb30 (kernel8.img, bm/ca.pem) in the same release,
+# for its System > Updates
+RGB30_KERNEL ?=
+release: $(BUILD)/kernel.img $(K7) $(GAME_CARTS)
+	rm -rf $(RELEASE_DIR)
+	$(PYTHON) scripts/mkrelease.py $(RELEASE_DIR) --version $(VERSION) --commit $$(git rev-parse HEAD) \
+	    --file $(BUILD)/kernel.img:/kernel.img $(if $(K7),--file $(K7):/kernel7.img) \
+	    $(foreach c,$(GAME_CARTS),--file $(c):/carts/$(notdir $(c))) \
+	    --file boot/ca.pem:/bm/ca.pem --pub $(RELEASE_PUB) $(RELEASE_FLAGS)
+	$(if $(RGB30_KERNEL),$(PYTHON) scripts/mkrelease.py $(RELEASE_DIR) --manifest manifest-rgb30 \
+	    --version $(VERSION) --commit $$(git rev-parse HEAD) --file $(RGB30_KERNEL):/kernel8.img \
+	    --file boot/ca.pem:/bm/ca.pem --pub $(RELEASE_PUB) $(RELEASE_FLAGS))
+
+# Copies what make sdcard prepared onto a mounted SD card (SD=/mnt/d by
+# default): the kernels, boot files, config.txt, cartridges and the chip
+# firmware in bm/. Settings and saves (bm/CONFIG.TXT, bm/SAVE) are
+# never touched. Uses sudo when the card is not writable (WSL).
+SD ?= /mnt/d
+# the console's folder before the project was renamed bm: moved to bm/
+OLD_DIR := bm33
+
+install: sdcard
+	@test -d $(SD) || { echo "$(SD) is not mounted (sudo mount -t drvfs D: $(SD))"; exit 1; }
+	@S=; [ -w $(SD) ] || S=sudo; \
+	$$S mkdir -p $(SD)/carts $(SD)/bm && \
+	if [ -d $(SD)/$(OLD_DIR) ]; then $$S cp -rn $(SD)/$(OLD_DIR)/. $(SD)/bm/ && $$S rm -rf $(SD)/$(OLD_DIR) && \
+	    echo "moved $(OLD_DIR)/ (settings, saves, firmware) to bm/"; fi && \
+	$$S cp $(DIST)/bootcode.bin $(DIST)/start.elf $(DIST)/fixup.dat $(DIST)/config.txt $(DIST)/kernel.img \
+	    $(if $(K7),$(DIST)/kernel7.img) $(SD)/ && \
+	$$S rm -f $(SD)/carts/demo.cart $(SD)/carts/demo.bm $(SD)/carts/stress.bm \
+	    $(SD)/carts/texroom.bm $(SD)/carts/texroom_hd.bm && \
+	$$S cp -r $(DIST)/carts/* $(SD)/carts/ && \
+	if [ -d $(DIST)/bm ]; then $$S cp $(DIST)/bm/* $(SD)/bm/; fi && \
+	sync && echo "installed on $(SD): kernel $$(git describe --always --dirty), carts, bm/ firmware" && \
+	ls $(SD)/bm
+
+sdcard-chainloader:
+	$(MAKE) sdcard KERNEL=chainloader
+
+# SD card contents with the stress-test kernel (make sdcard-stress)
+sdcard-stress:
+	$(MAKE) sdcard BOOT=stress
+
+# Upload the kernel to a Pi running the chainloader, then open a terminal.
+# Rebooting the Pi (monitor command 'r') re-sends the current kernel.img.
+run-serial: $(BUILD)/kernel.img
+	$(PYTHON) tools/bm_load.py --baud $(BAUD) $(PORT) $<
+
+# QEMU boots raw images at 0x8000 through -bios, like the real firmware.
+QEMU_ARGS := -M raspi0 -serial stdio -serial null
+
+qemu: $(BUILD)/kernel.img
+	$(QEMU) $(QEMU_ARGS) -bios $<
+
+# kernel7.img (Pi Zero 2 W) in raspi2b, a Pi 2 B: QEMU has no Zero 2 W, but
+# the Pi 2 B has the BCM2710's peripherals (and a Cortex-A7, no radio)
+qemu7: $(BUILD)/kernel7.img
+	$(QEMU) -M raspi2b -serial stdio -serial null -bios $<
+
+qemu-screenshot: $(BUILD)/kernel.img
+	./scripts/qemu-screenshot.sh $< $(BUILD)/screen.png
+
+# make test: the tests on the PC, then those in QEMU. The CI runs them on
+# several machines at once: make test-host HOST_SKIP="..." (the PC's, but
+# those named), make test-qemu SHARD=K/N (group K of N of the QEMU tests).
+HOST_TESTS := test-bm test-res test-usb test-fat test-audio test-music test-riff test-sound test-net test-http test-https test-img3d \
+      test-catalog test-github test-lan test-keymap test-gameapi test-write test-shot test-reserved test-spec test-profile test-online test-bmnet test-loading \
+      test-release test-smp test-qpu test-etc1 test-gpu3d test-impostor test-queue2d test-b3d test-v3d test-ai test-predict test-padtype \
+ $(if $(K7),test-hyp)
+# what the QEMU tests read besides `all` (made by the PC's tests too)
+QEMU_DEPS := $(BUILD)/host/meshview
+QEMU_TESTS = $(PYTHON) tests/qemu_test.py --build $(BUILD) $(if $(SHARD),--shard $(SHARD))
+
+test: all $(HOST_TESTS) $(QEMU_DEPS)
+	$(QEMU_TESTS)
+
+test-host: $(filter-out $(HOST_SKIP),$(HOST_TESTS))
+
+test-qemu: all $(QEMU_DEPS)
+	$(QEMU_TESTS)
+
+# The same QEMU tests with kernel7.img, the Pi Zero 2 W's, in raspi2b (the
+# BCM2710's peripherals); those of the BCM2835 boards alone are skipped
+test-zero2: export ZERO2 = 1
+test-zero2: all $(BUILD)/kernel7.img test-hyp $(QEMU_DEPS)
+	$(QEMU_TESTS) --kernel7
+
+$(BUILD)/host/test_bm: tests/bm/test_bm.c src/bm/gfx16.c src/bm/r3d.c src/bm/format.c src/lib/crc32.c src/bm/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/bm/test_bm.c src/bm/gfx16.c src/bm/r3d.c src/bm/format.c src/lib/crc32.c -lm
+
+test-fat: $(BUILD)/host/test_fat
+	$(PYTHON) tests/fs/run.py $<
+
+$(BUILD)/host/test_fat: tests/fs/test_fat.c src/fs/fat.c src/fs/fat.h src/drivers/sd.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/fs/test_fat.c src/fs/fat.c
+
+# Network console on lwIP's loopback interface (the WiFi chip is not in QEMU),
+# then lwIP on the Pi 1 B's Ethernet with a simulated LAN9512 and a DHCP peer
+test-net: $(BUILD)/host/test_netcon $(BUILD)/host/test_ethnet $(BUILD)/host/test_config
+	$(BUILD)/host/test_netcon
+	$(BUILD)/host/test_netcon menu
+	$(BUILD)/host/test_netcon gone
+	$(BUILD)/host/test_ethnet
+	$(BUILD)/host/test_config
+	$(PYTHON) tests/net/check_bm_net_config.py
+
+# bm/config.txt (src/kernel/config.c): the file, and the settings from the PC
+# (netxfer's C, bm_net.py --config, easy_install.sh)
+$(BUILD)/host/test_config: tests/kernel/test_config.c src/kernel/config.c src/kernel/config.h src/lib/printf.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -Wall -Wextra -Isrc -o $@ tests/kernel/test_config.c src/kernel/config.c src/lib/printf.c
+
+$(BUILD)/host/test_ethnet: tests/net/test_ethnet.c src/net/net.c src/net/net.h src/net/cartnet.c src/net/cartnet.h \
+                           src/kernel/fiber.h src/usb/smsc95xx.c src/usb/smsc95xx.h tests/usb/lan9512_sim.c \
+                           tests/usb/lan9512_sim.h $(LWIP_SRCS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -w -DBM_HOST_TEST -Isrc -Isrc/net -Ithird_party/lwip/src/include -o $@ \
+		tests/net/test_ethnet.c src/net/net.c src/net/cartnet.c src/usb/smsc95xx.c tests/usb/lan9512_sim.c $(LWIP_SRCS)
+
+$(BUILD)/host/test_netcon: tests/net/test_netcon.c src/net/netcon.c src/net/netxfer.c src/net/stream.c src/net/*.h src/lib/crc32.c \
+                          src/kernel/fiber.h src/kernel/notice.h $(LWIP_SRCS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -w -DBM_HOST_TEST -Isrc -Isrc/net -Ithird_party/lwip/src/include -o $@ \
+		tests/net/test_netcon.c src/net/netcon.c src/net/netxfer.c src/net/stream.c src/lib/crc32.c $(LWIP_SRCS)
+
+# HTTPS: http.c + tls.c + mbedTLS (the kernel's configuration) over POSIX
+# sockets, against local TLS servers with a test CA made by openssl
+test-https: $(BUILD)/host/test_https
+	$(PYTHON) tests/net/run_https_test.py $(BUILD)/host/test_https
+
+$(BUILD)/host/test_https: tests/net/test_https.c tests/net/stream_posix.c src/net/tls.c src/net/http.c \
+                          src/net/http_kernel.c src/net/*.h $(MBEDTLS_SRCS) boot/ca.pem
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -w -DBM_HOST_TEST -Isrc -Isrc/net -Ithird_party/mbedtls/include \
+		-DMBEDTLS_CONFIG_FILE='"bm_mbedtls.h"' -DHTTP_USER_AGENT='"test"' -o $@ \
+		tests/net/test_https.c tests/net/stream_posix.c src/net/tls.c src/net/http.c \
+		src/net/http_kernel.c $(MBEDTLS_SRCS)
+
+# Release manifests (M19): scripts/mkrelease.py signs with a test key made
+# by openssl, src/net/release.c checks signature, lines and files
+test-release: $(BUILD)/host/test_release
+	$(PYTHON) tests/net/run_release_test.py $(BUILD)/host/test_release
+
+$(BUILD)/host/test_release: tests/net/test_release.c src/net/release.c src/net/release.h $(MBEDTLS_SRCS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -w -DBM_HOST_TEST -Isrc -Isrc/net -Ithird_party/mbedtls/include \
+		-DMBEDTLS_CONFIG_FILE='"bm_mbedtls.h"' -o $@ tests/net/test_release.c src/net/release.c $(MBEDTLS_SRCS)
+
+# The Market's catalog (M25): scripts/mkmarket.py checks and signs a folder
+# of games with a test key, src/net/catalog.c checks signature, records and
+# files, the kernel's PNG reader decodes the covers
+test-catalog: $(BUILD)/host/test_catalog
+	$(PYTHON) tests/net/run_catalog_test.py $(BUILD)/host/test_catalog
+
+$(BUILD)/host/test_catalog: tests/net/test_catalog.c src/net/catalog.c src/net/catalog.h \
+                            src/bm/png.c src/bm/png.h $(MBEDTLS_SRCS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -w -DBM_HOST_TEST -Isrc -Isrc/net -Ithird_party/mbedtls/include \
+		-DMBEDTLS_CONFIG_FILE='"bm_mbedtls.h"' -o $@ tests/net/test_catalog.c src/net/catalog.c \
+		src/bm/png.c $(MBEDTLS_SRCS) -lm
+
+# Games between consoles on the home network (M24): src/net/lan.c on lwIP's
+# loopback, sender and receiver in one process
+test-lan: $(BUILD)/host/test_lan
+	$(BUILD)/host/test_lan
+
+$(BUILD)/host/test_lan: tests/net/test_lan.c src/net/lan.c src/net/lan.h src/net/stream.c $(LWIP_SRCS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -w -DBM_HOST_TEST -Isrc -Isrc/net -Ithird_party/lwip/src/include -Ithird_party/mbedtls/include \
+		-DMBEDTLS_CONFIG_FILE='"bm_mbedtls.h"' -o $@ tests/net/test_lan.c src/net/lan.c src/net/stream.c \
+		third_party/mbedtls/library/sha256.c third_party/mbedtls/library/platform_util.c $(LWIP_SRCS)
+
+# Publishing to the Market from the console (M25): src/net/github.c over
+# POSIX sockets against a fake GitHub API (branch or fork, files, pull request);
+# and the reports (src/kernel/reports.c): their names, a file on a branch
+test-github: $(BUILD)/host/test_github $(BUILD)/host/test_report $(BUILD)/host/test_reports
+	$(BUILD)/host/test_report
+	$(BUILD)/host/test_reports
+	$(PYTHON) tests/net/run_github_test.py $(BUILD)/host/test_github
+
+# the reports waiting that go by themselves (src/kernel/reports.c), with a
+# fake SD card, GitHub, network and clock
+$(BUILD)/host/test_reports: tests/kernel/test_reports.c src/kernel/reports.c src/kernel/reports.h src/net/report.c \
+                            src/lib/printf.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -Wall -Wextra -Isrc -o $@ tests/kernel/test_reports.c src/kernel/reports.c src/net/report.c \
+		src/lib/printf.c
+
+$(BUILD)/host/test_report: tests/net/test_report.c src/net/report.c src/net/report.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -Wall -Wextra -Isrc -o $@ tests/net/test_report.c src/net/report.c
+
+$(BUILD)/host/test_github: tests/net/test_github.c src/net/github.c src/net/github.h src/net/http.c src/net/http.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -Wall -Wextra -Isrc -Isrc/net -DHTTP_USER_AGENT='"test"' -o $@ tests/net/test_github.c \
+		src/net/github.c src/net/http.c
+
+# kernel7.img's start in Hyp mode, as the Pi Zero 2 W's firmware does it:
+# start.S and vectors.S in QEMU's virt machine with the virtualization
+# extensions (raspi2b starts in SVC), tests/boot/hyp_main.c on its PL011
+HYP_DIR := $(BUILD)/hyp
+$(HYP_DIR)/hyp.elf: tests/boot/hyp_main.c $(BUILD)/k7/src/boot/start.S.o $(BUILD)/k7/src/kernel/vectors.S.o linker.ld
+	@mkdir -p $(dir $@)
+	sed 's/^    \. = 0x8000;/    . = 0x40008000;/' linker.ld > $(HYP_DIR)/linker.ld
+	$(CC) $(ARCH7) -DBM_ZERO2 -O2 -Wall -Wextra -Isrc/kernel -ffreestanding -nostdlib -nostartfiles \
+	    -T $(HYP_DIR)/linker.ld tests/boot/hyp_main.c $(BUILD)/k7/src/boot/start.S.o \
+	    $(BUILD)/k7/src/kernel/vectors.S.o -lgcc -o $@
+
+test-hyp: $(HYP_DIR)/hyp.elf
+	$(PYTHON) tests/boot/run_hyp.py $(QEMU) $<
+
+# Bluetooth LE pairing cryptography (SMP), against the spec's sample data
+test-smp: $(BUILD)/host/test_smp
+	$(BUILD)/host/test_smp
+
+$(BUILD)/host/test_smp: tests/bt/smp_test.c src/bt/smp_crypto.c src/bt/smp_crypto.h $(MBEDTLS_SRCS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -w -Isrc -Isrc/net -Ithird_party/mbedtls/include \
+		-DMBEDTLS_CONFIG_FILE='"bm_mbedtls.h"' -o $@ tests/bt/smp_test.c src/bt/smp_crypto.c $(MBEDTLS_SRCS)
+
+# HTTP client over POSIX sockets, against a local Python server
+# the picture-to-model flow (src/net/img3d.c) against a fake service, with the .glb reader
+test-img3d: $(BUILD)/host/test_img3d
+	$(PYTHON) tests/net/run_img3d_test.py $(BUILD)/host/test_img3d $(BUILD)/img3d
+
+$(BUILD)/host/test_img3d: tests/net/test_img3d.c src/net/img3d.c src/net/http.c src/net/*.h $(GLB_SRCS) src/bm/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -Wall -Wextra -Isrc -Isrc/bm -DHTTP_USER_AGENT='"test"' -o $@ tests/net/test_img3d.c src/net/img3d.c src/net/http.c $(GLB_SRCS) -lm
+
+test-http: $(BUILD)/host/test_http
+	$(PYTHON) tests/net/run_http_test.py $(BUILD)/host/test_http
+
+$(BUILD)/host/test_http: tests/net/test_http.c src/net/http.c src/net/http.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O1 -Wall -Wextra -Isrc -DHTTP_USER_AGENT='"test"' -o $@ tests/net/test_http.c src/net/http.c
+
+test-audio: $(BUILD)/host/test_audio $(BUILD)/host/bmrender tests/audio/test_bmaudio.py scripts/bmaudio.py
+	$<
+	$(PYTHON) tests/audio/test_bmaudio.py $(BUILD)/host/bmrender $(BUILD)/audio
+
+# The music assistant (src/ai/music.c): the melody network against the
+# Python reference, every recipe, the words of the requests. `make
+# music-model` trains the network again (numpy) from src/ai/melodies.txt:
+# then commit src/ai/music_net.c. MUSIC_WAV=dir also writes examples.
+test-music: $(BUILD)/host/test_music
+	$(PYTHON) scripts/trainmusic.py --check
+	$< $(MUSIC_WAV)
+
+$(BUILD)/host/test_music: tests/ai/test_music.c src/ai/music.c src/ai/music_net.c src/ai/nn.c src/audio/presets.c \
+                          src/audio/player.c src/audio/synth.c src/ai/*.h src/audio/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/ai/test_music.c src/ai/music.c src/ai/music_net.c src/ai/nn.c \
+	    src/audio/presets.c src/audio/player.c src/audio/synth.c -lm
+
+music-model:
+	$(PYTHON) scripts/trainmusic.py
+
+$(BUILD)/host/test_audio: tests/audio/test_audio.c src/audio/synth.c src/audio/player.c src/audio/presets.c \
+                          src/audio/iec958.c src/audio/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/audio/test_audio.c src/audio/synth.c src/audio/player.c \
+	    src/audio/presets.c src/audio/iec958.c -lm
+
+# A song (or SFX=n) of a sound bank as a WAV file, made on the PC by the
+# console's synthesizer: make wav BANK=carts/sound/demo.json SONG=0
+# BITS=24 (or 32, f32: IEEE floats) for a deeper file than the 16 bits
+BANK ?= carts/sound/demo.json
+SONG ?= 0
+wav: $(BUILD)/host/bmrender
+	$(PYTHON) scripts/bmaudio.py pack $(BANK) -o $(BUILD)/wav.bmau
+	$< $(if $(BITS),--bits $(BITS)) $(BUILD)/wav.bmau $(BUILD)/$(if $(SFX),sfx$(SFX),song$(SONG)).wav \
+	    $(if $(SFX),sfx $(SFX),song $(SONG)) $(SECONDS)
+
+$(BUILD)/host/bmrender: tests/audio/render.c tests/audio/wavout.h src/audio/synth.c src/audio/player.c src/audio/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/audio/render.c src/audio/synth.c src/audio/player.c -lm
+
+test-usb: $(BUILD)/host/test_hid $(BUILD)/host/test_eth $(BUILD)/host/test_board $(BUILD)/host/test_board7
+	$(BUILD)/host/test_hid
+	$(BUILD)/host/test_eth
+	$(BUILD)/host/test_board
+	$(BUILD)/host/test_board7
+
+$(BUILD)/host/test_hid: tests/usb/test_hid.c src/usb/hid.c src/usb/hid.h src/usb/usb.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/usb/test_hid.c src/usb/hid.c
+
+# Ethernet of the Pi 1 B (LAN951x) against a simulated chip
+$(BUILD)/host/test_eth: tests/usb/test_eth.c tests/usb/lan9512_sim.c tests/usb/lan9512_sim.h \
+                        src/usb/smsc95xx.c src/usb/smsc95xx.h src/usb/usb.h src/usb/dwc2.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Wno-format -Isrc -o $@ tests/usb/test_eth.c tests/usb/lan9512_sim.c src/usb/smsc95xx.c
+
+$(BUILD)/host/test_board: tests/usb/test_board.c src/drivers/board.c src/drivers/board.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/usb/test_board.c src/drivers/board.c
+
+$(BUILD)/host/test_board7: tests/usb/test_board.c src/drivers/board.c src/drivers/board.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -DBM_ZERO2 -Isrc -o $@ tests/usb/test_board.c src/drivers/board.c
+
+# the meshes a cartridge builds in its code (cart_meshes(), bm Mesh)
+MESHCAP_SRCS := tests/bm/test_meshcap.c src/bm/meshcap.c src/bm/format.c src/bm/r3d.c src/bm/gfx16.c src/lib/crc32.c
+$(BUILD)/host/test_meshcap: $(MESHCAP_SRCS) src/bm/*.h $(LUA_SRCS) tests/host/libs.S src/script/bmlib.lua src/script/bmnet.lua \
+                            $(BUILD)/words.lua
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc/bm -Isrc -Ithird_party/lua -I$(BUILD) -o $@ $(MESHCAP_SRCS) tests/host/libs.S \
+	    $(LUA_SRCS) -lm
+
+# the dev kit's token counter (stat(11), code_tokens(), the SDK)
+$(BUILD)/host/test_tokens: tests/bm/test_tokens.c src/bm/tokens.c src/bm/tokens.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc/bm -o $@ tests/bm/test_tokens.c src/bm/tokens.c
+
+# the polygon reducer (bm Studio's reduce, tools/bmreduce.py)
+DECIMATE_SRCS := tests/bm/test_decimate.c src/bm/decimate.c src/bm/format.c src/lib/crc32.c
+$(BUILD)/host/test_decimate: $(DECIMATE_SRCS) src/bm/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc/bm -Isrc -o $@ $(DECIMATE_SRCS) -lm
+
+# the .glb reader (the image-to-3D services' files on the console)
+GLB_SRCS := src/bm/glb.c src/bm/json.c src/bm/jpeg.c src/bm/decimate.c src/bm/png.c
+$(BUILD)/host/test_glb: tests/bm/test_glb.c $(GLB_SRCS) src/bm/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc/bm -Isrc -o $@ tests/bm/test_glb.c $(GLB_SRCS) -lm
+
+# the outline maker (a model from a picture without any network, cutout.c)
+CUTOUT_SRCS := src/bm/cutout.c $(GLB_SRCS)
+$(BUILD)/host/test_cutout: tests/bm/test_cutout.c $(CUTOUT_SRCS) src/bm/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc/bm -Isrc -o $@ tests/bm/test_cutout.c $(CUTOUT_SRCS) -lm
+
+# the outline maker as a shared library (ctypes: scripts/bmcutout.py, tools/cutout2mesh.py)
+$(BUILD)/host/libbmcutout.so: $(CUTOUT_SRCS) src/bm/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -shared -fPIC -o $@ $(CUTOUT_SRCS) -lm
+
+# the reducer as a shared library for the PC tools (ctypes: scripts/bmdecimate.py)
+$(BUILD)/host/libbmdecimate.so: src/bm/decimate.c src/bm/decimate.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -shared -fPIC -o $@ src/bm/decimate.c -lm
+
+$(BUILD)/meshcap-test.bm: tests/bm/meshcap_cart.lua scripts/mkbm.py
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< --title "meshcap test" --author tests
+
+# the 3D map engine (map3d.c)
+MAP3D_TEST_SRCS := src/bm/map3d.c src/bm/r3d.c src/bm/gfx16.c
+$(BUILD)/host/test_map3d: tests/bm/test_map3d.c $(MAP3D_TEST_SRCS) $(BMHOST_LUA) src/bm/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc/bm -Isrc -Ithird_party/lua -o $@ tests/bm/test_map3d.c $(MAP3D_TEST_SRCS) $(BMHOST_LUA) -lm
+
+test-map3d: $(BUILD)/host/test_map3d
+	$(BUILD)/host/test_map3d
+
+test-bm: $(BUILD)/host/test_bm $(BUILD)/demo.bm $(BUILD)/host/test_meshcap \
+         $(BUILD)/texroom.bm $(BUILD)/meshcap-test.bm \
+         $(BUILD)/host/test_decimate $(BUILD)/carts/village.bm $(BUILD)/host/libbmdecimate.so \
+         $(BUILD)/host/test_glb $(BUILD)/host/test_cutout $(BUILD)/host/libbmcutout.so $(BUILD)/host/test_tokens
+	$< $(BUILD)/demo.bm
+	$(BUILD)/host/test_tokens carts/editor/main.lua carts/pong/main.lua
+	$(BUILD)/host/test_decimate $(BUILD)/carts/village.bm
+	$(PYTHON) tests/bm/run_glb_test.py $(BUILD)/host/test_glb $(BUILD)/glb
+	$(PYTHON) tests/bm/run_cutout_test.py $(BUILD)/host/test_cutout $(BUILD)/cutout
+	$(PYTHON) tools/cutout2mesh.py $(BUILD)/cutout/lolli_alpha.png -o $(BUILD)/cutout/tool.bm
+	$(PYTHON) tools/cutout2mesh.py $(BUILD)/cutout/lolli_white.png -o $(BUILD)/cutout/tool.bm --lathe --name vase
+	$(PYTHON) tools/bmreduce.py $(BUILD)/carts/village.bm --ratio 0.5 -o $(BUILD)/village-half.bm
+	$(BUILD)/host/test_meshcap src/bm/runtime.c \
+	    $(BUILD)/meshcap-test.bm '!stop here,wheel:1,crate:12,cars1_body:1,gem:2' \
+	    $(BUILD)/texroom.bm floor_mesh,walls_mesh,crate_mesh,pillar_mesh
+
+# The button prompts (bm-ui): every one checked, and both sets drawn 3x as
+# on a TV into build/prompts/prompts.png (the menu) and chips.png (the apps)
+$(BUILD)/host/test_prompts: tests/ui/test_prompts.c src/kernel/prompts.c src/kernel/prompts.h \
+                            src/gfx/font8x16.c src/gfx/font6x12.c src/lib/crc32.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/ui/test_prompts.c src/kernel/prompts.c \
+		src/gfx/font8x16.c src/gfx/font6x12.c src/lib/crc32.c -lm
+
+test-prompts: $(BUILD)/host/test_prompts
+	@mkdir -p $(BUILD)/prompts
+	$< $(BUILD)/prompts
+
+# The assistant (M30): C features and network against the Python reference,
+# answers to the held-out questions, sprite generator
+AI_SRCS := src/ai/assist.c src/ai/nn.c src/ai/text.c src/ai/sprite.c src/ai/mesh.c src/ai/mesh_chars.c src/ai/mesh_skin.c src/ai/mesh_script.c \
+           src/ai/music.c src/ai/music_net.c
+$(BUILD)/host/test_ai: tests/ai/test_ai.c $(AI_SRCS) src/ai/*.h src/lib/crc32.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/ai/test_ai.c $(AI_SRCS) src/lib/crc32.c -lm
+
+# Lua for the PC with the `ai` table: the panel's tests
+$(BUILD)/host/luaai: tests/ai/luaai.c src/ai/lua_ai.c src/ai/lua_music.c $(AI_SRCS) src/ai/*.h src/lib/crc32.c $(LUA_SRCS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -w -DBM_HOST_TEST -Isrc -Ithird_party/lua -o $@ tests/ai/luaai.c src/ai/lua_ai.c src/ai/lua_music.c \
+		$(AI_SRCS) src/lib/crc32.c $(LUA_SRCS) -lm
+
+# The 3D recipes drawn on the PC: build/ai/meshes.ppm (every recipe) and
+# `meshview one mech out.ppm` (one, from four sides and in its poses)
+$(BUILD)/host/meshview: tests/ai/meshview.c $(AI_SRCS) src/ai/*.h src/lib/crc32.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/ai/meshview.c $(AI_SRCS) src/lib/crc32.c -lm
+
+# The word completion on the PC: words, contexts, suggestions, and the
+# benchmark texts typed again with Tab
+test-predict: $(BUILD)/host/luahost $(BUILD)/words.lua
+	$(BUILD)/host/luahost tests/predict/predict_test.lua $(BUILD)
+
+# Typing with the pad (docs/PADTYPE.md): the rules of compose and of the
+# on-screen keyboard, every practice text written to the end by padtype's
+# coach (the presses a character), then Pad Typing in bmhost copying the
+# first text of each language to its result (shots in build/padtype/)
+test-padtype: $(BUILD)/host/luahost $(BUILD)/words.lua $(BUILD)/host/bmhost-bin $(BUILD)/carts/typing.bm
+	$(BUILD)/host/luahost tests/padtype/pad_test.lua $(BUILD)
+	for l in it en lua; do \
+	  mkdir -p $(BUILD)/padtype/$$l && \
+	  $(BUILD)/host/luahost tests/padtype/script.lua $(BUILD) $$l 1 $(BUILD)/padtype/$$l.txt && \
+	  $(BUILD)/host/bmhost-bin $(BUILD)/carts/typing.bm --input $(BUILD)/padtype/$$l.txt \
+	      --shots $(BUILD)/padtype/$$l --seconds 300 > $(BUILD)/padtype/$$l.log 2>&1 && \
+	  grep "typing: done" $(BUILD)/padtype/$$l.log || { tail -20 $(BUILD)/padtype/$$l.log; exit 1; }; \
+	done
+
+# Its benchmark (docs/PREDICT.md): the keys saved on the texts of 100
+# characters, then the corpus with each group left out of the dictionary
+WORD_FOLDS := giochi informativi lettere narrativa quotidiano tecnica
+predict-bench: $(BUILD)/host/luahost $(BUILD)/words.lua
+	@mkdir -p $(BUILD)/predict
+	for g in $(WORD_FOLDS); do $(PYTHON) scripts/mkwords.py --skip it_$$g -o $(BUILD)/predict/fold_$$g.lua || exit 1; done
+	$(BUILD)/host/luahost tests/predict/bench.lua $(BUILD) --folds
+
+# The syllables of Italian, counted on the same texts (docs/PREDICT.md)
+syllables:
+	$(PYTHON) scripts/syllables.py
+
+test-ai: $(BUILD)/host/test_ai $(BUILD)/assist.bin $(BUILD)/host/luahost $(BUILD)/host/luaai $(BUILD)/host/meshview $(BUILD)/words.lua
+	$< $(BUILD)/assist.bin $(BUILD)/ai/ref.txt
+	$(BUILD)/host/meshview sheet $(BUILD)/ai/meshes.ppm > /dev/null
+	$(BUILD)/host/luahost tests/ai/check_snippets.lua $(BUILD)/ai/snippets.txt
+	$(BUILD)/host/luaai $(BUILD)/assist.bin tests/ai/panel_test.lua $(BUILD)
+	$(BUILD)/host/luaai $(BUILD)/assist.bin tests/ai/act_test.lua
+	$(MAKE) test-img2mesh
+
+# tools/img2mesh.py offline: the recorded replies (the mech in the part
+# language) become a .bm with the model, then one more model in it;
+# tools/meshy2mesh.py on a .glb made by the test (no call to Meshy)
+test-img2mesh: $(BUILD)/host/meshview
+	rm -rf $(BUILD)/img2mesh/test $(BUILD)/img2mesh/test.bm && mkdir -p $(BUILD)/img2mesh
+	$< one knight $(BUILD)/img2mesh/knight.ppm > /dev/null
+	$(PYTHON) tools/img2mesh.py $(BUILD)/img2mesh/knight.ppm -o $(BUILD)/img2mesh/test.bm --name mech \
+	    --replay tests/ai/img2mesh/replay --work $(BUILD)/img2mesh/test --rounds 1
+	$(PYTHON) tools/img2mesh.py $(BUILD)/img2mesh/knight.ppm -o $(BUILD)/img2mesh/test.bm --name mech2 \
+	    --replay tests/ai/img2mesh/replay --work $(BUILD)/img2mesh/test2 --rounds 0
+	$(PYTHON) tests/ai/check_img2mesh.py $(BUILD)/img2mesh/test.bm
+	$(PYTHON) tests/ai/check_meshy.py $(BUILD)
+	$(PYTHON) tests/ai/check_local2mesh.py $(BUILD)/local2mesh
+
+# The console's bm Studio, bm Animator, bm Mesh, bm Pixel and the SDK on the
+# PC (luahost), then the files they wrote read by the Python of the build
+# (tests/studio/check_files.py) and by the kernel's parser.
+test-studio: $(BUILD)/host/test_bm $(BUILD)/demo.bm $(BUILD)/host/luahost $(BUILD)/carts/village.bm \
+             $(BUILD)/host/test_meshcap
+	$(BUILD)/host/luahost tests/studio/bmui_host.lua .
+	rm -rf $(BUILD)/studio3d-sd && mkdir -p $(BUILD)/studio3d-sd/carts
+	cp $(BUILD)/carts/village.bm $(BUILD)/studio3d-sd/carts/
+	$(BUILD)/host/luahost tests/studio/tools3d_host.lua . $(BUILD)/studio3d-sd
+	rm -rf $(BUILD)/sdk-sd && mkdir -p $(BUILD)/sdk-sd/carts
+	cp $(BUILD)/carts/village.bm $(BUILD)/sdk-sd/carts/
+	$(BUILD)/host/luahost tests/studio/sdk_host.lua . $(BUILD)/sdk-sd
+	rm -rf $(BUILD)/pixel-sd && mkdir -p $(BUILD)/pixel-sd/carts
+	cp $(BUILD)/carts/village.bm $(BUILD)/demo.bm $(BUILD)/pixel-sd/carts/
+	$(BUILD)/host/luahost tests/studio/pixel_host.lua . $(BUILD)/pixel-sd
+	$(BUILD)/host/test_meshcap src/bm/runtime.c $(BUILD)/pixel-sd/carts/village.bme "" $(BUILD)/pixel-sd/carts/newspr.bme ""
+	$(PYTHON) tests/studio/anim_figure.py $(BUILD)/anim-figure.bm
+	$(BUILD)/host/test_bm $(BUILD)/demo.bm $(BUILD)/anim-figure.bm $(BUILD)/studio3d-sd/carts/blocks.bme
+
+# bm SDK (RGB30), the .b16 edition, on the PC: its layout, every frame inside
+# 360x360 on the 8x16 grid, the RGB30's pad on every page and action, the saves,
+# build and try of the RGB30's kernel tool, none of the Pi's other programs. Not in
+# HOST_TESTS (the Pi's): run it when the edition changes.
+test-sdk-b16: $(BUILD)/host/luahost $(BUILD)/sdk_b16/main.lua $(BUILD)/carts/village.bm
+	rm -rf $(BUILD)/sdk-b16-sd && mkdir -p $(BUILD)/sdk-b16-sd/carts $(BUILD)/sdk-b16-sd/bm
+	cp $(BUILD)/carts/village.bm $(BUILD)/sdk-b16-sd/bm/village.b16
+	$(BUILD)/host/luahost tests/studio/sdk_b16_host.lua . $(BUILD)/sdk-b16-sd $(BUILD)/sdk_b16/main.lua
+
+# Rasterizer bench (M33): checksums of fixed 3D scenes (a change to r3d.c
+# that should not change the picture must keep them), and with
+# count-insns the ARM instructions per pixel and per triangle (needs
+# gcc-arm-linux-gnueabihf and qemu-user).
+$(BUILD)/host/bench3d: tests/bm/bench3d.c src/bm/gfx16.c src/bm/r3d.c src/bm/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/bm/bench3d.c src/bm/gfx16.c src/bm/r3d.c -lm
+
+bench3d: $(BUILD)/host/bench3d
+	$<
+
+count-insns:
+	$(PYTHON) tests/bm/count_insns.py
+
+# The GPU backend of the 3D (M33) on a V3D emulator, against the software
+# rasterizer, for the four byte orders its probe must find
+$(BUILD)/host/test_gpu3d: tests/gpu/test_gpu3d.c tests/gpu/v3d_emu.c tests/gpu/v3d_emu.h src/gpu/gpu3d.c \
+                          src/gpu/gpu3d.h src/gpu/v3d_cl.c src/gpu/v3d.h src/gpu/shaders.h src/bm/r3d.c \
+                          src/bm/gfx16.c src/bm/*.h src/gpu/etc1.c src/gpu/etc1.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -Itests/gpu -Daligned_alloc=test_aligned_alloc -Dfree=test_free \
+	    -c src/gpu/gpu3d.c -o $@-gpu3d.o
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -Itests/gpu -o $@ tests/gpu/test_gpu3d.c tests/gpu/v3d_emu.c \
+	    src/gpu/v3d_cl.c src/gpu/etc1.c src/bm/r3d.c src/bm/gfx16.c $@-gpu3d.o -lm
+
+# ETC1 blocks (M39, bm3d 7.3): the decoder against hand-made blocks, the
+# encoder's error and its bits always the same
+$(BUILD)/host/test_etc1: tests/gpu/test_etc1.c src/gpu/etc1.c src/gpu/etc1.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/gpu/test_etc1.c src/gpu/etc1.c -lm
+
+test-etc1: $(BUILD)/host/test_etc1
+	$<
+
+# Impostors (far small meshes as one quad, off by default): off the picture
+# of before, on fewer triangles and a bounded difference, the same choice on
+# the ARM and the GPU (V3D emulator)
+$(BUILD)/host/test_impostor: tests/bm/test_impostor.c tests/gpu/v3d_emu.c tests/gpu/v3d_emu.h src/gpu/gpu3d.c                              src/gpu/gpu3d.h src/gpu/v3d_cl.c src/gpu/v3d.h src/gpu/shaders.h src/bm/r3d.c                              src/bm/gfx16.c src/bm/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -Itests/gpu -Daligned_alloc=test_aligned_alloc -Dfree=test_free 	    -c src/gpu/gpu3d.c -o $@-gpu3d.o
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -Itests/gpu -o $@ tests/bm/test_impostor.c tests/gpu/v3d_emu.c 	    src/gpu/v3d_cl.c src/gpu/etc1.c src/bm/r3d.c src/bm/gfx16.c $@-gpu3d.o -lm
+
+test-impostor: $(BUILD)/host/test_impostor
+	$<
+
+# The 3D Bench (src/bm/b3d.c) on the PC: the V3D emulated, quick mode,
+# twice (the second run reads the first's report); pages in build/b3d
+$(BUILD)/host/b3d_host: tests/bm/b3d_host.c src/bm/b3d.c src/bm/b3d.h tests/gpu/v3d_emu.c tests/gpu/v3d_emu.h \
+                        src/gpu/gpu3d.c src/gpu/gpu3d.h src/gpu/v3d_cl.c src/gpu/v3d.h src/gpu/shaders.h \
+                        src/gpu/version3d.h src/gpu/etc1.c src/gpu/etc1.h src/bm/r3d.c src/bm/gfx16.c src/gfx/font8x16.c \
+                        src/gfx/font6x12.c src/bm/*.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -Itests/gpu -Daligned_alloc=test_aligned_alloc -Dfree=test_free \
+	    -c src/gpu/gpu3d.c -o $@-gpu3d.o
+	$(HOSTCC) -O2 -Wall -Wextra -Isrc -Itests/gpu -o $@ tests/bm/b3d_host.c src/bm/b3d.c tests/gpu/v3d_emu.c \
+	    src/gpu/v3d_cl.c src/gpu/etc1.c src/bm/r3d.c src/bm/gfx16.c src/gfx/font8x16.c src/gfx/font6x12.c $@-gpu3d.o -lm
+
+test-b3d: $(BUILD)/host/b3d_host
+	$< --selftest
+	rm -rf $(BUILD)/b3d-stop && mkdir -p $(BUILD)/b3d-stop
+	$< $(BUILD)/b3d-stop --stop=5
+	rm -rf $(BUILD)/b3d && mkdir -p $(BUILD)/b3d
+	$< $(BUILD)/b3d
+	$< $(BUILD)/b3d
+	$(PYTHON) tests/bm/check_b3d.py $(BUILD)/b3d
+
+# The V3D driver's job runner against a model of the V3D's registers
+$(BUILD)/host/test_v3d: tests/gpu/test_v3d.c tests/gpu/mock/drivers/mmio.h src/gpu/v3d.c src/gpu/v3d.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Wno-format -Itests/gpu/mock -Isrc -o $@ tests/gpu/test_v3d.c src/gpu/v3d.c
+
+test-v3d: $(BUILD)/host/test_v3d
+	$<
+
+test-gpu3d: $(BUILD)/host/test_gpu3d
+	$< 1 0 0 0 0 0
+	$< 0 0 1 1 1 1
+	$< 1 1 1 0 1 2
+	$< 0 1 0 1 0 0
+	$< 1 0 2 0 0 0
+	EMU_HANG_ZCLEAR=1 $< 1 0 0 0 0 0
+	EMU_VPM_WORDS=1 $< 0 1 0 0 1 0
+	EMU_NO_THREADS=1 $< 1 0 0 0 0 0
+	EMU_T16_ALPHA=1 $< 0 1 1 0 0 0
+	EMU_T16_ALPHA=2 $< 1 0 0 0 0 0
+	EMU_T16_LOSSY=1 $< 1 0 0 0 0 0
+	EMU_T16_LOSSY=1 EMU_T16_ALPHA=1 $< 0 1 1 0 0 0
+	EMU_ETC1=1 $< 0 1 1 0 0 0
+	EMU_ETC1=2 $< 1 0 0 0 0 0
+	EMU_ETC1=3 $< 1 0 0 0 0 0
+
+# QPU shaders (M33): the assembler against shaders run on a Pi, and
+# src/gpu/shaders.h up to date with the sources in tools/qpuasm.py
+test-qpu:
+	$(PYTHON) tools/qpuasm.py -o $(BUILD)/shaders.h
+	cmp $(BUILD)/shaders.h src/gpu/shaders.h
+
+HOSTCC ?= cc
+
+clean:
+	rm -rf build build-stress $(DIST)
+
+-include $(KERNEL_OBJS:.o=.d) $(KERNEL7_OBJS:.o=.d) $(LOADER_OBJS:.o=.d)
+
+endif   # TARGET
+
+# Screenshots (src/bm/shot.c, shot() and the system's key; docs/SCREENSHOTS.md): a cart asks for
+# them in bmhost, tests/shot/check.py reads the PNGs it finds in the SD's bm/shots
+$(BUILD)/shot-test.bm: tests/shot/cart.lua scripts/mkbm.py
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< --title "shot test" --author tests
+test-shot: $(BUILD)/host/bmhost-bin $(BUILD)/shot-test.bm tests/shot/check.py tests/shot/key.txt
+	rm -rf $(BUILD)/shot-sd && mkdir -p $(BUILD)/shot-sd
+	$< $(BUILD)/shot-test.bm --sd $(BUILD)/shot-sd --input tests/shot/key.txt --seconds 1 2>&1 | tee $(BUILD)/shot-test.log | grep "shot:"
+	$(PYTHON) tests/shot/check.py $(BUILD)/shot-sd
+
+# The PDF manuals (docs/MANUALS.md): en and it, theme A; test-manuals says if one language is behind
+manuals:
+	$(PYTHON) scripts/manuals.py build -o manuals/pdf
+test-manuals:
+	$(PYTHON) scripts/manuals.py check
+.PHONY: manuals test-manuals
+
+# A game cannot create a file named as one of bm's tools (src/bm/runtime.c reserved_tool_name)
+$(BUILD)/reserved-test.bm: tests/tools/reserved.lua scripts/mkbm.py
+	$(PYTHON) scripts/mkbm.py -o $@ --lua $< --title "reserved test" --author tests
+test-reserved: $(BUILD)/host/bmhost-bin $(BUILD)/reserved-test.bm
+	rm -rf $(BUILD)/reserved-sd && mkdir -p $(BUILD)/reserved-sd/carts
+	$< $(BUILD)/reserved-test.bm --sd $(BUILD)/reserved-sd --seconds 1 2>&1 | tee $(BUILD)/reserved-test.log | grep "^reserved"
+	@for n in pixel.bm SDK.BM assistan.bm code.bm Studio.bm sdk_b16.bm; do \
+	    grep -q "^reserved: $$n false .*kept for one of bm's tools" $(BUILD)/reserved-test.log || { echo "$$n was not refused"; exit 1; }; done
+	@for n in ok.bm pixels.bm; do grep -q "^reserved: $$n true" $(BUILD)/reserved-test.log || { echo "$$n was refused"; exit 1; }; done
+	@echo "reserved: 8/8 checks passed"
+.PHONY: test-reserved
+
+# A cartridge that needs a newer revision of the specification (INFO "spec", src/bm/bm.h BM_SPEC_REV) is refused with a
+# message; one that needs the kernel's revision or none runs
+test-spec: $(BUILD)/host/bmhost-bin tests/spec/cart.lua scripts/mkbm.py
+	@mkdir -p $(BUILD)/spec
+	@printf 'name: spec test\nspec: 1\n' > $(BUILD)/spec/ok.info
+	@printf 'name: spec test\nspec: 999\n' > $(BUILD)/spec/new.info
+	@$(PYTHON) scripts/mkbm.py -o $(BUILD)/spec/ok.bm --lua tests/spec/cart.lua --info $(BUILD)/spec/ok.info > /dev/null
+	@$(PYTHON) scripts/mkbm.py -o $(BUILD)/spec/none.bm --lua tests/spec/cart.lua --title none > /dev/null
+	@$(PYTHON) scripts/mkbm.py -o $(BUILD)/spec/new.bm --lua tests/spec/cart.lua --info $(BUILD)/spec/new.info > /dev/null
+	@$(BUILD)/host/bmhost-bin $(BUILD)/spec/ok.bm --seconds 1 2>&1 | grep -q "spec: ran" || { echo "spec 1 did not run"; exit 1; }
+	@$(BUILD)/host/bmhost-bin $(BUILD)/spec/none.bm --seconds 1 2>&1 | grep -q "spec: ran" || { echo "no spec did not run"; exit 1; }
+	@$(BUILD)/host/bmhost-bin $(BUILD)/spec/new.bm --seconds 1 2>&1 | grep -q "needs revision 999" || { echo "spec 999 was not refused"; exit 1; }
+	@echo "spec: 3/3 checks passed"
+.PHONY: test-spec
+
+

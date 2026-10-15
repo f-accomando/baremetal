@@ -1,0 +1,325 @@
+# Input: buttons, sticks, players, keyboard.
+
+== btn
+kind: api
+name: btn
+title: btn(i, [p]) - tasto premuto (finché lo tieni)
+title_en: btn(i, [p]) - button held (as long as you hold it)
+ask: sapere se un tasto è premuto | leggere i tasti | is a button pressed | read input
+ask: tasto tenuto premuto | frecce della tastiera | pulsante del controller | gamepad
+ask: quali numeri hanno i tasti | tasto A e tasto B | button numbers
+see: btnp, stick, move_arrows
+text:
+true finché il tasto i è premuto. 0 sinistra, 1 destra, 2 su, 3 giù,
+4 A, 5 B, 6 X, 7 Y, 8 Start, 9 Select. Tastiera: frecce o WASD, A =
+spazio/Z/J, B = X/K, X = C/L, Y = V/I, Start = Invio. Senza p risponde
+qualsiasi controller; con p (1-4) solo quello del giocatore p.
+text_en:
+true while button i is held. 0 left, 1 right, 2 up, 3 down,
+4 A, 5 B, 6 X, 7 Y, 8 Start, 9 Select. Keyboard: arrows or WASD, A =
+space/Z/J, B = X/K, X = C/L, Y = V/I, Start = Enter. Without p any
+controller answers; with p (1-4) only player p's.
+code:
+if btn(0) then x = x - 2 end     -- sinistra
+if btn(1) then x = x + 2 end     -- destra
+if btn(4) then sparo() end       -- A tenuto: fuoco continuo
+
+== btnp
+kind: api
+name: btnp
+title: btnp(i, [p]) - tasto appena premuto (una volta sola)
+title_en: btnp(i, [p]) - button just pressed (only once)
+ask: tasto premuto una volta sola | solo quando premo il tasto | button just pressed
+ask: saltare una volta per pressione | il tasto ripete troppo | press once
+ask: scegliere nel menu con le frecce | evento di pressione
+see: btn
+text:
+true solo nel fotogramma in cui il tasto viene premuto: per saltare, per
+sparare un colpo per pressione, per i menu. btn() invece resta vero finché
+il tasto è giù.
+text_en:
+true only in the frame the button is pressed: to jump, to fire one shot
+per press, for menus. btn() instead stays true as long as the button is
+down.
+code:
+if btnp(4) and on_ground then
+  vy = -6                          -- un salto per pressione
+end
+if btnp(2) then choice = choice - 1 end   -- menu: su
+
+== players
+kind: api
+name: players
+title: players() - quanti giocatori hanno un controller
+title_en: players() - how many players have a controller
+ask: quanti giocatori ci sono | numero di controller collegati | how many players
+ask: quanti pad sono connessi | gioco a più giocatori | multiplayer count
+see: btn, two_players
+text:
+Quanti giocatori hanno un controller (almeno 1) e, come secondo valore,
+quali (bit n = giocatore n+1).
+text_en:
+How many players have a controller (at least 1) and, as the second value,
+which ones (bit n = player n+1).
+code:
+local n, mask = players()
+print(n .. " giocatori", 8, 8)
+if mask & 2 ~= 0 then print("c'e' il giocatore 2", 8, 24) end
+
+== stick
+kind: api
+name: stick
+title: stick([p, n]) - la levetta analogica
+title_en: stick([p, n]) - the analogue stick
+ask: leggere la levetta analogica | joystick analogico | analog stick | levetta del pad
+ask: movimento analogico | quanto è spinta la levetta | thumbstick
+ask: levetta destra per mirare | right stick aim | mirare con il pad
+see: btn, move_stick
+text:
+x, y tra -1 e 1 della levetta sinistra del giocatore p (x a destra, y in
+basso), con zona morta. Con la tastiera vale la croce (8 direzioni).
+stick(p, 1) è la levetta destra (mira degli sparatutto): 0, 0 senza.
+text_en:
+x, y between -1 and 1 of player p's left stick (x to the right, y down),
+with a dead zone. With the keyboard it is the cross (8 directions).
+stick(p, 1) is the right stick (aiming in shooters): 0, 0 without one.
+code:
+local sx, sy = stick(1)
+x = x + sx * 3
+y = y + sy * 3
+
+== mouse
+kind: api
+name: mouse
+title: mouse([on]) - il puntatore del mouse
+title_en: mouse([on]) - the mouse pointer
+ask: usare il mouse | posizione del mouse | dove punta il mouse | read the mouse
+ask: cursore del mouse nel gioco | mouse position | puntatore sullo schermo
+ask: cliccare con il mouse | rotellina del mouse | mouse wheel | pointer
+keys: mouse, puntatore, cursore, pointer
+see: mousep, btn, stick
+text:
+Una cartuccia ha il puntatore solo se lo chiede: mouse(true) una volta
+(mouse(true, false) senza la freccia della console). Poi mouse() dà x, y
+in pixel dello schermo, i tasti (1 sinistro, 2 destro, 4 centrale), gli
+scatti della rotellina e se si vede; nil se non c'è niente che lo muova.
+Lo muove solo un mouse USB o Bluetooth (un controller no).
+text_en:
+A cartridge has the pointer only if it asks for it: mouse(true) once
+(mouse(true, false) without the console's arrow). Then mouse() gives x, y
+in screen pixels, the buttons (1 left, 2 right, 4 middle), the wheel's
+clicks and whether it shows; nil if nothing moves it.
+Only a USB or Bluetooth mouse moves it (a controller does not).
+code:
+function _init() mouse(true) end
+function _update()
+  local mx, my, mb = mouse()
+  if mx and mb & 1 ~= 0 then x, y = mx, my end   -- trascina
+end
+
+== mousep
+kind: api
+name: mousep
+title: mousep([i]) - un clic del mouse (una volta sola)
+title_en: mousep([i]) - a mouse click (only once)
+ask: clic del mouse | ho cliccato | mouse click | click once | il giocatore ha cliccato
+ask: tasto destro del mouse | right click | premere il tasto del mouse | detect a click
+ask: did the user click | cliccare su un pulsante | button clicked with the mouse
+keys: clic, click, mouse
+see: mouse, btnp
+text:
+true solo nel fotogramma in cui il tasto i del mouse viene premuto: 0
+sinistro (il default), 1 destro, 2 centrale. Serve mouse(true) prima.
+text_en:
+true only in the frame mouse button i is pressed: 0
+left (the default), 1 right, 2 middle. It needs mouse(true) first.
+code:
+local mx, my = mouse()
+if mx and mousep() then
+  sfx(0)                           -- un clic: un suono
+end
+
+== keyp
+kind: api
+name: keyp
+title: keyp() - il prossimo tasto scritto (tastiera)
+title_en: keyp() - the next key typed (keyboard)
+ask: leggere la tastiera come testo | scrivere con la tastiera | get typed key
+ask: inserire il nome del giocatore | campo di testo | text input | keyboard typing
+ask: tasti funzione | f1 f2 | ctrl s | tasto esc
+see: keyheld, name_input
+text:
+Il prossimo tasto scritto: un carattere ("a", "\n" Invio, "\b"
+Backspace), un nome ("up", "down", "left", "right", "pgup", "del", "esc",
+"f1"..."f10"), "^s" per Ctrl+S e "^S" per Ctrl+Shift+S (anche "^i" e "^m",
+non Tab e Invio); nil se nessuno. Dalla prima chiamata la
+tastiera scrive e non fa più da gamepad, ed Esc non chiude il gioco.
+text_en:
+The next key typed: a character ("a", "\n" Enter, "\b"
+Backspace), a name ("up", "down", "left", "right", "pgup", "del", "esc",
+"f1"..."f10"), "^s" for Ctrl+S and "^S" for Ctrl+Shift+S (also "^i" and
+"^m", not Tab and Enter); nil if none. From the first call the
+keyboard types and no longer works as a gamepad, and Esc does not close
+the game.
+code:
+local k = keyp()
+while k do
+  if k == "\b" then name = name:sub(1, -2)
+  elseif #k == 1 then name = name .. k end
+  k = keyp()
+end
+
+== keyheld
+kind: api
+name: keyheld
+title: keyheld(nome) - un tasto della tastiera USB tenuto premuto
+title_en: keyheld(name) - a USB keyboard key held down
+ask: tasto della tastiera tenuto premuto | f12 tenuto | key held down | tenere premuto tab
+see: keyp
+text:
+true finché il tasto è tenuto sulla tastiera USB: "f1".."f12", "tab",
+"space", "enter", "esc". L'editor lo usa per l'aiuto su F12.
+text_en:
+true while the key is held on the USB keyboard: "f1".."f12", "tab",
+"space", "enter", "esc". The editor uses it for the help on F12.
+code:
+if keyheld("f12") then
+  print("aiuto: frecce muovono, spazio salta", 8, 8)
+end
+
+== controller
+kind: api
+name: controller
+title: controller([p]) - con che cosa gioca il giocatore p
+title_en: controller([p]) - what player p plays with
+ask: che controller ha il giocatore | il giocatore usa la tastiera o il pad | ds4 o xbox
+ask: which controller does the player use | nomi dei tasti del pad | colore del giocatore
+keys: controller, ds4, xbox, tastiera
+see: keymap, players, lib.pads
+text:
+Una tabella: kind ("keyboard", "ds4", "xbox", "pad", "builtin",
+"none"), layout (come si chiamano i tasti), bluetooth, ok e back (i tasti
+del sì e dell'indietro), color (il colore del giocatore, quello della
+luce del pad).
+text_en:
+A table: kind ("keyboard", "ds4", "xbox", "pad", "builtin",
+"none"), layout (what the buttons are called), bluetooth, ok and back (the
+buttons for yes and for back), color (the player's colour, the one of the
+pad's light).
+code:
+local c = controller(2)
+if c.kind ~= "none" then print("P2: " .. c.kind, 8, 8, c.color) end
+
+== keymap
+kind: api
+name: keymap
+title: keymap(t) - le azioni del gioco sui tasti
+title_en: keymap(t) - the game's actions on the buttons
+ask: azioni del gioco | tasti personalizzabili | rimappare i tasti | remap buttons
+ask: saltare con un nome invece del numero | btn con il nome dell'azione | key bindings
+keys: keymap, azioni, rimappare
+see: btn, controller
+text:
+keymap({ jump = "a", fire = {"x", "r1"} }) dà un nome alle azioni; poi
+btn("jump", p), btnp("fire") e prompt("jump", x, y). Il gioco cambia i
+tasti chiamandola di nuovo (e li tiene con save()).
+text_en:
+keymap({ jump = "a", fire = {"x", "r1"} }) gives names to the actions;
+then btn("jump", p), btnp("fire") and prompt("jump", x, y). The game
+changes the buttons by calling it again (and keeps them with save()).
+code:
+keymap({ jump = "a", fire = { "x", "r1" }, pause = "start" })
+if btnp("jump") then vy = -5 end
+
+== prompt
+kind: api
+name: prompt
+title: prompt(nome, x, y) - l'icona di un tasto (DS4, pad, tastiera, RGB30)
+title_en: prompt(name, x, y) - a button's icon (DS4, pad, keyboard, RGB30)
+ask: disegnare l'icona di un tasto | mostrare quale tasto premere | icona del pulsante a
+ask: draw a button icon | show which button to press | button prompt | tasti colorati rgb30
+ask: icona del tasto conferma | ok e back | icone dei tasti della rgb30
+keys: prompt, icona, tasto, rgb30
+see: controller, keymap
+text:
+prompt("A", x, y) disegna il tasto come chip nell'aspetto del controller
+in uso: simboli del DS4, lettere di un pad, tasti della tastiera
+(minuscolo: "enter", "esc"). Sulla RGB30 "A" "B" "X" "Y" sono i suoi tasti:
+scuri, la lettera colorata (A verde, B blu, X rosso, Y giallo);
+"RGB30_A".."RGB30_Y" li disegnano ovunque. "ok" e "back" sono conferma e
+indietro del sistema (sulla RGB30 B e A, scambiati da confirm=a).
+Restituisce la x dopo il chip.
+text_en:
+prompt("A", x, y) draws the button as a chip in the look of the
+controller in use: the DS4's symbols, a pad's letters, the keyboard's keys
+(lower case: "enter", "esc"). On the RGB30 "A" "B" "X" "Y" are its own
+buttons: dark, the letter in colour (A green, B blue, X red, Y yellow);
+"RGB30_A".."RGB30_Y" draw them anywhere. "ok" and "back" are the system's
+confirm and back (on the RGB30 B and A, swapped by confirm=a). Returns
+the x after the chip.
+code:
+local x = prompt("ok", 8, 200)
+print("start", x + 4, 200, 0xFFFFFF)
+
+== online
+kind: api
+name: online
+title: online(on, [nota]) - la partita è in rete: PS non sospende
+title_en: online(on, [note]) - the match is online: PS does not suspend
+ask: partita in rete e tasto ps | non sospendere il gioco online | uscire dalla partita online
+ask: online true | leave the online match | _leave
+keys: online, sospendere, leave
+see: bmnet, net.open, callbacks
+text:
+Con online(true) PS non sospende il gioco (gli altri giocano): chiede al
+giocatore se esce; sì chiama _leave() e chiude la cartuccia. bmnet lo
+accende da sé quando la partita comincia.
+text_en:
+With online(true) PS does not suspend the game (the others play on): it
+asks the player whether to leave; yes calls _leave() and closes the
+cartridge. bmnet turns it on by itself when the match begins.
+code:
+function _leave()
+  net.close()                         -- avvisa gli altri
+end
+
+== bmui
+kind: api
+name: bmui
+title: require "bmui" - il mouse negli strumenti: zone, clic, menu contestuale
+title_en: require "bmui" - the mouse in tools: zones, clicks, context menu
+ask: mouse nel mio strumento | menu contestuale | tasto destro | doppio clic | trascinare col mouse
+ask: context menu | right click menu | double click | drag with the mouse | clickable buttons
+keys: bmui, mouse, clic, click, zone, menu, destro, right
+see: mouse, mousep
+text: La libreria del mouse degli strumenti di bm: in _draw si registrano le
+zone mentre si disegnano (U.zone, U.key_zone per un tasto), in _update
+U.click() dice cosa è stato premuto, U.press(tasto) fa arrivare un tasto a
+keyp() (il mouse fa quello che fanno i tasti), U.menu{...} apre il menu
+contestuale. U.update() per primo in _update, U.begin() per primo in _draw,
+U.menu_update() e U.menu_draw().
+text_en: The mouse library of bm's tools: in _draw the zones are registered as
+they are drawn (U.zone, U.key_zone for a key), in _update U.click() tells
+what was pressed, U.press(key) makes a key reach keyp() (the mouse does what
+the keys do), U.menu{...} opens the context menu. U.update() first in
+_update, U.begin() first in _draw, U.menu_update() and U.menu_draw().
+code:
+local U = require "bmui"
+function _init() U.wants() end
+function _update()
+  U.update()
+  if U.menu_update() then return end
+  local z = U.click()
+  if z and z.kind == "button" then log("clicked") end
+  if U.clicked(1) then
+    U.menu({ { "Save", "^s" }, { "Quit", "esc" } })
+  end
+end
+function _draw()
+  U.begin()
+  cls(0)
+  rectfill(20, 20, 80, 16, 0x3050A0)
+  U.zone(20, 20, 80, 16, "button")
+  U.menu_draw()
+end
+
