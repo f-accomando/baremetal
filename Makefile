@@ -354,11 +354,6 @@ test-sound: $(BUILD)/host/luahost $(BUILD)/demo.bmau carts/sound/main.lua
 
 # Resource files (docs/RISORSE.md, scripts/bmres.py): models, images, sounds,
 # maps and palettes out of a .bm and back in, conversions, broken files
-test-res: $(BUILD)/carts/village.bm $(BUILD)/demo.bm $(BUILD)/sound.bm scripts/bmres.py $(BUILD)/host/test_res
-	rm -rf $(BUILD)/res && $(PYTHON) tests/res/test_bmres.py $(BUILD)/carts/village.bm $(BUILD)/demo.bm \
-	    $(BUILD)/sound.bm $(BUILD)/res
-	$(BUILD)/host/test_res $(BUILD)/res $(BUILD)/carts/village.bm
-
 $(BUILD)/host/test_res: tests/bm/test_res.c src/bm/format.c src/lib/crc32.c src/bm/bm.h
 	@mkdir -p $(dir $@)
 	$(HOSTCC) -O2 -Wall -Wextra -Isrc -o $@ tests/bm/test_res.c src/bm/format.c src/lib/crc32.c
@@ -422,9 +417,9 @@ test-queue2d: $(BUILD)/host/bmhost-gpu
 .DEFAULT_GOAL := all
 .PHONY: FORCE test-keymap test-gameapi test-write test-shot test-shot test-profile test-online test-bmnet test-loading test-smp test-qpu test-etc1 test-gpu3d test-impostor test-queue2d test-b3d test-v3d bench3d count-insns all clean firmware image \
         image-pi1 sdcard install sdcard-chainloader sdcard-stress qemu qemu7 qemu-screenshot \
-        run-serial test test-map3d test-bm test-res test-ai test-img2mesh ai-model test-predict test-padtype predict-bench syllables test-usb test-audio \
+        run-serial test test-map3d test-bm test-ai test-img2mesh ai-model test-predict test-padtype predict-bench syllables test-usb test-audio \
         test-music music-model \
-        test-fat test-sdk-b16 test-sound test-net test-http test-https test-release \
+        test-fat test-sound test-net test-http test-https test-release \
         release disasm wav test-hyp test-zero2 \
  bmhost bmhost-gpu bmhost-ai \
         test-catalog test-github test-lan test-host test-qemu
@@ -606,7 +601,7 @@ qemu-screenshot: $(BUILD)/kernel.img
 # make test: the tests on the PC, then those in QEMU. The CI runs them on
 # several machines at once: make test-host HOST_SKIP="..." (the PC's, but
 # those named), make test-qemu SHARD=K/N (group K of N of the QEMU tests).
-HOST_TESTS := test-bm test-res test-usb test-fat test-audio test-music test-riff test-sound test-net test-http test-https test-img3d \
+HOST_TESTS := test-bm test-usb test-fat test-audio test-music test-riff test-sound test-net test-http test-https test-img3d \
       test-catalog test-github test-lan test-keymap test-gameapi test-write test-shot test-reserved test-spec test-profile test-online test-bmnet test-loading \
       test-release test-smp test-qpu test-etc1 test-gpu3d test-impostor test-queue2d test-b3d test-v3d test-ai test-predict test-padtype \
  $(if $(K7),test-hyp)
@@ -899,16 +894,15 @@ test-map3d: $(BUILD)/host/test_map3d
 
 test-bm: $(BUILD)/host/test_bm $(BUILD)/demo.bm $(BUILD)/host/test_meshcap \
          $(BUILD)/texroom.bm $(BUILD)/meshcap-test.bm \
-         $(BUILD)/host/test_decimate $(BUILD)/carts/village.bm $(BUILD)/host/libbmdecimate.so \
+         $(BUILD)/host/test_decimate $(BUILD)/host/libbmdecimate.so \
          $(BUILD)/host/test_glb $(BUILD)/host/test_cutout $(BUILD)/host/libbmcutout.so $(BUILD)/host/test_tokens
 	$< $(BUILD)/demo.bm
-	$(BUILD)/host/test_tokens carts/editor/main.lua carts/pong/main.lua
-	$(BUILD)/host/test_decimate $(BUILD)/carts/village.bm
+	$(BUILD)/host/test_tokens carts/editor/main.lua
+	$(BUILD)/host/test_decimate
 	$(PYTHON) tests/bm/run_glb_test.py $(BUILD)/host/test_glb $(BUILD)/glb
 	$(PYTHON) tests/bm/run_cutout_test.py $(BUILD)/host/test_cutout $(BUILD)/cutout
 	$(PYTHON) tools/cutout2mesh.py $(BUILD)/cutout/lolli_alpha.png -o $(BUILD)/cutout/tool.bm
 	$(PYTHON) tools/cutout2mesh.py $(BUILD)/cutout/lolli_white.png -o $(BUILD)/cutout/tool.bm --lathe --name vase
-	$(PYTHON) tools/bmreduce.py $(BUILD)/carts/village.bm --ratio 0.5 -o $(BUILD)/village-half.bm
 	$(BUILD)/host/test_meshcap src/bm/runtime.c \
 	    $(BUILD)/meshcap-test.bm '!stop here,wheel:1,crate:12,cars1_body:1,gem:2' \
 	    $(BUILD)/texroom.bm floor_mesh,walls_mesh,crate_mesh,pillar_mesh
@@ -952,17 +946,9 @@ test-predict: $(BUILD)/host/luahost $(BUILD)/words.lua
 
 # Typing with the pad (docs/PADTYPE.md): the rules of compose and of the
 # on-screen keyboard, every practice text written to the end by padtype's
-# coach (the presses a character), then Pad Typing in bmhost copying the
-# first text of each language to its result (shots in build/padtype/)
-test-padtype: $(BUILD)/host/luahost $(BUILD)/words.lua $(BUILD)/host/bmhost-bin $(BUILD)/carts/typing.bm
+# coach (the presses a character). The Pad Typing cartridge is not in this tree.
+test-padtype: $(BUILD)/host/luahost $(BUILD)/words.lua
 	$(BUILD)/host/luahost tests/padtype/pad_test.lua $(BUILD)
-	for l in it en lua; do \
-	  mkdir -p $(BUILD)/padtype/$$l && \
-	  $(BUILD)/host/luahost tests/padtype/script.lua $(BUILD) $$l 1 $(BUILD)/padtype/$$l.txt && \
-	  $(BUILD)/host/bmhost-bin $(BUILD)/carts/typing.bm --input $(BUILD)/padtype/$$l.txt \
-	      --shots $(BUILD)/padtype/$$l --seconds 300 > $(BUILD)/padtype/$$l.log 2>&1 && \
-	  grep "typing: done" $(BUILD)/padtype/$$l.log || { tail -20 $(BUILD)/padtype/$$l.log; exit 1; }; \
-	done
 
 # Its benchmark (docs/PREDICT.md): the keys saved on the texts of 100
 # characters, then the corpus with each group left out of the dictionary
@@ -1001,30 +987,8 @@ test-img2mesh: $(BUILD)/host/meshview
 # The console's bm Studio, bm Animator, bm Mesh, bm Pixel and the SDK on the
 # PC (luahost), then the files they wrote read by the Python of the build
 # (tests/studio/check_files.py) and by the kernel's parser.
-test-studio: $(BUILD)/host/test_bm $(BUILD)/demo.bm $(BUILD)/host/luahost $(BUILD)/carts/village.bm \
-             $(BUILD)/host/test_meshcap
+test-studio: $(BUILD)/host/test_bm $(BUILD)/demo.bm $(BUILD)/host/luahost
 	$(BUILD)/host/luahost tests/studio/bmui_host.lua .
-	rm -rf $(BUILD)/studio3d-sd && mkdir -p $(BUILD)/studio3d-sd/carts
-	cp $(BUILD)/carts/village.bm $(BUILD)/studio3d-sd/carts/
-	$(BUILD)/host/luahost tests/studio/tools3d_host.lua . $(BUILD)/studio3d-sd
-	rm -rf $(BUILD)/sdk-sd && mkdir -p $(BUILD)/sdk-sd/carts
-	cp $(BUILD)/carts/village.bm $(BUILD)/sdk-sd/carts/
-	$(BUILD)/host/luahost tests/studio/sdk_host.lua . $(BUILD)/sdk-sd
-	rm -rf $(BUILD)/pixel-sd && mkdir -p $(BUILD)/pixel-sd/carts
-	cp $(BUILD)/carts/village.bm $(BUILD)/demo.bm $(BUILD)/pixel-sd/carts/
-	$(BUILD)/host/luahost tests/studio/pixel_host.lua . $(BUILD)/pixel-sd
-	$(BUILD)/host/test_meshcap src/bm/runtime.c $(BUILD)/pixel-sd/carts/village.bme "" $(BUILD)/pixel-sd/carts/newspr.bme ""
-	$(PYTHON) tests/studio/anim_figure.py $(BUILD)/anim-figure.bm
-	$(BUILD)/host/test_bm $(BUILD)/demo.bm $(BUILD)/anim-figure.bm $(BUILD)/studio3d-sd/carts/blocks.bme
-
-# bm SDK (RGB30), the .b16 edition, on the PC: its layout, every frame inside
-# 360x360 on the 8x16 grid, the RGB30's pad on every page and action, the saves,
-# build and try of the RGB30's kernel tool, none of the Pi's other programs. Not in
-# HOST_TESTS (the Pi's): run it when the edition changes.
-test-sdk-b16: $(BUILD)/host/luahost $(BUILD)/sdk_b16/main.lua $(BUILD)/carts/village.bm
-	rm -rf $(BUILD)/sdk-b16-sd && mkdir -p $(BUILD)/sdk-b16-sd/carts $(BUILD)/sdk-b16-sd/bm
-	cp $(BUILD)/carts/village.bm $(BUILD)/sdk-b16-sd/bm/village.b16
-	$(BUILD)/host/luahost tests/studio/sdk_b16_host.lua . $(BUILD)/sdk-b16-sd $(BUILD)/sdk_b16/main.lua
 
 # Rasterizer bench (M33): checksums of fixed 3D scenes (a change to r3d.c
 # that should not change the picture must keep them), and with

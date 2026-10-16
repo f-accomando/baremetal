@@ -190,7 +190,7 @@ def main():
                 if not f.endswith('it_lessico.txt') and not (a.skip and os.path.basename(f).startswith(a.skip))]
     lexicon = open(os.path.join(words, 'it_lessico.txt'), encoding='utf-8').read().split('\n')
     en_texts = [open(f, encoding='utf-8').read() for f in sorted(glob.glob(os.path.join(words, 'en_*.txt')))]
-    games = ['pong', 'snake', 'texroom', 'village', 'demo']
+    games = ['texroom', 'demo']
     lua = [open(os.path.join(ROOT, 'carts', g, 'main.lua'), encoding='utf-8').read() for g in games]
     lua.append(kb_code())
     api = kb_api()
