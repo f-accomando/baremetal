@@ -192,7 +192,7 @@ $(BUILD)/demo.bm: $(DEMO_BM_SRC) scripts/mkbm.py
 	    --map carts/demo/map.csv --title "bm native demo" --author bm
 
 # Demo games (Lua only, sprites drawn in code): build/carts/<name>.bm
-GAMES := pong snake village typing write
+GAMES := write
 GAME_CARTS := $(patsubst %,$(BUILD)/carts/%.bm,$(GAMES))
 # Optional per game: carts/<game>/cover.png (printed on the cartridge in the
 # menu), sheet.png, map.csv, models.bm or models.glb (3D
