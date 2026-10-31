@@ -8,13 +8,11 @@
  */
 #include <stdint.h>
 
-#include "bench.h"
-#include "demo.h"
 #include "irq.h"
 #include "tick.h"
 #include "exceptions.h"
+#include "fiber.h"
 #include "monitor.h"
-#include "selftest.h"
 #include "sysinfo.h"
 #include "arch/mmu.h"
 #include "drivers/fb.h"
@@ -22,6 +20,8 @@
 #include "drivers/mmio.h"
 #include "drivers/prop.h"
 #include "drivers/rng.h"
+#include "drivers/sd.h"
+#include "fs/fat.h"
 #include "drivers/timer.h"
 #include "drivers/uart.h"
 #include "gfx/console.h"
@@ -30,14 +30,18 @@
 #include "lib/printf.h"
 #include "script/luavm.h"
 #include "bm/runtime.h"
-#include "bm/stress.h"
 #include "usb/usb.h"
 #include "carts.h"
 #include "config.h"
+#include "gpu/gpu3d.h"
+#include "gpu/qpu.h"
+#include "gpu/v3d.h"
 #include "bt/bt.h"
 #include "audio/audio.h"
 #include "crumbs.h"
+#include "kernel/sdlog.h"
 #include "reports.h"
+#include "drivers/mbox.h"
 #include "drivers/watchdog.h"
 #include "drivers/dma.h"
 #include "version.h"
@@ -49,8 +53,10 @@
 #include "ledstate.h"
 #include "splash.h"
 #include "notice.h"
+#include "home.h"
 #include "bm/runtime.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 
@@ -61,22 +67,14 @@
 
 static framebuffer_t fb;
 
-static void print_palette(void)
-{
-    kprintf("colours ");
-    for (int i = 0; i < 16; i++)
-        kprintf("\x1b[%dm\xdb\xdb", i < 8 ? 30 + i : 90 + i - 8);
-    kprintf("\x1b[0m\n");
-}
-
 #define TICK_HZ     1000
-#define BM_DEMO_SECS    15
 
 static void heartbeat(uint32_t tick)
 {
+    fiber_tick();                               /* fiber_over: a fiber past its slice (fiber.h) */
     ledstate_tick(tick * (1000 / TICK_HZ));     /* on, or a slow blink (ledstate.h) */
     if (tick % (TICK_HZ / 10) == 0) {       /* 10 Hz: freeze guard */
-        watchdog_pet();
+        watchdog_pet_irq();                 /* only while the main code makes progress */
         crumb_tick(tick * (1000 / TICK_HZ));
     }
 }
@@ -92,38 +90,12 @@ static void report_irq(void)
             fb.buffers >= 2 ? "on" : "OFF");
 }
 
-extern const char boot_lua[], boot_lua_end[];
-extern const uint8_t bm_demo_cart[], bm_demo_cart_end[];
-extern const uint8_t bm_stress_cart[], bm_stress_cart_end[];
-
-#ifdef BM_BOOT_STRESS
-/* Stress-test boot (make BOOT=stress): C and Lua rendering stress tests,
- * results left on the console for a photo. */
-static void run_stress(void)
-{
-    bm_stress_settle(20000);
-    bm_stress_run(&fb);
-    kprintf("Lua part (cartridge API):\n");
-    bm_stats_t bs;
-    bm_play(&fb, bm_stress_cart, (size_t)(bm_stress_cart_end - bm_stress_cart), 600, &bs);
-}
-#endif
-
-static void run_boot_script(void)
-{
-    if (!luavm_init()) {
-        kprintf("\x1b[91mLua: cannot create the state\x1b[0m\n");
-        return;
-    }
-    luavm_run(boot_lua, (size_t)(boot_lua_end - boot_lua), "@boot.lua");
-}
-
 /* End of the ARM's share of SDRAM (the GPU owns the rest). */
 static uint32_t arm_memory_end(void)
 {
     uint32_t v[2] = { 0, 0 };
     if (prop_query(PROP_GET_ARM_MEMORY, v, 2) != 0 || v[1] == 0 || v[0] + v[1] > PERIPHERAL_BASE)
-        return 0x10000000u;             /* 256 MiB: safe for gpu_mem <= 256 */
+        return 0x10000000u;             /* 256 MB: safe for gpu_mem <= 256 */
     return v[0] + v[1];
 }
 
@@ -132,46 +104,35 @@ static uint32_t sdram_end(uint32_t arm_end)
 {
     uint32_t v[2] = { 0, 0 };
     if (prop_query(PROP_GET_VC_MEMORY, v, 2) != 0 || v[0] + v[1] <= arm_end)
-        return 0x20000000u;             /* 512 MiB: the Pi Zero, W and 2 W */
+        return 0x20000000u;             /* 512 MB: the Pi Zero, W and 2 W */
     return v[0] + v[1];
 }
-
-/* Everything the boot used to show before M9: palette, CPU benchmark,
- * libc self-test, the bm benchmark and demo, the
- * vsync probe and the Lua boot script. Monitor command 'B'. */
-void diagnostics_run(void)
-{
-    bench_t bench;
-    uint32_t cols, rows;
-    console_size(&cols, &rows);
-    kprintf("screen %lux%lu %s, console %lux%lu; serial 115200 8N1 on GPIO14/15\n",
-            fb.width, fb.height, fb.is_rgb ? "RGB" : "BGR", cols, rows);
-    print_palette();
-    bench_run(&bench, &fb, "max + cache");
-    bench_print(&bench, 1);
-    libc_selftest();
-
-    kprintf("bm: C benchmark and native demo cart ('q' or Esc skips)...\n");
-    bm_bench_report(&fb, 120);
-    bm_stats_t bs;
-    bm_play(&fb, bm_demo_cart, (size_t)(bm_demo_cart_end - bm_demo_cart), BM_DEMO_SECS, &bs);
-    bm_print_stats(&bs);
-
-    uint32_t vs[5];
-    if (fb_vsync_probe(vs, 5) == 0)
-        kprintf("vsync probe: tag ok, waits %lu %lu %lu %lu %lu us\n",
-                vs[0], vs[1], vs[2], vs[3], vs[4]);
-    else
-        kprintf("vsync probe: tag not supported by the firmware\n");
-
-    run_boot_script();
-}
-
 
 /* The saved WiFi network is joined at boot (wifi_boot=0 in
  * bm/config.txt turns it off), two tries; if it fails the menu tries
  * again by itself (net/wifi_auto.c). The address comes later, in the
  * background, and shows in the status line. */
+/* autoexec=1 in bm/config.txt: /bm/autoexec.lua runs once at boot, before the menu or the shell (SYS-19).
+ * A file of the card is code: it runs only when the owner turned the key on, and the PC and the bridge
+ * cannot set the key (config_merge). An error is printed and the boot goes on. */
+static void autoexec_run(void)
+{
+    const char *v = config_get("autoexec");
+    fat_entry_t e;
+    uint8_t *data = NULL;
+    size_t len = 0;
+    if (!v || v[0] != '1' || fat_find("/bm/autoexec.lua", &e) != 0 || e.is_dir)
+        return;
+    if (fat_load(&e, &data, &len) != 0) {
+        kprintf("autoexec: /bm/autoexec.lua: %s\n", fat_error());
+        return;
+    }
+    kprintf("autoexec: /bm/autoexec.lua\n");
+    if (luavm_init())                           /* (the state is made on first use) */
+        luavm_run((const char *)data, len, "=autoexec");
+    free(data);
+}
+
 static void wifi_boot(void)
 {
     wifi_auto_boot();
@@ -192,6 +153,40 @@ static void memory_init(void)
     heap_init(mem_end);
     prop_clock_set_max(CLOCK_ARM);
     mmu_init(mem_end, sdram_end(mem_end));
+}
+
+/* The VideoCore firmware stopped answering (MBOX_DEAD_TIMEOUTS timeouts in a row): no mode change, no flip, the
+ * screen stays as it is while the network lives (26 Oct 2026, 3 hours after boot). Nothing here can revive it.
+ * The reset is not a planned one: the run is not marked as ended, so the next boot sends a freeze report with the
+ * last lines printed and this crumb. */
+static void firmware_dead(void)
+{
+    crumb("VideoCore firmware does not answer (mailbox)", NULL);
+    kprintf("\x1b[91mthe VideoCore firmware does not answer: restarting\x1b[0m\n");
+    watchdog_reboot();
+}
+
+/* The first mailbox timeout of a run: the state of the V3D beside the line mbox.c prints (the registers are read only
+ * when the 3D was started, so the V3D is on) */
+static void mbox_diag(void)
+{
+    if (!gpu3d_ready()) {
+        kprintf("mbox: the 3D is not started\n");
+        return;
+    }
+    char b[320];
+    v3d_errors(b, sizeof b);
+    kprintf("mbox: V3D %s\n", b);
+}
+
+static void pi_lastrun(void)
+{
+    uint32_t cpsr;
+    __asm__ volatile("mrs %0, cpsr" : "=r"(cpsr));
+    if ((cpsr & (1u << 7)) || fat_writing() || !sd_blocks())
+        return;
+    sdlog_lastrun();
+    uart_flush();
 }
 
 void kernel_main(uint32_t atags)
@@ -239,12 +234,16 @@ void kernel_main(uint32_t atags)
     rng_start();                /* warms up while the rest boots (TLS, BLE keys) */
 
     sysinfo_print_short();
-    crumbs_boot();
-    if (watchdog_arm(3000) != 0) {  /* a frozen Pi restarts and says what it was doing */
-        uint32_t ld, lf;
-        watchdog_probe_values(&ld, &lf);
+    int wd_rc = watchdog_arm(3000);
+    uint32_t ld, lf;
+    watchdog_probe_values(&ld, &lf);
+    if (wd_rc == -2)
+        kprintf("watchdog: resets at once on RSTC (emulator), no freeze guard\n");
+    else if (wd_rc != 0)
         kprintf("watchdog: not available, no freeze guard (loaded %lu, after 20 ms %lu)\n", ld, lf);
-    }
+    else
+        kprintf("watchdog: on, 3000 ms (loaded %lu, after 20 ms %lu)\n", ld, lf);
+    crumbs_boot();
     report_irq();
     if (audio_init() == 0) {
         kprintf("audio: %s\n", audio_status());
@@ -259,6 +258,22 @@ void kernel_main(uint32_t atags)
     usb_print();
     carts_init();
     config_load();
+    if (gpu_qpu_key())                  /* gpu3d_qpu=1 (default off): Yharnam's darkness on the QPUs, ARM fallback */
+        bm_fade_accel = qpu_fade_hook;
+    if (board_is_pi1()) {
+        const char *lg = config_get("lcd_gpio");
+        if (lg && strcmp(lg, "1") == 0) {
+            gpio_lcd_power(1);
+        } else {
+            /* Default: turn off unused GPIO LCD backlight to save power on Pi 1 */
+            gpio_lcd_power(0);
+        }
+    }
+    sdlog_prev();
+    watchdog_before_reboot(pi_lastrun);
+    mbox_set_dead_hook(firmware_dead);
+    mbox_set_diag_hook(mbox_diag);
+    sdlog_boot(0);
     {
         /* v3d_clock=max in bm/config.txt: the GPU at the highest clock the
          * firmware allows (enable_uart=1 holds the core at 250 MHz, and the
@@ -281,17 +296,20 @@ void kernel_main(uint32_t atags)
     wifi_boot();
     eth_boot();
 
-#ifdef BM_BOOT_STRESS
-    run_stress();
-    monitor_run();
-#endif
-
     /* The console starts on the cartridge menu; Esc, Start+Select or 'q'
-     * on the serial port go to the monitor ('B' there runs the old boot
-     * diagnostics). */
+     * on the serial port go to the monitor. */
     bm_set_notice(notice_now);              /* the games show a kernel arriving */
     bm_permissions(1);                      /* a game's network and reports: the player says */
     ledstate_set(LED_BOOT, 0);              /* started: the LED stays on if all is well */
+    autoexec_run();
+    const char *boot_to = config_get("boot");
+    if (boot_to && !strcmp(boot_to, "shell")) {         /* boot=shell: the monitor first; its 'menu' opens the cartridges */
+        kprintf("the shell: 'menu' opens the cartridge menu\n");
+        sdlog_boot(1);
+        monitor_run();
+    }
+    kprintf("cartridge menu\n");
+    sdlog_boot(1);
     carts_menu(&fb);
     monitor_run();
 }

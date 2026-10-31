@@ -15,17 +15,16 @@ footer: bm manuals - api-tools
 
 # The cartridge file
 
-A game on bm is one file. The same container comes in three shapes, and what matters is which tools may change it.
+A game on bm is one file. The same container comes in two shapes, and what matters is which tools may change it.
 
 | Extension | What it is | Can bm's tools change it? |
 |---|---|---|
 | `.bm` | a **game**: it is in the Games tab of the menu | No. Tools read it and take its code and assets |
-| `.b16` | a **game** too: the limited-resource edition for handhelds | No, as for `.bm` |
 | `.bme` | a **project**: the same container, the one tools edit | Yes |
 
 ## What it does
 
-A project is a `.bme` with bit 0 of the u16 at offset 18 of the header set. A `.b16` is marked with bit 1 of the same u16. Nothing else in the container changes. A project makes its game with a build; a game makes an editable copy of itself.
+A project is a `.bme` with bit 0 of the u16 at offset 18 of the header set. Nothing else in the container changes. A project makes its game with a build; a game makes an editable copy of itself.
 
 ## Why it matters
 
@@ -33,28 +32,22 @@ Your game is never overwritten by a tool by accident. You edit the project, and 
 
 ## Good to know
 
-- A tool that saves a game asks first: *Save an editable copy: NAME.BME?* The copy goes next to the game (`NAME.BME`, or `NAME1.BME` if that name is taken).
-- In the menu, *Make an editable copy* is in a game's options. The project goes to the Dev tab with a "Project" badge. A on a project opens it in the SDK.
+- A tool that saves a game asks first: *Save an editable copy: name.bme?* The copy goes in `/bme` (`/bme/name.bme`, or `name1.bme` if that name is taken). A `.bme` found next to its game on an older card is still read, and saved where it is.
+- In the menu, *Make an editable copy* is in a game's options. The project is not listed in the menu tabs: open it from the SDK with *Open* (**Ctrl+O**).
 - *Build the game (.bm)* is in a project's options. In the SDK the key is **Ctrl+B**.
-- A build writes the game next to the project, with the project's name stored at offset 104 of the header. The next build replaces that game and only that one. A game of the same name that it did not build stays, and the new one takes a digit (`PONG1.BM`).
-- The `.bm` and the `.b16` are separate editions. A `.b16` never replaces the `.bm`, and the `.bm` sources are never overwritten to make a `.b16`.
-- A `.b16` file is limited to 8 MiB. Its screen is 360x360 (or 720x720, the profile says), the same on the Pi and on the RGB30.
+- A build of a project in `/bme` writes the game in the games folder (`/carts` on the Pi, `/bm` on the RGB30); a project next to its game builds next to it. The game has the project's name stored at offset 104 of the header. The next build replaces that game and only that one. A game of the same name that it did not build stays, and the new one takes a digit (`pong1.bm`).
+- A `.bm` runs on the Pi Zero W and on the RGB30. Its header says the kernels it is made for (the `targets` key of `bm.info`: `pi`, `rgb30`). The Market takes up to 100 MB a file.
 - Other cartridges write only `.bm` and `.bme` files in `/carts`, and only ones they made in the same run.
-
-## Caveats
-
-- [TO FILL: status of the `.b16` profile. `docs/B16.md` says the profile is decided but not yet implemented, and §3 describes a different `B16CART` container that §0 replaces with the `.bm` container; `src/bm/project.h` and `scripts/mkbm.py` already mark and export `.b16` files (bit 1 at offset 18, 8 MiB check). Say which one is current.]
-- The SDK's *Build .bm* and *Export .b16* entries call `bm_build_b16`; **Ctrl+Shift+B** in the bm SDK always exports a `.b16`.
 
 ## Try it, step by step
 
 1. On the console, open the Games tab and select a game.
 2. Press **X** on the RGB30 pad (**C** on the Pi) to open its options and choose *Make an editable copy*.
-3. Open the Dev tab. You see the project with a "Project" badge.
-4. Press **A** on the project. It opens in the SDK.
+3. Open the Dev tab and start the **bm SDK**. The tab does not list projects.
+4. In the SDK press **Ctrl+O** and choose the project.
 5. In the SDK press **Ctrl+B** (*Build the game .bm*). The game appears in the Games tab.
 
-![The options of a game, with Make an editable copy](shots/api-tools-editable-copy.png)
+!The options of a game, with Make an editable copy
 
 ::: try
 Build the same project twice. The second build replaces the first game: you do not get a second file.
@@ -62,15 +55,11 @@ Build the same project twice. The second build replaces the first game: you do n
 
 ## From the PC
 
-`mkbm.py` writes the kind of file from the extension of `-o`: `.bm`, `.bme` or `.b16`.
+`mkbm.py` writes the kind of file from the extension of `-o`: `.bm` or `.bme`.
 
 ::: copy
 python3 scripts/mkbm.py -o ball.bme --lua carts/ball/main.lua --title "Ball" --author "me"
-python3 scripts/mkbm.py --from ball.bm --b16
-:::
-
-::: warn
-A `.b16` over 8 MiB is refused with a message. With `--from` and `--b16` and no `-o`, the file is written next to the source with the `.b16` extension.
+python3 scripts/mkbm.py -o ball.bm --lua carts/ball/main.lua --title "Ball" --author "me"
 :::
 
 # The sections of a cartridge
@@ -85,7 +74,7 @@ A cartridge is a 128-byte header, a section table and the section bodies. Everyt
 | 12 | u16 width, u16 height: 640x360, 480x270, 320x180, 256x256, 360x360 |
 | 16 | u8 pixel format (1 = RGB565) |
 | 17 | u8 section count |
-| 18 | u16 flags: bit 0 project, bit 1 `.b16` |
+| 18 | u16 flags: bit 0 project |
 | 20 | u32 CRC-32 of everything after the header |
 | 24 | char[48] title |
 | 72 | char[32] author |
@@ -104,7 +93,7 @@ A cartridge is a 128-byte header, a section table and the section bodies. Everyt
 | 6 | AUDIO | the sound bank (`BMAU`): sounds, effects, patterns, songs; played by `sfx()` and `music()` |
 | 8 | MESH | 3D models, 1 to 256, with the texture inset |
 | 9 | ANIM | skeletons and animations of the MESH models |
-| 10 | INFO | `key: value` text of at most 16 KiB about the file and its parts |
+| 10 | INFO | `key: value` text of at most 16 KB about the file and its parts |
 | 11 | SPRITES | named zones of the sheet (1 to 1024), with frames and speed |
 | 12 | LAYERS | the other layers of the map (2 to 8, the MAP section is layer 1) |
 | 13 | FLAGS | the 8 flags of each 8x8 cell of the sheet |
@@ -119,11 +108,11 @@ A cartridge is a 128-byte header, a section table and the section bodies. Everyt
 
 # The API for tools
 
-Part of the game API. These functions are meant for the development tools (the editors of the suite). Games do not need them, and the design in `docs/B16.md` says the `.b16` profile leaves the `cart_*` functions and `ls` out of the sandbox; the console does not enforce it yet.
+Part of the game API. These functions are meant for the development tools (the editors of the suite). Games do not need them.
 
 ## Games and projects in the API
 
-`cart_save`, `cart_write` and `cart_put_audio` return `true` **and the file written** when it is not the one you asked for. This happens when you save a game: the tool writes the editable copy and goes on with that file. A new `.bm` becomes a project (`"/carts/NEW.BM"` becomes `/carts/NEW.BME`). A project makes its game with `cart_build`.
+`cart_save`, `cart_write` and `cart_put_audio` return `true` **and the file written** when it is not the one you asked for. This happens when you save a game: the tool writes the editable copy and goes on with that file. A new `.bm` becomes a project (`"/carts/new.bm"` becomes `/carts/new.bme`). A project makes its game with `cart_build`.
 
 ## Keyboard and files
 
@@ -132,6 +121,7 @@ Part of the game API. These functions are meant for the development tools (the e
 | `keyheld(name)` | `true` while key `name` is held: `"f1"` to `"f12"`, `"tab"`, `"space"`, `"enter"`, `"esc"` |
 | `keyp()` | the next key typed: a character (`"a"`, `"\n"` Enter, `"\b"` Backspace, `"\t"`), a name (`"up"`, `"down"`, `"left"`, `"right"`, `"home"`, `"end"`, `"pgup"`, `"pgdn"`, `"del"`, `"esc"`, `"f1"` to `"f10"`), `"^s"` for Ctrl+S, `"^S"` for Ctrl+Shift+S (also `"^i"`, `"^m"`); `nil` if none. F11 and F12 are the system's and never come. From the first call the keyboard types and no longer works as a gamepad for `btn()` |
 | `keyhelp(list, [title])` | shows the cartridge's keys under the system's while **F12** is held. `list` is `{ {"keys", "what they do"}, "subtitle", ... }`, keys as in `prompt()` (lower case the keyboard, upper case the pad). Returns how many entries name a key the system keeps for itself (F11, F12, Ctrl+Esc, Ctrl+Shift+Esc): they are shown in red and in the log. `keyhelp(nil)` takes it away |
+| `showkeys()` | opens the key list of the page as F12 held does, but the list stays open (for a mouse click on the chip F12 keys): a click, F12 or Esc closes it, the arrows turn the pages, and the cartridge gets no other key or button meanwhile. Returns `true` when open. `U.keys()` in `bmui` calls it for the fixed chip of the hint bars |
 | `ls([folder])` | the files of the SD card: `{ {name=, size=, dir=}, ... }` |
 
 ## Reading and writing cartridges
@@ -141,12 +131,16 @@ Part of the game API. These functions are meant for the development tools (the e
 | `cart_load(path)` | opens a `.bm`: its sprite sheet (with flags, zones and boxes), map (with layers) and 3D models (with skeletons) take the place of the calling cartridge's. Returns `{title, author, res, lua, sheet_w, sheet_h, map_w, map_h, layers, [palette]}` |
 | `cart_sheet([w, h])` | the size of the project's sprite sheet; with `w` and `h` (multiples of 8, from 8 to 4096) it resizes it: pixels that fit stay, new ones are transparent, flags stay with their tile |
 | `cart_new()` | an empty sprite sheet and map (256x256, one layer), no flags, zones, boxes or models |
-| `cart_save(path, {title, author, res, lua})` | writes a `.bm` with the code given and the current sheet, flags, zones, boxes, map, layers, cover, sound bank, models and skeletons. An 8.3 name, for example `"/carts/GAME.BME"`. Returns `true` (and the file written when it is not `path`), or `false` and a message |
-| `cart_build(project)` | builds the game of a project (`.bme`) into a `.BM` next to it. Returns `true` and the game's path, or `false` and a message |
+| `cart_save(path, {title, author, res, lua})` | writes a `.bm` with the code given and the current sheet, flags, zones, boxes, map, layers, cover, sound bank, models and skeletons. An 8.3 name, for example `"/bme/game.bme"`. Returns `true` (and the file written when it is not `path`), or `false` and a message |
+| `cart_build(project)` | builds the game of a project (`.bme`) into a `.BM` in the games folder (next to it for a project that is not in `/bme`). It has no second argument. Returns `true` and the game's path, or `false` and a message |
+| `cart_publish(path)` | for bm's tools. Leaves the tool and opens the Publish panel on the game at `path`. On the RGB30 it answers `false` and the reason |
 | `cart_read(path)` | the code and header of a `.bm`: `{title, author, res, lua, size}`, without touching the caller's sheet and map. For editors with several files open |
 | `cart_write(path, {[lua, title, author, res, from, sections]})` | changes only the code (and the data fields) of a `.bm`; sheet, map, cover, sound bank and unknown sections stay. Without `lua` the code stays. `from`: the other sections come from another file ("save as"); `from = false`: a new cartridge. `sections`: `{[8] = MESH bytes, [9] = ANIM bytes}` (`false` takes them away), checked first. `sheet = true`: the project's sprite sheet replaces the file's, as SHEET8 when it has at most 256 colours, with the colours of `palette` (`{0xRRGGBB, ...}`) first. Returns like `cart_save` |
 | `cart_data(kind, [bytes])` | the project's MESH (`kind` 8), ANIM (9), SPRITES (11) and BOXES (14) sections as strings in the format of `src/bm/bm.h`. Without `bytes` it returns them (`nil` if none); with `bytes` it replaces them (`nil` or `""` removes them) and returns `true`, or `false` and the reason |
 | `cart_config(key, [value])` | the text of a key of `bm/config.txt`, or `nil`. Only keys that start with the first word of the game's title in lower case and `_` (Overbit: `overbit_`); anything else is an error. With a value the key is changed and saved (`""` clears it). Values up to 127 characters, without `;` or `,` |
+| `sheet_png(x, y, w, h)` | gives the bytes of a PNG file (colour type 6, with alpha) of one rectangle of the sprite sheet. A pixel that is transparent on the sheet gets alpha 0. Any other pixel gets alpha 255. The call gives `nil` and the reason if the rectangle is not inside the sheet, if it is wider or higher than 4096, or if there is no memory. Write the bytes to a file with `doc_write` |
+| `sheet_png({{x, y, w, h}, ...})` | the same for a list of 1 to 64 rectangles. The PNG puts them side by side, from left to right, in the order of the list. All rectangles must have the same height. The total width is 4096 at most. If not, the call gives `nil` and the reason. |
+| `sheet_gif({{x, y, w, h}, ...}, delay_cs)` | gives the bytes of an animated GIF file (GIF89a) of a list of 1 to 64 rectangles of the sprite sheet. Each rectangle is one frame, in the order of the list. All rectangles must have the same size. The GIF loops for ever. `delay_cs` is the time of each frame in hundredths of a second (1 to 65535; if you give none, 10). A pixel that is transparent on the sheet stays transparent. The colours stay exact when the frames have 255 colours or less. With more colours, bm reduces them to 255. The call gives `nil` and the reason if a rectangle is not inside the sheet, if the sizes are different, if the frames have more than 262144 pixels in all, or if there is no memory. Write the bytes to a file with `doc_write` |
 
 ## Audio for the editors
 
@@ -166,6 +160,9 @@ Part of the game API. These functions are meant for the development tools (the e
 | `mesh_reduce(record, triangles, [bones, [max_err]])` | fewer triangles for a model of the MESH section (edge collapse with quadrics, no AI). `bones` is the bone of each vertex, `max_err` stops before a costlier collapse (0: no limit). Returns the record, the bones of its vertices (`nil` without `bones`) and the number of triangles; `nil` and a message if the record is broken. On the PC: `tools/bmreduce.py` |
 | `picture3d(action, ...)` | a picture becomes a 3D model through an image-to-3D service. `picture3d("providers")` lists the services; `picture3d("ready", service)` gives `true`, or `false` and why (the key is missing); `picture3d("start", picture, {provider=, polycount=})` starts the job on a `.png`/`.jpg` of the SD card or an https URL and gives the job id (or `nil` and a message); `picture3d("status", id, service)` gives `"running", progress` or `"done", url`; `picture3d("take", url, {name=, faces=, height=})` downloads the `.glb` and converts it to `{record=, flat=, texture=, nv=, nf=, textured=}`. The first service is Meshy, with the key `meshy_key=...` in `bm/config.txt`. The calls block while the network works |
 | `cutout3d(picture, {name=, lathe=, height=, depth=, segments=, faces=})` | a model from the picture's outline, made on the console without network or AI: a cutout `depth` thick, or with `lathe = true` the half outline turned round the vertical axis in `segments` steps. `height` in blocks (2), `faces` triangles at most (1200). Returns the same table as `picture3d("take")`, or `nil` and a message |
+| `glb3d(path, {name=, height=, faces=, sheet=})` | a model from a `.glb` file of the SD card (the editors use `/glb/NAME.glb`), made on the console without network or AI. The file is only read. `height` in blocks (2), `faces` triangles at most (0: all), `sheet` the side of the texture (256, from 8 to 1024). One model holds 65535 vertices and 65535 triangles at most: a file with more triangles gives `nil` and a message, unless you set `faces`. A file over 16 MB gives `nil` and a message. Returns the same table as `picture3d("take")`, or `nil` and a message |
+| `res_write(path, kind, {sections=, name=, author=, replace=})` | for bm's tools only. Writes a model file (kind 1 or `"model"`) in `/bmm`. `path` is `/bmm/NAME.bmm`: NAME has 1 to 8 lower-case letters, digits, `_` or `-`. `sections` has strings: `[8]` the MESH section (needed), `[9]` ANIM, one sheet (`[2]` or `[5]`), `[10]` INFO. `name` is the name shown. A file that is there stays as it is, unless `replace` is true. Returns `true`, or `nil` and a message |
+| `res_read(path)` | reads a resource file (`.bmm`, `.bmi`, ...) from the SD card. The file is only read. Returns `{ kind =, name =, author =, sections = { [type] = string } }`, or `nil` and a message. Kind 1 is a model |
 
 ## Running, debugging and moving between tools
 
@@ -273,15 +270,15 @@ A resource file uses the same container as a `.bm`, with the magic `BMRES` and t
 
 - Names are 8.3: the extension is `bm` plus one letter (never `.bmp`). The real name is inside the file.
 - The menu does not list resource files among the games, and games do not read them while running. A resource enters a `.bm` by being copied in; the cartridge stays one file that works on its own.
-- INFO is text, `key: value` lines: `name`, `desc`, `author`, `license` (an SPDX id such as `CC0-1.0`), `version`, `tags` (separated by commas), `origin` (the SHA-256 of the resource it was copied from), `date` (YYYY-MM-DD). A block `[type name]` gives the keys of one part; types are `model`, `sprite`, `sound`, `sfx`, `song`, `map`, `palette`. At most 16 KiB; unknown keys are kept.
+- INFO is text, `key: value` lines: `name`, `desc`, `author`, `license` (an SPDX id such as `CC0-1.0`), `version`, `tags` (separated by commas), `origin` (the SHA-256 of the resource it was copied from), `date` (YYYY-MM-DD). A block `[type name]` gives the keys of one part; types are `model`, `sprite`, `sound`, `sfx`, `song`, `map`, `palette`. At most 16 KB; unknown keys are kept.
 - A sprite zone moves in the sheet whole. In a game, `zspr(name, x, y)` draws it and `zboxes(name, [frame, type])` reads its boxes.
 - The limits are those of the `.bm`: a sheet up to 4096x4096, 256 models, 64 bones.
 
 ## Caveats
 
-- The Lib tab, which lists the resources, is hidden for now. `lib_tab=1` in `bm/config.txt` brings it back.
-- The apps that open resource files are not done yet: A in the Lib tab opens only resources that are inside a `.bm`.
-- `bmres.py add` with a `.bme` cart and no `-o` writes the `.bme` in place. With a `.bm` or `.b16` and no `-o` it refuses to change the game ("is a game, read only") and writes a copy with the same name and the `.bme` extension. A `.bme` output is marked as a project.
+- The menu has no tab for resource files (the Lib tab is removed). Open a resource file from an editor.
+- The apps that open every kind of resource file are not done yet.
+- `bmres.py add` with a `.bme` cart and no `-o` writes the `.bme` in place. With a `.bm` and no `-o` it refuses to change the game ("is a game, read only") and writes a copy with the same name and the `.bme` extension. A `.bme` output is marked as a project.
 - [TO FILL: `docs/RISORSE.md` says `mkbm.py --res FILE` integrates resources at build time, but in `scripts/mkbm.py` the option `--res` chooses the screen resolution. Say which tool does the build-time integration.]
 
 ## What integration does
@@ -382,7 +379,7 @@ carts/<id>/
 
 - The Makefile looks in `assets/` first, then in `carts/<id>/`, so old games still work.
 - Unknown keys are kept in the cartridge. The binary `.bm` format does not change, and an older kernel ignores INFO.
-- Games already moved: `pong` (`bm.info`), `yharnam` (`bm.info`, `sheet.png` and `map_*.csv` in `assets/`, the `mk*.py` scripts, `mapview.py` and `art/` in `build/`) and `hunt` (`bm.info`, `sheet.png` and `map.csv` in `assets/`, `mkassets.py` in `build/`).
+- Games already moved: `pong` (`bm.info`), `yharnam` (`bm.info`, `sheet.png` and `map_*.csv` in `assets/`, the `mk*.py` scripts, `mapview.py` and `art/` in `build/`).
 
 ## Caveats
 
@@ -395,9 +392,9 @@ carts/<id>/
 
 The example moves a game called `ball`, with a sheet and a map.
 
-1. Create `carts/ball/bm.info` with the name, author and resolution of the game (see the block below).
-2. Create the folder `carts/ball/assets/` and move `sheet.png` and `map.csv` into it.
-3. If the game has scripts of its own (`mk*.py`), create `carts/ball/build/` and move them there. Open each one and fix the paths to `main.lua` and `assets/`.
+1. Create a file that is not in this repository with the name, author and resolution of the game (see the block below).
+2. Create the folder a file that is not in this repository and move `sheet.png` and `map.csv` into it.
+3. If the game has scripts of its own (`mk*.py`), create a file that is not in this repository and move them there. Open each one and fix the paths to `main.lua` and `assets/`.
 4. Remove the game's `title_ball` line from the Makefile, because the title now comes from `bm.info`.
 5. Build the game.
 6. Compare with the `.bm` you built before the move. It must be identical except for the INFO section.
@@ -426,7 +423,7 @@ A game or an app saves the frame it is drawing as a PNG on the SD card. The play
 | How | Where |
 |---|---|
 | **Print Screen** on the keyboard | `bm/shots/` on the SD card |
-| **Select + L1 + R1** together on a pad (Share + L1 + R1 on a DS4) | `bm/shots/` on the SD card |
+| **Select** held for 3 seconds on a pad (Share on a DS4) | `bm/shots/` on the SD card |
 | `shot([prefix])` in your code | `bm/shots/` on the SD card |
 
 ## What it does
@@ -437,14 +434,16 @@ A box says `Screenshot saved` and the file name for two seconds. The picture is 
 
 - `shot([prefix])` asks for the frame being drawn. It is saved when `_draw` ends, so call it at any point of the frame; calling it twice in a frame gives one file.
 - It returns the name the file will have, or `nil` and a message if the numbers are over. It asks the player nothing.
-- The name is `<PREFIX><NNNN>.PNG`, 8.3. The prefix is the first, up to 4, letters or digits of the game's title (`Pong` gives `PONG`, `Hunter's Night` gives `HUNT`, `SHOT` if there are none) or the `prefix` you gave.
+- The name is `<PREFIX><NNNN>.PNG`, 8.3. The prefix is the first, up to 4, letters or digits of the game's title (`Pong` gives `PONG`, `Star Shooter` gives `STAR`, `SHOT` if there are none) or the `prefix` you gave.
 - The number is one more than the highest of that prefix already in `bm/shots/`, from 0001 to 9999. The Pi Zero has no clock, so there is no date.
 - The format is PNG, 8 bits RGB, the size of the game's screen (640x360, 360x360...). Nothing is lost: the console's 16-bit colours are widened to 8 bits. There is no JPG, because it spoils pixel art.
+- From the PC, over the network link, `python tools/bm_net.py IP --shot out.png` asks the console for a screenshot of the running game (the console asks for the Console password) and saves it as `out.png`. `python tools/bm_net.py IP --get bm/shots/pong0007.png out.png` fetches a file that is already in `bm/shots/`. A game must be drawing frames: with none, the request fails after 3 seconds. Only files of `bm/shots/` can be fetched. This is not verified on an RGB30.
+- From the PC, `python tools/bm_net.py IP --play game.bm` sends a `.bm` to the console and plays it at once. The console asks for the Console password. The file is not saved on the SD card. The menu starts the game when it has the keys; if an update or a Market publish is running, it shows a message and does not start the game. `--send game.bm` saves the file on the SD card instead. This is not verified on an RGB30.
 - A flat screen takes a few KB; noise can take as much as the raw picture (about 0.7 MB at 640x360).
 
 ## Caveats
 
-- [TO FILL: check Select + L1 + R1 on the PowKiddy RGB30, and `shot()` with a 3D game on the GPU; the repository says neither was tried on a Pi or an RGB30.]
+- [TO FILL: check Select held 3 s on the PowKiddy RGB30, and `shot()` with a 3D game on the GPU; the repository says neither was tried on a Pi or an RGB30.]
 
 ## Try it, step by step
 
@@ -453,7 +452,7 @@ A box says `Screenshot saved` and the file name for two seconds. The picture is 
 3. Wait for the box that says `Screenshot saved`.
 4. Put the SD card in your computer and open the folder `bm/shots/`. The picture is there.
 
-![A game as the console saved it, in bm/shots/](shots/api-tools-shot-saved.png)
+!A game as the console saved it, in bm/shots/
 
 ::: try
 Call `shot("menu")` and `shot()` in the same game. The first file starts with `MENU`, the second with the first letters of the title.

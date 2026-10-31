@@ -59,17 +59,17 @@ bm Sound changes only **projects** (`.bme`). A game (`.bm`) it only reads. This 
 
 ## Games and sound packs
 
-Press Esc, then choose **Open a game or a sound pack...** (or press Ctrl+O). The list shows what is in `/carts`, in the root of the card and in `/bm/sounds`, with the label "game" or "sound pack".
+Press Esc, then choose **Open a game or a sound pack...** (or press Ctrl+O). The list shows what is in `/carts`, in the root of the card, in `/bme` (projects, sound packs too) and in `/bm/sounds` (older sound packs), with the label "game" or "sound pack".
 
 - If the file has no sounds yet, bm Sound says so and you start from empty banks. **Save** puts the sounds in it.
-- If you open a game (`.bm`), the first save asks *Save an editable copy: NAME.BME?* and from then on you work on the copy.
+- If you open a game (`.bm`), the first save asks *Save an editable copy: name.bme?* and from then on you work on the copy.
 - **New project** (Ctrl+N) starts from blank banks: sound 0 is named `SOUND` and song 0 is named `SONG`, with the order `{0}` (pattern 0). **The demo project** loads a bank with sounds and songs: press START to hear the song.
 
 ::: note
 The top bar shows the four pages, `OCT` (the piano octave), the player (`STOP`, `SFX`, `PATTERN` or `SONG n`) and the name of the file. A yellow dot before the name means changes not saved yet.
 :::
 
-![The SOUNDS page: the name, the three graphs and the bars of a parameter group](shots/editor-sound-sounds.png)
+!The SOUNDS page: the name, the three graphs and the bars of a parameter group
 
 # The pages
 
@@ -119,7 +119,7 @@ Every step has a note, a sound, a volume and an effect. The effects are the same
 | L | DELAY | the start, in sixteenths of a step |
 | X | CUT | the end, in sixteenths of a step |
 
-![The SFX page: the header fields, the lanes and the step box](shots/editor-sound-sfx.png)
+!The SFX page: the header fields, the lanes and the step box
 
 ## PATTERN
 
@@ -131,7 +131,26 @@ The header has three fields: STEPS (1 to 64), TEMPO and SWING. Tempo and swing b
 - A note is a coloured cell; the colour is stronger when the volume is higher. `--` in red is a note OFF (the note is released). A white corner marks a step with an effect.
 - While a song or the pattern plays, the step being played is lit.
 
-![The PATTERN page: eight tracks, sixteen steps](shots/editor-sound-pattern.png)
+!The PATTERN page: eight tracks, sixteen steps
+
+### Solo
+
+Solo lets you hear one track alone.
+
+- Press `a` (pad: **B** on the track name) to solo the track you are on. The other tracks do not sound when the pattern plays.
+- You can solo more than one track. Go to another track and press `a` again.
+- Press `a` again on a solo track to clear it.
+- The header of a solo track shows an `S` next to the mute mark. A line on the page shows `SOLO` with the track numbers.
+- The solo is only for listening. It is not saved in the file. The mute marks (`M`) stay as they are.
+
+### The piano roll
+
+The grid is the default view. Press `f` (pad: **B** on a step) to see one track as a piano roll.
+
+- The roll shows one track. The vertical side is the pitch: a window of 20 semitones with a ruler of note names. The window scrolls when the cursor goes out of it. The horizontal side is time: the steps.
+- Up and down move the pitch cursor. Enter puts a note at the cursor. If the step has a note already, Enter moves the note to the cursor. If the note is already at the cursor, Enter removes it.
+- The other keys work as in the grid. The mouse works too: a click on the roll puts the cursor there and does what Enter does.
+- Press `f` again to go back to the grid. Both views show the same data, so the file is the same.
 
 ## SONG
 
@@ -152,7 +171,7 @@ A sound's own ECHO and ROOM say how much of it goes to the song's echo and room.
 
 Under the slots a box shows the chosen pattern and a small picture of its notes.
 
-![The SONG page: the order of the patterns](shots/editor-sound-song.png)
+!The SONG page: the order of the patterns
 
 ## The assistant (F6)
 
@@ -164,7 +183,7 @@ F6 (or **Compose with the assistant...** in the Esc menu) opens a panel that mak
 - The instruments they use become sounds of the bank; a sound with the same name is used again.
 - Ctrl+Z takes it back.
 
-![The assistant panel on top of the PATTERN page](shots/editor-sound-assist.png)
+!The assistant panel on top of the PATTERN page
 
 Keys inside the panel: Up and Down choose, Left and Right change the variant, Enter puts it in the bank, Esc closes, Tab goes to the next mode (pad: X), PgUp and PgDn scroll, typing sets the request, Ctrl+U clears it.
 
@@ -174,7 +193,7 @@ F7 (or **Riff...** in the menu) opens a box where you write a pattern in one lin
 
 # Controls
 
-The pad and the keyboard do the same things. The bottom line of the screen shows the keys of the page you are on. Hold F12 to see the keys at any time.
+The pad and the keyboard do the same things. The bottom line of the screen shows the keys of the page you are on. The bar ends with the chip F12 keys. Click it, or hold F12, to see every key of the page.
 
 | Action | Pad | Keyboard |
 |---|---|---|
@@ -195,6 +214,8 @@ The pad and the keyboard do the same things. The bottom line of the screen shows
 | Piano, lower row | - | `z s x d c v g b h n j m` |
 | Piano, upper row (an octave up) | - | `q 2 w 3 e r 5 t 6 y 7 u` |
 | Piano octave | - | `,` / `.` |
+| PATTERN: solo of the track | B on the track name | `a` |
+| PATTERN: piano roll or step grid | B on a step | `f` |
 | Save | - | Ctrl+S |
 | Save as a new sound pack | - | Ctrl+Shift+S |
 | Open | - | Ctrl+O |
@@ -202,12 +223,15 @@ The pad and the keyboard do the same things. The bottom line of the screen shows
 | Undo | - | Ctrl+Z |
 | Copy / paste the item | - | Ctrl+C / Ctrl+V |
 | Export to a game | - | Ctrl+E |
+| Import a WAV or MIDI file | - | Ctrl+W |
 | Try it in the game | - | F5 or Ctrl+R |
 | Assistant | - | F6 |
 | Riff | - | F7 |
 | Leave | START + SELECT | Esc, then **Exit** |
 
 The mouse works too: a click chooses, a double click does what A does, the wheel changes the value under the pointer, and a bar dragged left or right changes it.
+
+In the name editor a click on a letter box chooses that letter. In the riff line a click puts the caret there.
 
 ::: note
 A short tap on SELECT opens the menu. If you press SELECT with left/right or up/down, it changes page or item and the menu does not open.
@@ -222,12 +246,13 @@ A short tap on SELECT opens the menu. If you press SELECT with left/right or up/
 | Play / Stop | plays or stops the music or the effect (START) |
 | Undo | takes back the last edit (Ctrl+Z) |
 | Save | writes into the open file; with no file, asks for a pack name |
-| Save as a new sound pack... | asks for 8 characters and writes `/bm/sounds/NAME.BME` |
+| Save as a new sound pack... | asks for 8 characters and writes `/bme/name.bme` |
 | Open a game or a sound pack... | opens another file (Ctrl+O) |
 | Import from... | takes a sound, an effect, a pattern or a song from another file |
 | Export to a game... | writes this bank into a game |
 | Instrument... | SOUNDS page only: a ready-made sound |
 | Samples... | a sample into the sound |
+| Import WAV or MIDI... | a WAV file as a sample, a MIDI file as a song, from `/docs` (Ctrl+W) |
 | Compose with the assistant... | opens the assistant (F6) |
 | Riff... | opens Riff (F7) |
 | Try it in the game | with a game open: saves and runs it |
@@ -268,7 +293,7 @@ If you hear nothing, check that the volume of the console is up and that the ste
 5. Fill other steps. With the piano keys (`z s x d c v`) a note is placed and the cursor moves to the next step.
 6. Do the same on track 2 with another sound, for a bass or a drum.
 7. Press Space. The pattern plays and the step being played is lit.
-8. To mute a track while you listen, go to its header and press Enter. An `M` appears. Press Enter again to unmute.
+8. To mute a track while you listen, go to its header and press Enter. An `M` appears. Press Enter again to unmute. To hear one track alone, press `a` on it: this is a solo.
 
 ::: try
 Put a short noise sound on track 1 at steps 1, 5, 9 and 13, and a bass on track 2 at steps 1 and 9.
@@ -296,11 +321,34 @@ You can take a sound, an effect, a pattern or a song from another game or sound 
 2. In the list, choose the file. The list shows games and sound packs. While the cursor rests on a file, its content is read: how many sounds, effects, patterns and songs it has.
 3. Choose what to take: *a sound*, *a sound effect*, *a pattern*, *a song* or *everything*.
 4. Choose the item from the list that follows.
-5. A message says where it went: for example `imported as sound effect 5`. The sounds that an effect, a pattern or a song uses come with it, in free slots. A sound that is already the same in your bank is not copied twice.
+5. A message says where it went: for example `imported as sound effect 5`. The sounds that an effect, a pattern or a song uses come with it, in free slots. A sound that is already the same in your bank is not copied twice. A SAMPLE sound brings its sample too (a sample with the same bytes is not copied twice).
 6. Press Ctrl+S to save.
 
 ::: warn
 *everything* replaces the whole bank you are working on, after a question. If there is no free slot, the import stops with a message such as `no free sound slots`. Undo is cleared after an import.
+:::
+
+## Import a WAV or MIDI file
+
+You can bring a sound recording or a song from the SD card into the bank. Put the file in the `/docs` folder of the card, with a name of the 8.3 kind (`kick.wav`, `tune.mid`).
+
+1. Open the Esc menu and choose **Import WAV or MIDI...** (or press Ctrl+W).
+2. In the list, choose the file. The list shows the `.wav` and `.mid` files of `/docs` with their size.
+3. For a WAV file, choose how to keep it: *as it is*, *mono*, *mono, 22050 Hz* or *mono, 11025 Hz*. The last ones make the sample smaller. A message says the result, for example `sample 2 TONE: 22050 Hz mono, 0.5 s, in sound 00`.
+4. The sample goes to the end of the bank's samples, and the sound you are on plays it (the wave becomes SAMPLE). The root note and the loop in the file are kept, when the file has them. A sample with the same bytes is not added twice.
+5. For a MIDI file, a new song appears with the file's name. Its patterns have 64 steps (or whole bars of the file's time signature), and the song has the file's tempo. A message says what was made, for example `song 3: 1 patterns, 120 BPM, 4 new sounds`.
+6. Press Ctrl+S to save.
+
+What the WAV import reads: 8, 16, 24 and 32-bit whole numbers and 32 and 64-bit floats, mono or stereo, up to 4 MB. A rate above 48000 Hz is brought down to 48000 Hz.
+
+What the MIDI import does:
+- One step is a sixteenth note. Notes are put on the nearest step.
+- Each MIDI channel gets a sound. Its wave follows the General MIDI program (a bass is a SAW, a piano a PLUCK). The drum channel (10) plays the console's drum kit: `bd`, `sd`, `hh`, `oh`, `cp`, `rim`, `tom`, `cb`.
+- A pattern has 8 tracks, one note on a track at a time. Chords go to more tracks. A note that ends before the next one gets an OFF step.
+- Only the first tempo and the first time signature are used.
+
+::: warn
+A MIDI note over the 8 tracks is dropped, and the message tells how many. If the bank has fewer free pattern slots than the song needs, the song is cut to the slots there are. A pattern that a song of the bank already plays is not taken. The history of undo is cleared. A sample over the 64-sample limit or over the bank's memory is refused. A file with 12-bit samples, more than 2 channels or a rate under 1000 Hz is refused with a message. Not verified on the Pi and on the RGB30.
 :::
 
 ## Play it in your game
@@ -332,8 +380,8 @@ An effect uses a free voice and the music's track on that voice is silent while 
 
 # Saving and exporting
 
-- **Save** (Ctrl+S) writes the bank into the open file. With a game open, the first save asks for the editable copy `NAME.BME`. After a save the bar says the game plays the new sounds.
-- **Save as a new sound pack...** (Ctrl+Shift+S) asks for a name of up to 8 characters and writes `/bm/sounds/NAME.BME`. A sound pack is a small program that plays your songs and effects; you can open it later in bm Sound.
+- **Save** (Ctrl+S) writes the bank into the open file. With a game open, the first save asks for the editable copy `name.bme`. After a save the bar says the game plays the new sounds.
+- **Save as a new sound pack...** (Ctrl+Shift+S) asks for a name of up to 8 characters and writes `/bme/name.bme`. A sound pack is a small program that plays your songs and effects; you can open it later in bm Sound.
 - **Export to a game...** (Ctrl+E) lists the games and, after a question, writes this bank into the one you choose. Its sounds and music are replaced by these.
 ::: warn
 Export replaces the sounds of the game you choose. The question names the file: read it before you confirm.
@@ -362,6 +410,5 @@ Export replaces the sounds of the game you choose. The question names the file: 
 - Copy a pattern or a sound with Ctrl+C and paste it with Ctrl+V to make a variation without losing the first.
 - The notes of the piano rows play on the page's sound; change the octave with `,` and `.`.
 - Ctrl+Z undoes the last edit, also a paste, a clear or an assistant piece.
+- If **Import WAV or MIDI...** says `no .WAV or .MID file in /docs on the SD card`, the files are not in the `/docs` folder, or their names are longer than the 8.3 kind.
 - When you choose a file in **Import from...**, a line may say `a sound bank this version cannot read`: that file cannot be imported.
-
-[TO FILL: how to bring a WAV file into the bank on the console]

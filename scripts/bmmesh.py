@@ -6,6 +6,7 @@ mkbm.py --models and the tests.
 
 A model is a dict:
   { "name": "house",
+    "flags": 0,                                      optional: map class, MODEL_SOLID 2, MODEL_FLOOR 4, MODEL_DECOR 8
     "verts": [(x, y, z), ...],                       y up, as for mesh()
     "faces": [(a, b, c, colour, (u0, v0, u1, v1, u2, v2)), ...] }
 a, b, c are 0-based and clockwise seen from the side that shows; colour is
@@ -24,7 +25,7 @@ SEC_MESH, SEC_ANIM = 8, 9            # src/bm/bm.h; the first bm Studio files ha
 SEC_AUDIO, SEC_OLD_ANIM = 6, 7
 TEXTURED = 0x80000000
 NAME_LEN = 16
-MAX_VERTS, MAX_FACES, MAX_MODELS = 65535, 65535, 256      # M39: 4096 and 16384 before
+MAX_VERTS, MAX_FACES, MAX_MODELS = 65535, 65535, 256      # bm3d 5.0: 4096 and 16384 before
 
 
 def encode(models, inset=0.25):
@@ -47,7 +48,7 @@ def encode(models, inset=0.25):
         # the light baked at its corners, (r, g, b) x 3 bytes (128 = 1), in
         # place of the texture corners: "light" in the face, after uv
         lit = bool(m.get("lit"))
-        out += name.ljust(NAME_LEN, b"\0") + struct.pack("<HHI", len(v), len(f), 1 if lit else 0)
+        out += name.ljust(NAME_LEN, b"\0") + struct.pack("<HHI", len(v), len(f), (1 if lit else 0) | (m.get("flags", 0) & ~1))
         for p in v:
             out += struct.pack("<3f", *p)
         for face in f:

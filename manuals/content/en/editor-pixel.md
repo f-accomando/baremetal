@@ -31,24 +31,25 @@ A game looks like what is on its sheet. With bm Pixel you draw on the console it
 
 ## Good to know
 
-- There are three pages: **F1** draw, **F2** sheet, **F3** palette. **Esc** opens the menu.
+- There are four pages: **F1** draw, **F2** sheet, **F3** palette, **F4** stack. **Esc** opens the menu.
 - Hold **F12**, or press **?**, to see the keys of the page. **Tab** (on the pad **X**) opens the list of the page's commands.
 - With a mouse, the mouse does what the keys do.
+- In a dialog line, a click puts the caret between the letters. On the palette page the wheel moves the choice one row; over R, G or B it changes that value.
 
 ## Caveats
 
-- bm Pixel edits the sheet and the palette. It does not name zones, draw hitboxes or set tile flags (see the chapters on them).
+- bm Pixel edits the sheet and the palette. It makes only stack zones (F4). It does not name other zones, draw hitboxes or set tile flags (see the chapters on them).
 
 # Opening a file
 
 ## Where to start
 
-Start from the **Dev** tab of the menu, or press **X** on the cover of a game and choose **Open in bm Pixel**. If you start bm Pixel with no file, it shows the list of the `.bm` and `.bme` files it finds in `/carts` and in the root of the card, and a new empty sheet is ready behind it.
+Start from the **Dev** tab of the menu, or press **X** on the cover of a game and choose **Open in bm Pixel**. If you start bm Pixel with no file, it shows the list of the `.bme` projects of `/bme` and the `.bm` and `.bme` files it finds in `/carts` and in the root of the card, and a new empty sheet is ready behind it.
 
 ## Projects and games
 
 - A **project** is a `.bme` file. The editors change projects and save them where they are.
-- A **game** is a `.bm` (or `.b16`) file. It is read only. When you open one, the screen says `a game: saving makes its copy`, and saving writes an editable `.BME` copy, never the game itself.
+- A **game** is a `.bm` file. It is read only. When you open one, the screen says `a game: saving makes its copy`, and saving writes an editable `.BME` copy, never the game itself.
 - Only the sheet and the palette change in the saved file: the code, the map, the cover, the sounds and the models stay as they were.
 
 ## The menu (Esc)
@@ -77,7 +78,7 @@ A new sheet saved with *Save as* becomes a cartridge whose code just shows the s
 
 The chosen sprite, enlarged on the left. On the right: the colours, the tool, the sprite number with its place on the sheet, the sprite as the game draws it, and the animation next to it. A line under them says the speed and whether pause, onion skin, boxes and mirror are on.
 
-![F1, the drawing page](shots/editor-pixel-draw.png)
+!F1, the drawing page
 
 The sprite size is 8, 16, 32, 64 or 128 pixels: **z** goes to the next size. **PgUp** and **PgDn** go to the sprite before and after. **t** shows or hides the grid.
 
@@ -85,11 +86,31 @@ The sprite size is 8, 16, 32, 64 or 128 pixels: **z** goes to the next size. **P
 
 The whole sheet. The arrows choose a sprite (in the chosen size), **Enter** draws it. **+** and **-** zoom. The frames of the animation are outlined after the sprite.
 
-![F2, the sprite sheet](shots/editor-pixel-sheet.png)
+!F2, the sprite sheet
 
 ## F3: the palette
 
 All the colours, up to 256, with the red, green and blue value of the one chosen. See the chapter on palettes.
+
+## F4: the stack
+
+A *stack zone* is a zone with *n* slices of the same size that lie side by side on the sheet, from left to right. Slice 1 is the bottom. In the cartridge it is the line `stack name x y w h n`; a game draws it with `zstack`. The Stack page shows one slice, zoomed, on the left. On the right it shows the stack zones, a row of small pictures of the slices, and the whole stack as it turns (`stack` with a rotation angle). The stack reads the sheet each frame, so a change to a slice shows at once. A `stackv` zone has the slices one under the other on the sheet, from the top down; the page reads and writes both layouts. The line ends with `h` (side by side, `stack`) or `v` (one under the other, `stackv`).
+
+| Key | Action |
+|---|---|
+| left / right | the slice before / after |
+| up / down | the stack zone before / after |
+| PgUp / PgDn | 8 slices |
+| Enter | draw the slice on F1 (square slices only; **F4** comes back) |
+| k | onion skin: the slice before, dimmed, in the empty pixels of this slice |
+| c | copy this slice to the next one and go to it (extrusion; **Ctrl+Z** undoes) |
+| Del or x | delete the zone (press twice; the pixels stay on the sheet) |
+| n | new zone: name, x, y, w, h, n, `h` or `v` (for example `tree 0 0 16 16 8 h`) |
+| e | change the zone (the same line; a new name makes a new zone) |
+| p | the stack turns or stops |
+| , and . | turn the stack by hand |
+
+When no stack zone exists, **n** makes the first one. The line starts with the sprite chosen on F1. **Ctrl+S** writes the zones and the slice count (byte 26 of the zone) with the sheet. There is no undo for the zone line; the copy of a slice has one. The onion skin draws at most 600 small squares, only when it is on. With a mouse: click a zone or a small picture to choose it, double click a small picture to draw it, the wheel changes the slice, a drag on the turning stack turns it by hand, a click on it stops or starts the turn, and the right button opens the list of commands. On the pad: left / right the slice, up / down the zone, **A** draw the slice, **B** turn or stop, **X** + left / right turn by hand, **X** (tap) the list of commands.
 
 ## The hitbox preview (j)
 
@@ -99,7 +120,7 @@ Press **j** on F1 or F2 to show or hide the boxes of the `BOXES` section of the 
 
 | Keys | Action |
 |---|---|
-| Y + left / right | change page |
+| Y + left / right | change page (F4 is a page) |
 | Y + B | menu |
 | Y + A | undo |
 | Y + up / down | the sprite before / after |
@@ -129,7 +150,9 @@ On F1 a pointer moves with the arrows. **Space** uses the tool. With the pencil 
 | l | line |
 | u / U | rectangle / filled rectangle |
 | o / O | oval / filled oval |
-| m | select |
+| m | select a rectangle (it also clears a wand selection) |
+| w | wand select: the area of one colour |
+| q | tile view on / off |
 | , and . | the colour before / after |
 | x | the colour used before |
 | 1 - 9, 0 | the first ten colours |
@@ -142,10 +165,17 @@ On F1 a pointer moves with the arrows. **Space** uses the tool. With the pencil 
 | z | sprite size |
 | PgUp / PgDn | sprite before / after |
 | j | show or hide the boxes |
+| Ctrl+E | export a PNG or a GIF to `/docs` |
 | F6 | the assistant: a base for a sprite |
 | Tab | the list of commands |
 
 Colour 0 is transparent.
+
+The hint bar at the bottom of the drawing page shows only the main keys: the tools `b e g m w`, the shapes `l u o`, `Ctrl+E PNG`, the colour keys, **z** and **Tab**. The other keys (`j q` and the rest) are in the **F12** help. The bar ends with the chip F12 keys. Click it, or hold F12, to see every key of the page.
+
+## Tile view (q)
+
+Press **q** to see the sprite as a tile. The preview on the right shows the sprite 3 times 3, side by side. You see the seams between the copies. The text under the preview says `tile view 3x3 (q)`. Sprites up to 32x32 fit in the preview. Press **q** again to go back. The menu has the entry *Tile view (q)*.
 
 ## Shapes and selections
 
@@ -160,9 +190,33 @@ For lines, rectangles, ovals and selections: press **space** to fix one corner, 
 | h / v | flip left-right / up-down |
 | r | turn by a quarter |
 | Del | clear the selection, or the whole sprite |
+| Ctrl+E | export the sprite, the animation or the sheet as a PNG, or the animation as a GIF |
 | Shift+w a s d | scroll the sprite by one pixel (what goes out comes back on the other side) |
 
 The transparent pixels of a pasted block leave what is underneath.
+
+### Wand select (w)
+
+Press **w** and then **space** on a pixel. bm Pixel selects the connected area of the same colour: the pixels that touch the one you chose, up and down and left and right, and have its colour. A dotted line goes round the area. The status line says how many pixels you chose. Now **Ctrl+C**, **Ctrl+X**, **Del**, **Enter** (lift), **h**, **v** and **r** act only on these pixels. The rest of the sprite stays. Press **m** and select a rectangle to clear the wand selection.
+
+## Export a PNG
+
+Press **Ctrl+E** (menu: *Export a PNG or GIF to /docs...*) to write a PNG file or a GIF file. A list asks what to export:
+
+- *this sprite*: the sprite you draw;
+- *the animation as a PNG*: its frames side by side in a strip;
+- *the animation as a GIF: N frames, F a second*: an animated image, with one image for each frame, in the order of the preview;
+- *the whole sheet*.
+
+Then a line asks the file name and suggests one made from the file name. The PNG goes to `/docs` on the card. The pixels with colour 0 are transparent in the PNG. The name is 8.3 in lower case: letters, digits and `_`, and the extension `.png`. If the name has more than 8 letters, bm Pixel cuts it to 8 and the status line says `name cut to 8 letters`. The status line shows `saved /docs/NAME.png` when the file is written. If the export fails, the status line says why.
+
+The GIF has these rules:
+
+- It loops for ever.
+- The transparent pixels stay transparent.
+- The speed comes from the fps of the sprite, so it is the speed of the preview.
+- The file name has up to 8 letters and the extension `.gif`. The file goes to `/docs`.
+- A GIF holds 255 colours at most. If the frames have more, bm Pixel reduces them to 255.
 
 ## The assistant (F6)
 
@@ -246,7 +300,7 @@ A box is given from the top-left corner of the frame, in pixels, and it can stic
 - On F2 they are drawn over every frame of every zone you can see.
 - A box shows only when the sprite you are on matches a zone of the file.
 
-![F1 with the boxes of a zone](shots/editor-pixel-boxes.png)
+!F1 with the boxes of a zone
 
 ## Caveats
 
@@ -304,7 +358,7 @@ A resource is one thing taken out of a cartridge in its own file. For pictures, 
 
 ## What you can do today
 
-- In the menu's **Lib** tab, the **Images** group lists the zones of SPRITES. `docs/RISORSE.md` describes **A** opening one in bm Pixel, but this was not confirmed in the code. The tab is hidden unless `lib_tab=1` is in `bm/config.txt`.
+- The menu has no tab for resource files. Open a resource file from the editors.
 - On the PC, `scripts/bmres.py` extracts a sprite zone into a `.bmi` (with its boxes), adds a resource to a `.bm`, and converts to and from `.png`, `.hex` and `.gpl`.
 
 ::: copy
@@ -329,9 +383,9 @@ python3 scripts/bmres.py add GAME.bm COIN.bmi
 5. Press **b** for the pencil. Move the pointer with the arrows and press **space**. Hold space and move to draw a line of pixels.
 6. Press **y** to draw mirrored: what you draw on one side appears on the other. Press **y** again to stop.
 7. If you make a mistake, press **Ctrl+Z**.
-8. Press **Esc**, choose **Save as...**, type a name such as `HERO.BME` and press Enter. The screen says `saved`.
+8. Press **Esc**, choose **Save as...**, type a name such as `hero.bme` and press Enter. The screen says `saved`.
 
-![Your first sprite](shots/editor-pixel-first.png)
+!Your first sprite
 
 ::: try
 Draw a coin: a filled oval with **O**, then pick a darker colour and draw an outline with **o**.

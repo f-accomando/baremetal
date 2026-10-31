@@ -21,18 +21,17 @@ bm SDK is the program where a game starts. It holds the project's code, sprites,
 
 - **The other tools of the suite.** On the project page, keys `1` to `6` open the same file in bm Code, bm Pixel, bm Studio, bm Animator, bm Mesh and bm Sound. Their menu has **Back to bm SDK**, which saves and returns.
 - **The Market.** The suite's apps can be installed from the Market Apps page. The SDK prefers the copies installed on the SD card over the ones built into the kernel, so tools can be updated from the Market.
-- **The Lib tab.** The menu's Lib tab lists the resources found in your games (models, images, sounds, maps, palettes, kits). Its options include *Copy into a project...*, which brings a resource into a project. The tab is hidden by default: `lib_tab=1` in `bm/config.txt` brings it back.
 - **The Games tab.** A game you build appears there.
 
 ## The rules of the suite
 
 ::: warn
-The editors modify only **projects** (`.bme`). A **game** (`.bm`, `.b16`) is read-only. If you save while a game is open, the console asks *Save an editable copy: NAME.BME?* and from then on you work on the copy.
+The editors modify only **projects** (`.bme`). A **game** (`.bm`) is read-only. If you save while a game is open, the console asks *Save an editable copy: name.bme?* and from then on you work on the copy.
 :::
 
-- **Ctrl+B** builds the game of the project: a `.bm`, or a `.b16` when the target is `.b16`.
-- **Ctrl+Shift+B** exports the `.b16` (the RGB30 edition).
-- A `.b16` never replaces the `.bm`: they are two editions, with their own builds.
+- **Ctrl+B** builds the game of the project: a `.bm`.
+- On the Pi, *Publish to the Market...* in the menu (Esc) builds the `.bm` and opens the Publish panel.
+- A `.bm` runs on the Pi Zero W and on the RGB30.
 
 # Opening bm SDK
 
@@ -56,22 +55,22 @@ The SDK looks like bm Studio and bm Animator: a panel on the left with lists, tw
 | F4 | 3D: models and animations |
 | Esc | The menu |
 
-![The project page of bm SDK](shots/editor-sdk-project.png)
+!The project page of bm SDK
 
 ## The project page
 
 The left panel has two groups.
 
 - **OPEN IN**: `1` bm Code, `2` bm Pixel, `3` bm Studio, `4` bm Animator, `5` bm Mesh, `6` bm Sound.
-- **PROJECT**: `t` the title, `a` the author, `r` the screen, `b` the target (`.bm` or `.b16`), `n` a new project from a template.
+- **PROJECT**: `t` the title, `a` the author, `r` the screen, `n` a new project from a template.
 
 Move with up and down, do with Enter, or press the key of the row. The key `r` goes through the sizes `640x360`, `480x270`, `320x180`, `256x256`, `360x360` and back to `640x360`.
 
-On the right, **CONTENTS** shows what is in the file: code (lines, KiB, tokens), sprites (how many cells are drawn), map (size, layers, cells), models, animation, sound and the tiles with flags. **LAST TRY** shows the numbers of the last F5. **ASSISTANT** says that F6 gives step-by-step guides to make a 2D or a 3D game.
+On the right, **CONTENTS** shows what is in the file: code (lines, KB, tokens), sprites (how many cells are drawn), map (size, layers, cells), models, animation, sound and the tiles with flags. **LAST TRY** shows the numbers of the last F5. **ASSISTANT** says that F6 gives step-by-step guides to make a 2D or a 3D game.
 
 ## The other pages
 
-- **F2, the code.** A quick editor with syntax colours and the number of tokens in the status line. For more than a quick change, press `1` on the project page to open bm Code.
+- **F2, the code.** A quick editor with syntax colours and the number of tokens in the status line. For more than a quick change, press `1` on the project page to open bm Code. The help on an API function (**Ctrl+Q**) and the check of unknown API names on save are in bm Code, not in this quick editor.
 - **F3, the sprites.** The sheet, the palette and the **flags** of the chosen cell (keys `0` to `7`). The flag convention is bmlib's: 0 wall, 1 platform, 2 ladder, 3 water, 4 hurts.
 - **F3 again, the map.** See chapter 5.
 - **F4, the 3D.** The project's models in a list and the animations of the chosen one. Key `i` writes into the code the lines to load and draw the model.
@@ -103,12 +102,12 @@ The smallest game: a ball you move with the arrows.
 3. Choose **Empty 2D** with up and down and press **Enter**. The status line says `new project (Empty 2D): Esc > Save as gives it a name, F5 tries it`. The title is `New game`.
 4. Press **F2**. You see the code of the game: `_init`, `_update` and `_draw`.
 5. Move the cursor with the arrows to the line `print("hello!", ...)` and change the word `hello!` to your own text.
-6. Press **Esc**, choose **Save as...** and press Enter. A box asks `file name (8.3, in /carts)` and suggests `MYGAME.BME`. Type a name and press **Enter**. The status line says `saved` and the name of the file.
+6. Press **Esc**, choose **Save as...** and press Enter. A box asks `file name (8.3, in /bme)` and suggests `mygame.bme`. Type a name and press **Enter**. The status line says `saved` and the name of the file.
 7. Press **F5**. The SDK saves and the console plays the game: a yellow ball on a dark background with your text. The arrows move the ball.
 8. Leave the game. Press Start + Select, Ctrl+Shift+Esc or Ctrl+Esc (Esc alone goes back inside a tool).
 9. You are back in the SDK. Press **F1**: the **LAST TRY** line now shows fps and milliseconds.
 
-![Empty 2D running: the ball and your text](shots/editor-sdk-empty.png)
+!Empty 2D running: the ball and your text
 
 ::: try
 Change the number `12` in `circfill(x, y, 12, 0xFFD050)` to make the ball bigger or smaller, press F5 again and see the difference.
@@ -126,11 +125,11 @@ A hero that runs and jumps on a map with ground and planks. The camera follows i
 6. Press **F2** to read the code. It uses `bmlib`: `lib.step(hero)` does gravity and collisions with the map, `lib.camera` follows the hero.
 7. Press **F3** until the map shows. Move the cursor to an empty cell in the air, choose the planks with `x` on a plank, and press **Space** to place a new plank.
 8. Press **Esc**, **Save as...**, type a name and press **Enter**.
-9. Press **F5**. The hero stands on the ground. The arrows run, **A** (Space on the keyboard) jumps, **down** drops through a plank.
+9. Press **F5**. The hero stands on the ground. The arrows run, **act1** (Space on the keyboard; the screen shows the button) jumps, **down** drops through a plank.
 10. Run to the first gap: if you fall, the hero comes back to the start. Find your new plank.
 11. Leave the game and you are back in the SDK. See step 8 of Empty 2D for the keys.
 
-![Platform 2D running: the hero on the planks](shots/editor-sdk-platform.png)
+!Platform 2D running: the hero on the planks
 
 ::: try
 Press `z` on the map to switch to the 16x16 brush, or place a plank higher up and check that the hero can still reach it.
@@ -148,13 +147,13 @@ Press `z` on the map to switch to the 16x16 brush, or place a plank higher up an
 1. Press **Ctrl+N** and choose **Shooter 2D**.
 2. Press **F3** to see the two sprites: the ship (1) and the enemy (5).
 3. Press **Esc**, **Save as...**, type a name and press Enter.
-4. Press **F5**. The arrows fly the ship, **A** fires; the enemies come from the right. When the game is over, **A** starts again.
+4. Press **F5**. The arrows fly the ship, **act1** (Space on the keyboard) fires; the enemies come from the right. When the game is over, **act1** starts again.
 
 ## Tutorial: Versus 2D
 
 1. Press **Ctrl+N** and choose **Versus 2D**.
 2. Press **Esc**, **Save as...**, type a name and press Enter.
-3. Press **F5**. Two fighters: each with a controller; alone, the computer plays the second. Left and right walk, **A** punches, **B** jumps. The punches are hitboxes and the bodies hurtboxes.
+3. Press **F5**. Two fighters: each with a controller; alone, the computer plays the second. Left and right walk, **act2** (X on the keyboard) punches, **act1** (Space) jumps. The punches are hitboxes and the bodies hurtboxes.
 
 ## Tutorial: Online 2D
 
@@ -171,7 +170,7 @@ The game's random numbers come from the match's seed (`lib.rng`), never from `ma
 
 1. Press **Ctrl+N** and choose **3D scene**.
 2. Press **Esc**, **Save as...**, type a name and press Enter.
-3. Press **F5**. A floor, four cubes and a ball with its shadow. The arrows move the ball, **A** jumps, and the camera follows. The top left shows the number of triangles.
+3. Press **F5**. A floor, four cubes and a ball with its shadow. The arrows move the ball, **act1** (Space on the keyboard) jumps, and the camera follows. The top left shows the number of triangles.
 
 ## Tutorial: 3D with models
 
@@ -184,7 +183,7 @@ The game's random numbers come from the match's seed (`lib.rng`), never from `ma
 
 Press **F3** to see the sprites, then **F3** again for the map. A map is made of tiles from the sprite sheet, on layers.
 
-![The map page: layers, flags and the 16x16 brush](shots/editor-sdk-map.png)
+!The map page: layers, flags and the 16x16 brush
 
 ## What it does
 
@@ -194,19 +193,48 @@ Press **F3** to see the sprites, then **F3** again for the map. A map is made of
 - `z` switches between 8x8 and 16x16: a 16x16 tile is 2 x 2 cells, placed on even cells.
 - `+` and `-` zoom in and out; `m` shows the whole 256x256 map on one screen (*Overview*).
 - `c` shows the flags of the tiles.
+- `t` turns the terrain brush on and off (see below).
 - `Home`, `End`, `PgUp` and `PgDn` move a page left, right, up and down.
+
+## The terrain brush (t)
+
+The terrain brush paints land, water and walls and chooses the border tiles for you. Press **t** on the map page (menu: *Terrain brush*). Press **t** again to leave. It does not work in the 3D view.
+
+A terrain set is a block of 4 x 4 tiles of the sprite sheet. The tile you chose is the first tile of the block, at the top left. In 8x8 mode the 16 tiles are next to each other. In 16x16 mode (`z`) each tile is 2 x 2 cells, so the block steps by 2 cells.
+
+For each tile of the set, bm SDK looks at the four neighbours. Each neighbour that is in the set adds a number: north 1, east 2, south 4, west 8. The sum is the mask, from 0 to 15. The tile in the block is at the column `mask % 4` and the row `mask // 4`, counted from the first tile:
+
+| Row | Column 0 | Column 1 | Column 2 | Column 3 |
+|---|---|---|---|---|
+| 0 | mask 0: alone | mask 1: N | mask 2: E | mask 3: N+E |
+| 1 | mask 4: S | mask 5: N+S | mask 6: E+S | mask 7: N+E+S |
+| 2 | mask 8: W | mask 9: N+W | mask 10: E+W | mask 11: N+E+W |
+| 3 | mask 12: S+W | mask 13: N+S+W | mask 14: E+S+W | mask 15: all four |
+
+Draw the 16 tiles of the set in this order on the sheet. Then:
+
+- **Space** paints the cell with the set. The cell and its 4 neighbours take the tile that fits their mask. Only the neighbours that are already in the set change.
+- **Backspace** erases the cell and fits its 4 neighbours again.
+- Each stroke works on the current layer. One stroke is one undo step (**u**).
+
+The status line shows `TERRAIN base N` while the brush is on. The hint bar shows the chip `t terrain`. The key **m** shows the whole map: it is in the help (**F12**). The bar ends with the chip F12 keys. Click it, or hold F12, to see every key of the page.
+
+The RGB30 SDK has the same brush. Press **t** on the map page, or choose *Terrain brush* in the **X** list. The status line shows `TERRAIN` and the base tile. Paint and erase work as on the Pi. The hint chip **c** (flags) became **t** (terrain) on a keyboard; **c** stays in the help and the menu.
 
 ## Good to know
 
 - Map cells are numbers: 0 is empty, the others are the tile.
 - With the mouse: the left button places the tile, the middle one picks it, the right or middle button dragged moves the view, the wheel scrolls.
+- In the code page, drag the left button to select text and double click to select a word; Ctrl+C and Ctrl+X use the selection, and a letter or Backspace replaces it. In a dialog line, a click puts the caret there. On the RGB30 sounds page the wheel over a field or a step changes it, a double click plays it, and a click on a long message hides it.
 - When you go to a layer named `objects`, the brush becomes 16x16 and the first placeholder tile (1024 or more) is chosen. Placeholders are tags the game does not draw: the game reads them and builds things there.
+- **Sprite previews.** On the `objects` layer, **p** shows the real sprite over each placeholder, or hides it. A preview needs a zone named `pv<cell>` on the sprite page, where `<cell>` is the number of the placeholder's tile; the zone is the rectangle of the sprite on the sheet. The sprite stands on the bottom centre of the 16x16 tile. Previews show at zoom 8 and above. A project made by a build script can bring its zones (Yharnam does).
 - The flags belong to the **tile** on the sheet, not to a place on the map. Set them on the sprite page with keys `0` to `7`.
 
 ## Caveats
 
 - A map has at most 8 layers: the SDK says `a map has at most 8 layers`.
 - The menu entry *New map layer (n/8)* does the same as `L` and shows how many you have.
+- **Import a Tiled map**: save the map in Tiled as JSON (`.tmj`): orthogonal, tiles of 8x8 or 16x16 pixels, layer format CSV, fixed size, at most 256x256 cells. Put the file in the `/docs` folder of the SD card. Open the menu (`Esc`), choose *Import a Tiled map (.tmj)...*, choose the file, then *add the layers to the map* or *replace the map*. Each Tiled tile layer becomes a map layer with the same name. A Tiled tile is the sheet tile in the same column and row (a 16x16 tile is 2x2 cells). Tile properties `solid`, `platform`, `ladder`, `water` and `hurt` (boolean) turn on flags 0 to 4. Object layers are ignored. The import cannot be undone: reopen the project to go back.
 
 ## 3D maps and level tools
 
@@ -218,6 +246,7 @@ Press **v** on the map page to toggle between 2D editing and real-time **3D prev
 - **Path tool (`Shift+P`, `Shift+W`)**: press `Shift+W` to cycle corridor width from 1 to 5 tiles. Press `Shift+P`, navigate to the start cell and press Enter, then navigate to the destination cell and press Enter: a corridor of width *N* is drawn on the `floor` layer with the active tile.
 - **Apples row tool (`Shift+A`)**: press `Shift+A`, press Enter at the start cell and Enter at the destination cell: a continuous line of apple placeholders (ID 1026) is placed on the `objects` layer.
 - **Place crates and lamps (`Shift+C`, `Shift+O`)**: `Shift+C` places a crate placeholder (ID 1028) at the cursor cell on the `objects` layer, and `Shift+O` places a lamp placeholder (ID 1032).
+- **Place the start and the goal (`Shift+S`, `Shift+G`)**: `Shift+S` places the start placeholder (ID 1024) and `Shift+G` the goal (ID 1030) at the cursor cell.
 - **Status bar**: displays the current counts of apples, crates, and lamps, together with an estimated triangle budget (floor + objects).
 - **Undo**: `u` or `Ctrl+Z` undoes an entire path, row, or object placement in one step.
 
@@ -236,17 +265,16 @@ Press **F1** on the project page, then **F1** again. The second page is the **de
 
 ## What it shows
 
-- **CODE**: tokens, lines, KiB, number of functions and the biggest ones.
+- **CODE**: tokens, lines, KB, number of functions and the biggest ones.
 - **DATA IN MEMORY WHILE IT RUNS**: sheet, map, models, skeletons, sound and z-buffer, and the total. The Lua comes on top. This is the same sum as `stat(13)`.
-- **CARTRIDGE FILE**: the size of the saved file against the 8 MiB of a `.b16`. Before the first save it says `not saved yet: Save as, then the size of the file`.
-- With the target `.b16`: the lines of the code that the `.b16` will not have (`math.random`, `time()`, files...). With `.bm`: `.bm has no cap`.
+- **CARTRIDGE FILE**: the size of the saved file against the mark of 100 MB, the most the Market takes for one file. The mark is only a guide: the build does not refuse a larger file and the kernel has no size cap. Before the first save it says `not saved yet: Save as, then the size of the file`.
 - **LAST TRY (F5)**: fps, average and maximum milliseconds of a frame, frames over 16.7 ms, the peak RAM (Lua and data), the instructions of the heaviest frame, tokens, triangles, and whether the 3D was drawn on the GPU or the ARM.
 
-![The dev kit after a test run](shots/editor-sdk-devkit.png)
+!The dev kit after a test run
 
 ## In the game
 
-- `stat(1)` ms, `stat(2)` fps, `stat(11)` tokens, `stat(12)` Lua KiB at most, `stat(13)` KiB of data.
+- `stat(1)` ms, `stat(2)` fps, `stat(11)` tokens, `stat(12)` Lua KB at most, `stat(13)` KB of data.
 - **F11** in any game shows the overlay: fps, ms, the CPU and GPU bars.
 
 ## Try it, step by step
@@ -254,22 +282,22 @@ Press **F1** on the project page, then **F1** again. The second page is the **de
 1. Open a project and press **F5**.
 2. Come back to the SDK and press **F1**: **LAST TRY** shows the numbers.
 3. Press **F1** again: the dev kit shows the memory and the size of the file.
-4. Press **b** to change the target to `.b16` and see what the RGB30 edition would not accept.
 
-# Building and exporting
+# Building and publishing
 
 ## What it does
 
-- **Ctrl+B**, or *Build the game .bm* in the menu: builds the game of the project. When the target is `.b16`, it builds the `.b16` and the menu entry says so.
-- **Ctrl+Shift+B**, or *Export .b16*: exports the `.b16` whatever the target.
-- On success the SDK says `built NAME: it is in Games`.
+- **Ctrl+B**, or *Build the game .bm (Ctrl+B)* in the menu (Esc): builds the game of the project.
+- On the Pi, *Publish to the Market...* in the menu: builds the `.bm`, then opens the Publish panel. In the panel you set the id, the version and the license. The panel sends a pull request, and the Market owner approves it. You need `github_token` in `bm/config.txt`.
+- A project is in `/bme`; its game is written in the games folder: `/carts` on the Pi, `/bm` on the RGB30. The **Games** tab lists that folder. A project found next to its game on an older card builds next to it.
+- On success the SDK says `built /carts/name.bm: it is in Games` (the path of the game).
 
 ## Good to know
 
 - A game is built from its project. If a game is open, the SDK saves its editable copy first.
-- Setting the target to `.b16` (key `b` on the project page) changes the screen to `360x360` if it was not square, and tells you the 8 MiB limit.
-- The target is remembered for each project file.
-- On the RGB30, exporting a `.b16` from `/carts` also copies it to `/bm/`, so it appears at once in Games.
+- The `.bm` you build runs on the Pi and on the RGB30. Its header says the kernels it is made for. A game made for the other device shows a faded cover in Games, and Play asks *This edition is for the RGB30* (or *for the Pi*) with OK and Cancel.
+- The RGB30 has no *Publish to the Market...* entry.
+- On the RGB30 the Games tab lists `/bm/` and `/carts`; if the game is written somewhere else, the status line adds `(not in the Games tab)`.
 
 ## Caveats
 
@@ -280,12 +308,11 @@ Press **F1** on the project page, then **F1** again. The second page is the **de
 
 1. Open or create a project and save it with **Save as**.
 2. Press **Ctrl+B**.
-3. Wait for `built ...: it is in Games`.
+3. Wait for `built /carts/name.bm: it is in Games`.
 4. Leave the SDK (Esc, **Exit bm SDK**) and open the **Games** tab: your game is there.
 
 ::: copy
-Ctrl+B          build the game (.bm, or .b16 when the target is .b16)
-Ctrl+Shift+B    export .b16
+Ctrl+B          build the game (.bm)
 :::
 
 ## The RGB30 edition
@@ -295,10 +322,44 @@ Ctrl+Shift+B    export .b16
 - The pages are the same as on the Pi, laid out again for 360x360.
 - The pad: **L1 / R1** change page, **Start** opens the menu, **X** opens the list of the actions of the page, **L2 / R2** the previous or next colour or tile, **ok** and **back** are B and A (`confirm=a` swaps them).
 - Text is typed with the on-screen keyboard (`padtype`); a keyboard works as on the Pi.
-- A new project is 360x360 with the target `.b16`.
+- A new project is 360x360.
+- The templates are the same.
 - **Try**: Start + Select (or Ctrl+Esc) leaves the game and the SDK comes back.
 - The programs bm Code, Pixel, Studio, Animator, Mesh and Sound are not on the RGB30, so *Open in ...* is not offered.
-- [TO FILL: bm SDK (RGB30) tried on the console; whether it is published in the Market, the repository files disagree]
+::: warn
+The pad, the screen and the sound of bm SDK (RGB30) were driven by keyboard in an emulator (QEMU) and by the repository tests only. They are **not verified on a real RGB30**.
+:::
+
+- [TO FILL: bm SDK (RGB30) tried on a real console with the pad alone; whether it is published in the Market, the repository files disagree]
+
+## The sounds page (RGB30)
+
+Press **F7** for the page of the project's sounds and effects (on the pad it is the page after *3D*, reached with R1). It works on the sound bank saved in the project. **F7** again, or **Y + up/down**, goes between the two views.
+
+::: warn
+The sounds page was driven in an emulator and by the repository tests only. It is **not verified on a real RGB30**.
+:::
+
+### Sounds
+
+The left list has 32 sound slots, the right panel the fields of the chosen sound: **WAVE**, **VOLUME**, **DUTY**, **ATTACK**, **DECAY**, **SUSTAIN**, **RELEASE**.
+
+- Up and down choose the field, left and right change the value; **PgUp / PgDn** (on the pad: hold left or right) change it 8 at a time.
+- `[` and `]` (or `,` and `.`; on the pad **L2 / R2**) choose the sound.
+- **Enter** (on the pad **ok**) plays the sound on the note A4.
+- `c` clears the sound.
+- `i` opens *Sounds from a file (Lib)*: first the list of the `.bm` and `.bme` files with a sound bank (from `/bme`, `/carts`, `/bm`, the root of the card and `/bm/lib`), then the sounds in the file you chose. The sound goes into the first empty slot; the status line says `sound N taken from the file`. If there is none, it says `no .bm or .bme file with sounds` or `no empty sound slot`.
+
+### Effects
+
+The effects view has 64 effects of 32 steps each. A step is a note, the sound that plays it and its volume.
+
+- Left and right choose the step, up and down change its note (a lower case letter is a sharp).
+- **Enter** on an empty step puts a note (the last note, with the sound chosen in the sounds view) and plays it; on a full step it plays it.
+- **Backspace** (on the pad **back**) clears the step.
+- `+` and `-` change the speed of the effect by 10 ms (from 10 to 500 ms). `p` plays the whole effect.
+
+The changes are saved with the project (**Ctrl+S**).
 
 # Keys
 
@@ -310,20 +371,19 @@ Hold **F12** in the SDK to see the keys of the page you are on.
 | F2 | anywhere | the code |
 | F3 | anywhere | the sprites; again: the map |
 | F4 | anywhere | 3D models and animations |
+| F7 | anywhere (RGB30) | the sounds; again: the effects |
 | Esc | anywhere | the menu |
 | Ctrl+N | anywhere | a new project from a template |
 | Ctrl+O | anywhere | open a cartridge |
 | Ctrl+S | anywhere | save |
 | Ctrl+Shift+S | anywhere | save as |
 | Ctrl+B | anywhere | build the game of the project |
-| Ctrl+Shift+B | anywhere | export the .b16 |
 | F5 or Ctrl+R | anywhere | try the game |
 | F6 | anywhere | the assistant |
 | F9 | anywhere | the assistant explains the last error |
 | 1 - 6 | project | open in bm Code, Pixel, Studio, Animator, Mesh, Sound |
 | t / a | project | title / author |
 | r | project | the screen size |
-| b | project | target .bm or .b16 |
 | n | project | a template |
 | Ctrl+G | code | go to the error of the last try |
 | Ctrl+X or Ctrl+K | code | cut the line |
@@ -341,6 +401,7 @@ Hold **F12** in the SDK to see the keys of the page you are on.
 | Shift+P / Shift+W | map | path tool (start, end: Enter) / width (1-5) |
 | Shift+A | map | apples line tool (start, end: Enter) |
 | Shift+C / Shift+O | map | place crate (1028) / place lamp (1032) |
+| Shift+S / Shift+G | map | place the start (1024) / the goal (1030) |
 | r | map | rename layer |
 | T | map | template: 3D map layers |
 | x | map | pick the tile |
@@ -348,6 +409,7 @@ Hold **F12** in the SDK to see the keys of the page you are on.
 | Tab | map | choose the tile |
 | z | map | 8x8 / 16x16 |
 | + / - / m | map | zoom in / out, overview |
+| t | map | terrain brush on / off |
 | l / Shift+L | map | next layer / a new one |
 | o | map | this layer only / every layer |
 | c | map | show the flags |
@@ -357,16 +419,23 @@ Hold **F12** in the SDK to see the keys of the page you are on.
 | Space | 3D | play, pause |
 | q / e, w / s | 3D | turn, tilt |
 | i | 3D | the code that draws the model |
+| + / - | 3D | zoom |
+| r | 3D | turn by itself |
 | Enter, a, m | 3D | open in bm Studio, bm Animator, bm Mesh |
+| up / down, left / right | sounds (RGB30) | the field, the value |
+| [ / ] or , / . | sounds (RGB30) | the sound before / after |
+| Enter | sounds (RGB30) | play (on an empty effect step: put a note) |
+| c / i | sounds (RGB30) | clear the sound / sounds from a file (Lib) |
+| Backspace | effects (RGB30) | clear the step |
+| + / - / p | effects (RGB30) | speed of the effect / play the effect |
 
 # Tips and troubleshooting
 
 - **F5 asks for a name.** A project that has no file yet must be saved first: F5 opens the **Save as** box; choose a name and press Enter. The message `no name yet: use Save as` appears only when you use plain **Save** on a project with no name.
 - **`unsaved changes: choose again to confirm`.** Leaving, opening or starting a new project with unsaved changes asks twice: repeat the action to confirm.
-- **`no .bm or .bme files on the SD card`.** *Open...* found nothing in `/carts` or in the root. It lists `.bm`, `.bme` and `.b16` files.
+- **`no .bm or .bme files on the SD card`.** *Open...* found nothing in `/bme`, `/carts` or in the root. It lists `.bm` and `.bme` files.
 - **`cannot measure: ...` on the project page.** The SDK could not read the numbers of the file; save it and look at the message.
 - **`no error to explain`.** F9 works only after a try that ended with an error. **Ctrl+G** in the code goes to the line.
 - **My game is slow.** Look at the dev kit after a try: frames over 16.7 ms, the heaviest frame and the memory tell you where.
-- **A `.b16` will not have some things.** With the target `.b16`, the dev kit lists them by line.
 - **A big map.** A big map of 16x16 tiles is best made by a script and retouched in the SDK, with `z` and the overview `m`.
 - **Where is my game?** In the **Games** tab. If it is not there, check the message after Ctrl+B.

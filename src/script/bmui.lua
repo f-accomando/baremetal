@@ -23,6 +23,11 @@
 --   U.drag          while a button is held after moving 3 pixels:
 --                   {b=, x0=, y0=, dx=, dy=} (dx, dy: this frame's move)
 --
+--   U.tabbar(o)     the tab strip of every editor with tabs (one component,
+--                   no copy): draws the tabs and their zones, see below
+--   U.modules_split(lines), U.modules_join(mods)   the Lua modules of one
+--                   project, see below
+--
 -- With no mouse nothing changes: U.on is false, no zone is ever clicked.
 
 local U = { x = 0, y = 0, on = false, wheel = 0, double = false, drag = nil, held = 0 }
@@ -191,6 +196,76 @@ function U.row(kind)
   if z and z.kind == kind then return z.a, z end
 end
 
+-- a list with the mouse (M48): the wheel moves the chosen row by `step`
+-- rows (default 1), a click on a zone of `kind` (its `a` is the row) chooses
+-- that row, and a click on the chosen row, or a double click, acts (as
+-- Enter would). Returns the new row and true when it acted. Call it before
+-- the keys, with the rows' zones drawn last frame.
+function U.list(kind, sel, n, step)
+  if not U.on or n < 1 then return sel, false end
+  if U.wheel ~= 0 then sel = math.max(1, math.min(n, sel - U.wheel * (step or 1))) end
+  local z = U.click(0)
+  if z and z.kind == kind and z.a and z.a >= 1 and z.a <= n then
+    if z.a == sel or U.double then return z.a, true end
+    sel = z.a
+  end
+  return sel, false
+end
+
+-- a pixel x to a text column: the gap nearest to x in a line that starts at
+-- x0 with letters cw wide and n letters (0 = before the first letter)
+function U.col(x, x0, cw, n)
+  local c = (x - x0 + cw // 2) // cw
+  return c < 0 and 0 or (c > n and n or c)
+end
+
+-- a line of text with a caret (M48): t = { text =, pos = } (pos 0..#text; nil
+-- is the end). U.line_key(t, k, max) edits it with a key as keyp() gives it
+-- (letters insert at the caret; backspace, del, left, right, home, end) and
+-- returns true when it used the key. U.line_click(t, x0, cw) puts the caret
+-- where the pointer is, for a line printed from x0 with letters cw wide.
+-- U.line_draw(t, x0, y, colour, blink, cw) prints the line and, when blink
+-- is true, the caret: "_" after the last letter, a thin bar inside the text.
+function U.line_key(t, k, max)
+  local s = t.text
+  local p = t.pos or #s
+  if p > #s then p = #s end
+  if k == "left" then p = p > 0 and p - 1 or 0
+  elseif k == "right" then p = p < #s and p + 1 or #s
+  elseif k == "home" then p = 0
+  elseif k == "end" then p = #s
+  elseif k == "\b" then
+    if p > 0 then s, p = s:sub(1, p - 1) .. s:sub(p + 1), p - 1 end
+  elseif k == "del" then s = s:sub(1, p) .. s:sub(p + 2)
+  elseif #k == 1 and k:byte() >= 32 and (not max or #s < max) then
+    s, p = s:sub(1, p) .. k .. s:sub(p + 1), p + 1
+  else return false end
+  t.text, t.pos = s, p
+  return true
+end
+
+function U.line_click(t, x0, cw)
+  t.pos = U.col(U.x, x0, cw or 8, #t.text)
+end
+
+function U.line_draw(t, x0, y, colour, blink, cw)
+  cw = cw or 8
+  local p = t.pos or #t.text
+  if p > #t.text then p = #t.text end
+  print(t.text, x0, y, colour)
+  if blink then
+    if p >= #t.text then print("_", x0 + p * cw, y, colour)
+    else rectfill(x0 + p * cw, y, 1, 16, colour) end
+  end
+end
+
+-- the wheel on a view: the new top (lo..hi) after `step` units per click
+function U.scroll(top, lo, hi, step)
+  if U.wheel == 0 then return top end
+  top = top - U.wheel * step
+  return top < lo and lo or (top > hi and hi or top)
+end
+
 ----------------------------------------------------------------- keys shown as chips
 
 -- the key a chip shows, as keyp() gives it: "ctrl s" (or {"ctrl", "s"})
@@ -231,14 +306,78 @@ function U.key_zone(x, y, w, h, keys)
   if k then U.zone(x, y, w, h, "key", k) end
 end
 
+-- the top bar: the program's name is the first item at the left; returns the
+-- x of the first tab
+function U.bar_title(name, colour)
+  print(name, 4, 0, colour)
+  return 4 + #name * 8 + 16
+end
+
+-- the top bar: the file's name at the right, in the room left after x (the
+-- start is cut when it is long); "*" when changed
+function U.bar_file(name, dirty, x, w, c_dirty, c_dim)
+  name = name .. (dirty and "*" or "")
+  local room = (w - 8 - x) // 8
+  if room < 4 then return end
+  if #name > room then name = "~" .. name:sub(-(room - 1)) end
+  print(name, w - #name * 8 - 8, 0, dirty and c_dirty or c_dim)
+end
+
 -- a left click on a key's zone: its key pressed. True when it was one.
+-- The fixed chip "F12 keys" (U.hint_row) opens the keys (showkeys()).
 function U.keys()
   local z = U.click(0)
   if z and z.kind == "key" then
     U.press(z.a)
     return true
   end
+  if z and z.kind == "help" then
+    if showkeys then showkeys() end
+    return true
+  end
   return false
+end
+
+----------------------------------------------------------------- the hint bar
+
+-- The hint bar of every editor: chips (key + action) from the left, and one
+-- FIXED chip "F12 keys" at the right end that is always there: a click opens
+-- the list of the keys (showkeys()), so a new key goes in the help (keyhelp())
+-- and never has to take the place of a chip. The room of the fixed chip is
+-- reserved first; the other chips are cut to what fits before it.
+--   items  { { keys = {"up", "down"} (the chips drawn), label = "model",
+--              click = keys for the click ({"up"}, "up"), default keys } }
+--   o      { y =, w = the bar's width, x = first chip (0), gap = after a chip (12),
+--            snap = fn (the label's column), dim = colour of labels,
+--            fixed = false/true (default: a keyboard is in use) }
+-- Returns the x after the last chip drawn, and how many were drawn.
+function U.hint_row(items, o)
+  local y, w, x = o.y, o.w, o.x or 0
+  local gap, snap, dim = o.gap or 12, o.snap or function(v) return (v + 7) // 8 * 8 end, o.dim or C.DIM
+  local right = w
+  local show = o.fixed
+  if show == nil then local li = lastinput and lastinput(); show = li ~= "ds4" and li ~= "pad" end   -- a pad has no button for it
+  if show then
+    local lx = snap(prompt("f12") + 1 + 2)               -- the label's offset (x0 is on a column)
+    local fx = (w - 8 - lx - 4 * 8) // 8 * 8             -- "F12" then "keys", to 8 px from the edge
+    prompt("f12", fx, y)
+    print("keys", fx + lx, y, dim)
+    U.zone(fx, y, lx + 4 * 8, 16, "help")
+    right = fx - 8
+  end
+  local drawn = 0
+  for _, it in ipairs(items) do
+    local kx = x
+    for _, k in ipairs(it.keys) do kx = kx + prompt(k) + 1 end
+    if snap(kx + 2) + #it.label * 8 > right then break end
+    local x0 = x
+    for _, k in ipairs(it.keys) do x = prompt(k, x, y) + 1 end
+    x = print(it.label, snap(x + 2), y, dim)
+    U.key_zone(x0, y, x - x0, 16, it.click or it.keys)       -- a click: the key
+    x = x + gap
+    drawn = drawn + 1
+  end
+  return x, drawn
 end
 
 ----------------------------------------------------------------- the context menu
@@ -366,6 +505,227 @@ end
 -- keyp() takes the mouse's keys first: installed once, for every tool that
 -- requires this library
 if raw_keyp and _ENV.keyp == raw_keyp then _ENV.keyp = mkeyp end
+----------------------------------------------------------------- projects (.bme)
+
+-- The one place that knows where projects live (docs/PROJECT-LAYOUT.md, the C side:
+-- src/bm/project.h). New projects are written in /bme; a project found next to its game
+-- (an old SD card) is still read, and saved where it is.
+U.PROJECTS = "/bme"
+local OLD_DIRS = { "/bm", "/carts", "/" }     -- the games folder, then the places of an old card
+
+-- "/bm/my game.bm", "mygame.bme" or "my game" -> "/bme/mygame.bme" (8.3)
+function U.project_path(name)
+  local base = name:match("([^/]+)$") or name
+  local stem = base:gsub("%.[^.]*$", ""):lower():gsub("[^%w_%-]", "")
+  if stem == "" then stem = "game" end
+  return U.PROJECTS .. "/" .. stem:sub(1, 8) .. ".bme"
+end
+
+-- a project file (by its extension)
+function U.is_project(path) return path ~= nil and path:lower():match("%.bme$") ~= nil end
+
+-- a project that is not in /bme (an old card): it is saved where it is
+function U.is_old_place(path)
+  return U.is_project(path) and path:lower():match("^/bme/") == nil
+end
+
+-- the words for the status line after a save: "saved /bme/game.bme", and where an old project is
+function U.saved_text(path)
+  if U.is_old_place(path) then
+    return "saved " .. path .. " (old place: projects go in /bme, this one stays here)"
+  end
+  return "saved " .. path
+end
+
+-- The files a picker lists: /bme first, then the old places. exts: { bm = true, bme = true,
+-- b16 = true } (a set of lower case extensions); extra: more folders to read after those.
+-- A path once only (case does not matter). Returns the paths, and a table of their sizes.
+function U.project_files(exts, extra)
+  local dirs = { U.PROJECTS }
+  for _, d in ipairs(OLD_DIRS) do dirs[#dirs + 1] = d end
+  for _, d in ipairs(extra or {}) do dirs[#dirs + 1] = d end
+  local out, seen, sizes = {}, {}, {}
+  for _, dir in ipairs(dirs) do
+    for _, f in ipairs(ls(dir) or {}) do
+      local ext = f.name:lower():match("%.(%w+)$")
+      local p = (dir == "/" and "" or dir) .. "/" .. f.name
+      if not f.dir and ext and exts[ext] and not (dir == U.PROJECTS and ext ~= "bme") and not seen[p:upper()] then
+        seen[p:upper()] = true
+        out[#out + 1] = p
+        sizes[p] = f.size
+      end
+    end
+  end
+  return out, sizes
+end
+
+-- The tab strip (APP-8): the one tab bar of bm Code, bm SDK and the other
+-- editors with a code page. o = { x=, y=, w= (pixels), cw=, ch= (the font's
+-- cell), items = { {label=, on=, dirty=, tag=}, ... }, kind = the zone kind
+-- ("tab" by default; a click gives it with a = the item's number), c = {
+-- on=, off=, line=, dim= colours} }. Each tab is " label* tag " with one
+-- column between tabs. When the tabs do not fit, the strip starts at the
+-- first one that lets the active tab show, "<" marks the cut at the left and
+-- "..." the cut at the right. Returns the number of the first tab drawn and
+-- of the last one.
+function U.tabbar(o)
+  local cw, ch, kind, items = o.cw or 8, o.ch or 12, o.kind or "tab", o.items
+  local c = o.c or {}
+  local lab = {}
+  local act = 1
+  for i, it in ipairs(items) do
+    lab[i] = " " .. it.label .. (it.dirty and "*" or "") .. (it.tag or "") .. " "
+    if it.on then act = i end
+  end
+  local cols = o.w // cw
+  local function span(a, b)
+    local n = 0
+    for i = a, b do n = n + #lab[i] + 1 end
+    return n
+  end
+  local from = 1
+  while from < act and span(from, act) + (from > 1 and 2 or 0) > cols - 3 do from = from + 1 end
+  local x = o.x
+  if from > 1 then
+    print("<", x, o.y, c.dim or C.DIM)
+    x = x + 2 * cw
+  end
+  local last = from - 1
+  for i = from, #items do
+    local w = #lab[i] * cw
+    if x + w > o.x + o.w then
+      print("...", x, o.y, c.dim or C.DIM)
+      break
+    end
+    U.zone(x, o.y, w, ch, kind, i)
+    if items[i].on then rectfill(x, o.y, w, ch, c.line or C.LINE) end
+    print(lab[i], x, o.y, items[i].on and (c.on or 0xFFFFFF) or (c.off or C.DIM))
+    x = x + w + cw
+    last = i
+  end
+  return from, last
+end
+
+-- find a text in several sources (find in the project): sources is a list of
+-- { name =, lines = }; the text is plain and not case sensitive. Returns the
+-- hits in order, one per line: { src = the source's number, line =, col = (1
+-- based), text = the line without its indent }.
+function U.find_all(sources, text)
+  local out = {}
+  if not text or text == "" then return out end
+  local q = text:lower()
+  for si, s in ipairs(sources) do
+    for li, l in ipairs(s.lines) do
+      local p = l:lower():find(q, 1, true)
+      if p then out[#out + 1] = { src = si, line = li, col = p, text = (l:gsub("^%s+", "")) } end
+    end
+  end
+  return out
+end
+
+-- rename a word in lines (rename in the project): old is a name, a whole
+-- word ([%w_] around it is not part of it); a string ('...', "...", [[...]]) and
+-- a comment (-- and --[[ ]]) never change. The lines change in place; returns
+-- how many words changed. A long string or comment may run over lines.
+function U.rename_word(lines, old, new)
+  local n, close = 0, nil          -- close: the closing bracket of a long string/comment
+  for li, l in ipairs(lines) do
+    local out, i, len, changed = {}, 1, #l, false
+    local function put(a, b) out[#out + 1] = l:sub(a, b) end
+    while i <= len do
+      if close then
+        local a, b = l:find(close, i, true)
+        if a then put(i, b); i, close = b + 1, nil else put(i, len); i = len + 1 end
+      else
+        local c = l:sub(i, i)
+        if c == "-" and l:sub(i + 1, i + 1) == "-" then
+          local eq = l:match("^%[(=*)%[", i + 2)
+          if eq then close = "]" .. eq .. "]"; put(i, i + 3 + #eq); i = i + 4 + #eq
+          else put(i, len); i = len + 1 end
+        elseif c == '"' or c == "'" then
+          local j = i + 1
+          while j <= len and l:sub(j, j) ~= c do j = j + (l:sub(j, j) == "\\" and 2 or 1) end
+          put(i, math.min(j, len)); i = j + 1
+        elseif c == "[" and l:match("^%[=*%[", i) then
+          local eq = l:match("^%[(=*)%[", i)
+          close = "]" .. eq .. "]"; put(i, i + 1 + #eq); i = i + 2 + #eq
+        elseif c:match("%d") then
+          local _, b = l:find("^[%w_%.]*", i); put(i, b); i = b + 1
+        elseif c:match("[%a_]") then
+          local _, b = l:find("^[%w_]*", i)
+          local w = l:sub(i, b)
+          if w == old then out[#out + 1] = new; n, changed = n + 1, true else out[#out + 1] = w end
+          i = b + 1
+        else
+          put(i, i); i = i + 1
+        end
+      end
+    end
+    if changed then lines[li] = table.concat(out) end
+  end
+  return n
+end
+
+local LUA_WORDS = {}
+for w in ("and break do else elseif end false for function goto if in local nil not or repeat return then true until while"):gmatch("%S+") do
+  LUA_WORDS[w] = true
+end
+
+-- a name Lua accepts for a variable or a function (not a keyword)
+function U.lua_name_ok(name)
+  return type(name) == "string" and name:match("^[%a_][%w_]*$") ~= nil and not LUA_WORDS[name]
+end
+
+-- The Lua modules of one project (APP-8). The code of a project stays ONE
+-- LUA section; a line "--@module NAME" starts a module, which runs to the
+-- next such line. For the cartridge it is a comment, so the game, its bytes
+-- and its build do not depend on the tabs: the layout is for readability only.
+-- What comes before the first marker is the module "main" (no marker line).
+-- modules_split(lines) -> { {name=, lines=, head=, empty=}, ... }: head is the
+-- marker line as it was (nil for the first module without one), empty is
+-- true when the module has no line at all. modules_join(mods) -> lines is its
+-- exact inverse: split then join gives the same lines.
+function U.modules_split(lines)
+  local mods, cur = {}, nil
+  for _, l in ipairs(lines) do
+    local name = l:match("^%-%-@module%s+([%w_%.%-]+)%s*$")
+    if name then
+      cur = { name = name, lines = {}, head = l }
+      mods[#mods + 1] = cur
+    else
+      if not cur then
+        cur = { name = "main", lines = {} }
+        mods[1] = cur
+      end
+      cur.lines[#cur.lines + 1] = l
+    end
+  end
+  if #mods == 0 then mods[1] = { name = "main", lines = {} } end
+  for _, m in ipairs(mods) do m.empty = #m.lines == 0 end
+  return mods
+end
+
+-- the number of lines a module really has: an editor keeps one empty line in
+-- a module that has none (m.empty), which is not part of the code
+function U.module_len(m)
+  if m.empty and #m.lines == 1 and m.lines[1] == "" then return 0 end
+  return #m.lines
+end
+
+function U.modules_join(mods)
+  local out = {}
+  for _, m in ipairs(mods) do
+    if m.head then out[#out + 1] = m.head end
+    for i = 1, U.module_len(m) do out[#out + 1] = m.lines[i] end
+  end
+  return out
+end
+
+-- true when a name can be a module's: letters, digits, _ . -
+function U.module_name_ok(name)
+  return name ~= nil and name:match("^[%w_%.%-]+$") ~= nil and #name <= 24
+end
+
 U.keyp = mkeyp
 
 return U

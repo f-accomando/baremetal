@@ -24,13 +24,13 @@ bm (BareMetal) is a games console and a development environment that runs on the
 
 ## What it does
 
-The kernel starts, shows a menu, and runs **cartridges**: single files (`.bm`, and `.b16` on the RGB30) that hold the Lua 5.4 code, sprites, maps, 3D meshes, animations and sounds of a game. The same menu also opens the editors of the suite (the **Dev** tab), the Market and the Settings.
+The kernel starts, shows a menu, and runs **cartridges**: single files (`.bm`) that hold the Lua 5.4 code, sprites, maps, 3D meshes, animations and sounds of a game. The same menu also opens the editors of the suite (the **Dev** tab), the Market and the Settings.
 
 ## Good to know
 
 - One menu serves both boards (`src/kernel/menu_ui.c`): on the Pi it is 640x360, on the RGB30 it is 360x360 shown twice as large.
 - The repository says the Pi Zero 2 W code stays in the tree but is switched off in the normal build.
-- A `.b16` never replaces a `.bm`: they are two separate editions of a game.
+- A `.bm` runs on the Pi Zero W and on the RGB30. Its header lists the kernels it is made for (the `targets` key of `bm.info`: `pi`, `rgb30`).
 
 # The boot chain
 
@@ -81,7 +81,7 @@ On the Pi, `main.c` does these things in this order:
 2. Sets up the memory: the heap, the ARM clock at the maximum the firmware offers, and the MMU.
 3. Detects the board and prints it with its SoC and revision code.
 4. Sets up the board's LED, then the interrupts and the timer.
-5. Tries to arm the watchdog (3 seconds). On the Pi Zero W the boot log says "not available, no freeze guard".
+5. Tries to arm the watchdog (3 seconds). The boot log says `watchdog: on, 3000 ms` when it is armed. If the check fails, it says "not available, no freeze guard" (in an emulator: "resets at once on RSTC (emulator), no freeze guard"). The Pi Zero W is armed; this is not verified on a real console by this manual.
 6. Starts the audio, the DMA and USB.
 7. Loads the cartridges list and `bm/config.txt`.
 8. Turns the crash report of the previous boot into a report (chapter 12).
@@ -109,12 +109,11 @@ The menu is the first thing you see. It opens on **Games**.
 | Market | the catalog of games and apps you can download; two pages, **Games** and **Apps** |
 | Games | the cartridges on the card |
 | Dev | the tools: SDK, editors, Sound, Studio, Animator, Mesh, Pixel |
-| Lib | the shared resources; hidden until you set `lib_tab=1` |
 | Settings | the last tab: its panel opens in place of a list |
 
 The Market loads only while its tab is on and never blocks the menu.
 
-![The menu on the Games tab](shots/boot-os-menu.png)
+!The menu on the Games tab
 
 ## The menu's keys
 
@@ -129,19 +128,21 @@ The Market loads only while its tab is on and never blocks the menu.
 | `r` | read the SD card again |
 | mouse | click plays; right click goes back |
 
-Game options (`c`) show the bytes of the saves and a *Delete the save data* row.
+Game options (`c`) show the bytes of the saves and a *Delete the save data* row. On the RGB30 the same options open with **X** and also list *Send to a nearby console*; this is tried in QEMU only (not verified on hardware).
 
 ## Good to know
 
 - On the RGB30, **B** confirms and **A** goes back. Set `confirm=a` in `bm/config.txt` to swap them, or use Settings > Controllers > *Confirm button*.
-- On the RGB30 the top bar shows only WiFi and battery. The Market and Games list `.b16` files; `.bm` files are shown for testing, and `show_bm=0` hides them.
+- On the RGB30 the top bar shows only WiFi and battery. Games and the Market list the `.bm` files. A game made for the Pi shows a faded cover (a colour change and a vignette, the drawing stays). Play then asks *This edition is for the Pi* with OK and Cancel. `show_bm=0` hides the `.bm` files in Games and `market_bm=0` hides them in the Market.
 - The editors work on projects only. A `.bm` is read-only; Ctrl+B in an editor builds the final `.bm`.
 
 ## Settings
 
-Settings has these pages: Controllers, WiFi and network (Network on a board without radio), Screen and sound, Updates, Reports and System, then the rows *Restart* and *Shut down*. System shows the version, the board, the uptime, the memory in use, the CPU, the SD card and the battery, and has *Log since boot* and *Open the monitor*.
+Settings has these pages: Controllers, WiFi and network (Network on a board without radio), Screen, Sound, Updates, Reports and System, then the rows *Restart* and *Shut down*. System shows the version, the board, the uptime, the memory in use, the CPU, the SD card and the battery, and has *Log since boot* and *Open the monitor*.
 
-![Settings, System page](shots/boot-os-settings.png)
+System also has *SD map*: a bar of what is on the card, split in Kernel, bm (games), bme (projects), glb and bmm (models), Other and Free, the size of each, the files and kilobytes of each folder, and a list *Other files* with the files the menu cannot show, largest first. The menu reads the card while it is idle and never while a game or a tool runs; the *Scan* row shows the state and the percent. The console keeps the last result in `bm/sdmap.txt`. The SD map is not verified on hardware (Pi Zero W or RGB30).
+
+!Settings, System page
 
 # The system keys
 
@@ -166,7 +167,7 @@ On a pad, **PS** or **Start+Select** do what Ctrl+Esc does. The system marks F12
 ## Good to know
 
 - In a network match, the system does not suspend the game: it asks "Leave the match?" and, on yes, the game is closed.
-- The overlay shows frames a second, the milliseconds of work in a frame and the CPU and GPU load. It lasts one run; every game starts as Settings > Screen and sound > *Performance overlay* says (off by default).
+- The overlay shows frames a second, the milliseconds of work in a frame and the CPU and GPU load. It lasts one run; every game starts as the `perf` key of `bm/config.txt` says (off by default; the RGB30 has no F11, so set the key there).
 - From the serial line, Ctrl+\ works as Ctrl+Esc.
 
 # Find out the keys of a game
@@ -181,7 +182,7 @@ Every game has its own keys, and F12 lists them next to the system's.
 6. Release `F12`. The list disappears and the game goes on.
 7. Press `Ctrl+Esc` to leave. You are back in the menu; the game is suspended, and its cover now says Resume.
 
-![The Keys list while F12 is held](shots/boot-os-keys.png)
+!The Keys list while F12 is held
 
 ::: try
 Do the same in the menu itself: hold F12 on the Games tab. You get two groups, `bm` (the system keys) and `Menu` (the menu's keys).
@@ -193,7 +194,7 @@ If the list does not show a game's keys, the game did not declare any. [TO FILL:
 
 # The monitor
 
-The monitor is bm's text console. It has a prompt `>`, takes one key per command, and prints on the screen, on the serial port and on the network console.
+The monitor is bm's text console. It has a prompt `>` and takes one key per command. It also takes typed commands at the `bm>` prompt. It prints on the screen, on the serial port and on the network console.
 
 ## How to open it
 
@@ -201,53 +202,68 @@ The monitor is bm's text console. It has a prompt `>`, takes one key per command
 - Or choose Settings > System > *Open the monitor*.
 - Or connect from the PC: `python3 tools/bm_net.py IP` shows the monitor of a console on the network.
 
-Type `h` for help. `M` goes back to the menu; `Esc` alone does nothing at the prompt.
+Type `h` for help. The help is made from the table of commands in the kernel, so it always lists every command. `M` goes back to the menu; `Esc` alone does nothing at the prompt.
 
 ## Commands
 
-The help of the monitor lists many keys. These are the ones that matter to a first-time user:
+Each command has a word. The key is a shortcut for the word. The help of the monitor lists all of them. These are the ones that matter to a first-time user:
+
+| Key | Word | What it does |
+|---|---|---|
+| `h` or `?` | `help [NAME]` | the help, or the help of one command |
+| `M` | `menu` | the cartridge menu |
+| `f` / `F` | `carts list` / `carts rescan` | list cartridges / read the SD card again |
+| `i` | `sys info` | system information |
+| `m` | `sys heap` | heap usage |
+| `c` | `sys clear` | clear the screen |
+| `l` | `lua` | Lua prompt (`Esc`, `Ctrl-D` or `exit()` returns) |
+| `L` | `sys layout [it\|us]` | keyboard layout, Italian or US |
+| `V` | `sys via-ram [on\|off]` | `.bm` drawing, direct on screen or via RAM |
+| `y` / `Y` | `sys usb` / `sys input` | USB scan / input test |
+| `T` `K` `O` | `bt pair pad` / `kbd` / `mouse` | Bluetooth: pair a pad, a keyboard, a mouse |
+| `P` | `bt forget` | Bluetooth: forget all paired devices (asks first) |
+| `W` | `wifi`, `wifi list`, `wifi join NAME [PASSWORD]`, `wifi forget` | WiFi: start, list networks, join one, forget it |
+| `u` | `update` | update from GitHub (asks first) |
+| `o` | `sys dmesg` | everything printed since boot |
+| `Z` | `report log` | the log since boot, as a report |
+| `r` | `sys reboot` | reboot |
+| `X` | `sys crash [KIND]` | crash tests: `undef`, `dabt`, `pabt`, `svc`, `freeze`, `freeze-irq` |
+
+Other keys run tests and benchmarks: `k`, `p` and `j` are `bench cpu`, `bench render` and `bench 3d`. `d` is `demo`, `t` is `sys test-pattern`, `a` is `sys audio`. `E` is `net eth`, `G` is `net get URL`, `z` is `report send`, `U` is `upload`. Other keys open the editors: `e`, `A`, `3`, `4`, `5`, `6`, `C`, `I` are `tool editor`, `sound`, `studio`, `mesh`, `pixel`, `animator`, `code`, `assistant`.
+
+## The bm> prompt
+
+Type `:` and then `Enter`. The prompt `bm> ` opens and stays open. Type `exit` to leave it, or press `Esc`, or press `Ctrl-D` on an empty line.
 
 | Key | What it does |
 |---|---|
-| `h` or `?` | the help |
-| `M` | the cartridge menu |
-| `f` / `F` | list cartridges / read the SD card again |
-| `i` | system information |
-| `m` | heap usage |
-| `c` | clear the screen |
-| `l` | Lua prompt (`Esc`, `Ctrl-D` or `exit()` returns) |
-| `L` | keyboard layout, Italian or US |
-| `V` | `.bm` drawing, direct on screen or via RAM |
-| `y` / `Y` | USB scan / input test |
-| `T` `K` `O` | Bluetooth: pair a pad, a keyboard, a mouse |
-| `P` | Bluetooth: forget all paired devices (asks first) |
-| `W` | WiFi: start, list networks, join one |
-| `u` | update from GitHub (asks first) |
-| `o` | everything printed since boot |
-| `Z` | the log since boot, as a report |
-| `r` | reboot |
-| `X` | crash tests: then `u`, `a`, `b`, `s` or `f` |
+| `Tab` | complete a command, a subcommand or a `set` key; two or more choices are listed |
+| `Up` / `Down` | the last 16 lines |
+| `Left` / `Right`, `Home` / `End` | move in the line |
+| `Backspace` / `Del` | delete a character |
+| `Ctrl-U` | delete the text before the cursor |
+| `Ctrl-C` | drop the line |
 
-Other keys run tests and benchmarks: `k`, `p`, `D`, `g`, `j`, `R`, `s`, `d`, `t`, `a`, `b`. Others open the editors: `e`, `A`, `3`, `4`, `5`, `6`, `C`, `I`.
+It works with a USB keyboard, on the serial port and on the network console. Quotes keep spaces in a word: `wifi join "my net" "a password"`. A typo gets a hint: `sned` says `did you mean: send`.
 
 ## A line of commands
 
-Type `:` and then commands separated by `;`. They run one after the other, and the line stops at the first one that fails.
+Type `:` and then commands separated by `;`. They run one after the other, and the line stops at the first one that fails. The line runs once, as it always did. The PC tools use it (`bm_net.py IP --line "..."`).
 
 | Command | What it does |
 |---|---|
-| `gpu` | the GPU test and its report |
-| `b3d tests=a,b profiles=P` | the 3D Bench, all or part |
+| `bench 3d tests=a,b profiles=P` | the 3D Bench, all or part (`b3d` still works) |
 | `play NAME` | start a game by name |
-| `set key=value ...` | change `bm/config.txt` keys until a restart |
+| `set key=value ...` | change `bm/config.txt` keys until a restart (`set` alone lists them) |
 | `save` | write `bm/config.txt` |
-| `render`, `room`, `log`, `send`, `reboot` | benchmarks, the log as a report, send the waiting reports, reboot |
+| `net fetch URL [NAME] [replace]` | download a `.bm` into `/bm`, a `.bme` into `/bme`, a `.bmk` map kit into `/bmk` or a `.bmm` model file into `/bmm`. `URL` is `https://...` or `gh:OWNER/REPO/PATH[@BRANCH]` (a file of a GitHub repository; a private one needs `github_token`). `NAME` is an 8.3 name instead of the file's own. A file that is there is replaced only with `replace`. The bytes must be a cartridge |
+| `bench render`, `report log`, `report send`, `sys reboot` | benchmark, the log as a report, send the waiting reports, reboot (`render`, `log`, `send`, `reboot` still work) |
 
 ::: copy
 :set volume=5; save
 :::
 
-![The monitor, after h](shots/boot-os-monitor.png)
+!The monitor, after h
 
 ::: warn
 `X` and then `f` freezes the console on purpose, to test the crash screen. Use it only when you want to test that.
@@ -264,7 +280,7 @@ The card is FAT32. Names follow the 8.3 rule when the console writes them.
 | `kernel.img` | bm for the Pi Zero W and the Pi 1 |
 | `kernel7.img` | the Pi Zero 2 W's kernel, only when built with `ZERO2=1` |
 | `kernel8.img` | bm for the RGB30 |
-| `carts/` | your cartridges (`carts/nano8/` for PICO-8 carts) |
+| `carts/` | your cartridges (a file that is not in this repository for PICO-8 carts) |
 | `bm/config.txt` | bm's settings |
 | `bm/ca.pem` | certificates for HTTPS |
 | `bm/` firmware files | WiFi and Bluetooth chip firmware |
@@ -298,9 +314,10 @@ Settings, the monitor line `set`/`save` and the PC tools write `bm/config.txt`. 
 | `confirm` | `b` or `a`: which button confirms |
 | `wifi_ssid`, `wifi_psk` | the network to join |
 | `wifi_boot=0` | do not join the network at boot |
-| `lib_tab=1` | show the Lib tab |
-| `show_bm=0` | hide `.bm` files on the RGB30 |
-| `menu_scale=3` | a 1920x1080 menu on the Pi (a try) |
+| `show_bm=0` | hide `.bm` files in the Games tab of the RGB30 |
+| `market_bm=0` | hide `.bm` files in the Market of the RGB30 |
+| `bm_screen` | `1280x720` or `640x360`: the screen of the SDK and the editors (default 1280x720 with the GPU) |
+| `menu_scale=1`, `2`, `3` | the Pi's menu at 360p on the ARM (default), or 720p / 1080p drawn by the GPU (360p if the GPU cannot) |
 | `battery_icon=0` | turn off the low-battery icon (RGB30) |
 | `mouse=off` | turn the pointer off |
 
@@ -324,11 +341,11 @@ python3 tools/bm_net.py IP --config
 
 # Screenshots
 
-Press `Print Screen` on the keyboard, or hold **Select + L1 + R1** on a pad (Share + L1 + R1 on a DS4). The console saves the game's own screen, as it was drawn, as a PNG in `bm/shots/`. The overlays, the battery icon, the pointer and the message box are not in the picture.
+Press `Print Screen` on the keyboard, or hold **Select** for 3 seconds on a pad (Share on a DS4). The console saves the game's own screen, as it was drawn, as a PNG in `bm/shots/`. The overlays, the battery icon, the pointer and the message box are not in the picture.
 
 ## Good to know
 
-- The name is the first letters of the game's title and a number: `PONG0001.PNG`. The number goes up by itself; bm never overwrites a picture. The Pi has no clock, so there is no date.
+- The name is the first letters of the game's title and a number: `pong0001.png`. The number goes up by itself; bm never overwrites a picture. The Pi has no clock, so there is no date.
 - A box says `Screenshot saved` and the file name for two seconds.
 - The menu's own screens cannot be saved yet. Games and apps can.
 - The Print Screen key does not have its picture in the F12 list yet.
@@ -344,15 +361,15 @@ Press `Print Screen` on the keyboard, or hold **Select + L1 + R1** on a pad (Sha
 Take three pictures of the same game. You get `0001`, `0002` and `0003` with the same prefix.
 :::
 
-[TO FILL: check Select + L1 + R1 on the PowKiddy RGB30; not tried on the console yet]
+[TO FILL: check Select held 3 s on the PowKiddy RGB30; not tried on the console yet]
 
 A game takes a picture by itself with `shot()`; see the API manual.
 
 # Saves
 
-A game keeps its data with `save()` and `saved()`. Each game has **8 slots**, each a table of up to 32 KiB, in `bm/save/`.
+A game keeps its data with `save()` and `saved()`. Each game has **8 slots**, each a table of up to 32 KB, in `bm/save/`.
 
-- Slot 1 is `XXXXXXXX.SAV`; slots 2 to 8 are `.S02` to `.S08`.
+- Slot 1 is `xxxxxxxx.sav`; slots 2 to 8 are `.S02` to `.S08`.
 - `XXXXXXXX` comes from the title and the author of the game. If you change either, the game starts again from zero.
 - A game's options (`c` on the cover) show the bytes used and *Delete the save data* deletes all slots.
 - Updates and `make install` never touch settings and saves.
@@ -364,11 +381,11 @@ To back up a game's save, copy its files from `bm/save/` to the PC.
 ## A crash
 
 - A fatal exception shows a red screen with the registers and the list of addresses it was called from, even during a game.
-- The last 4 KiB printed and a trail of breadcrumbs stay in memory across a reset. At the next boot they become a report in `bm/reports/`, sent when the network is up. Network and `report()` ask your permission the first time.
+- The last 4 KB printed and a trail of breadcrumbs stay in memory across a reset. At the next boot they become a report in `bm/reports/`, sent when the network is up. Network and `report()` ask your permission the first time.
 - After 20 seconds of running time, the screen says "Restarting in 60 s: this screen goes out as a report", the LED blinks a code, and the console restarts. This also holds on the Pi Zero W: the restart writes the power-management registers directly (`src/kernel/exceptions.c`, `src/drivers/watchdog.c`), so it does not depend on the watchdog check made at boot.
 - [TO FILL: what each LED blink count means on the Pi Zero W; only the RGB30's codes are written down]
 
-![The red crash screen](shots/boot-os-crash.png)
+!The red crash screen
 
 A Lua error does not crash the console: the cartridge stops and the error, with its line, appears on screen. A game that runs over 20 million Lua instructions in one frame is stopped too.
 

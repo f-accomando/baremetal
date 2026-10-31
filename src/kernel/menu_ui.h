@@ -3,8 +3,8 @@
  * screen: tabs at the top (Market, Games, Dev) and Settings after them, the covers
  * in a grid that scrolls down, moved through with the four directions;
  * the background is the blurred cover of the selected cartridge. Panels
- * (submenus) open over the grid. RGB565, 640x360 on the Pi (1920x1080 with
- * menu_scale=3: the same layout three times bigger) and 360x360 on the
+ * (submenus) open over the grid. RGB565, 640x360 on the Pi, shown 2x at 1280x720 when the GPU is there
+ * (menu_scale=3: 1920x1080) and 360x360 on the
  * RGB30 (shown 2x): the same drawing, the columns follow the width.
  */
 #ifndef MENU_UI_H
@@ -17,16 +17,16 @@
 
 typedef struct {
     const char *title;
-    const char *author;
     const char *path;           /* file on the SD card, or the built-in name */
     const char *kind;           /* "bm", or "tool" in the Dev tab */
-    const char *format;         /* "bm" or "b16" in the Market, or NULL */
-    uint32_t size;              /* bytes */
     const g16_sheet_t *cover;   /* MENU_CARD x MENU_CARD, or NULL for a plain card */
-    int running;                /* suspended in memory: a "Playing" badge */
+    int running;                /* suspended in memory: a star at the top right */
+    int update;                 /* a newer version is in the Market: a triangle at the bottom right */
     int loading;                /* no cover yet (the Market): a placeholder with the title */
-    const char *badge;          /* a pill on the cover ("Installed"), or NULL */
+    const char *badge;          /* a pill on the cover ("Retry"), or NULL */
     int busy, percent;          /* downloading: a bar on the cover */
+    int grey;                   /* not made for this device (bm_compat_classify): a faded cover, no pill;
+                                 * the caller asks before it starts: the reason as the question, OK and Cancel */
 } menu_item_t;
 
 /* the covers: squares (2026-10-04, the bm Suite's icons; 128x80 before),
@@ -36,21 +36,28 @@ typedef struct {
 /* covers per row of the open menu: 4 on the Pi, 2 on the RGB30 */
 int menu_ui_cols(void);
 
+#define MENU_BAR_PARTS 7        /* parts of a MENU_ROW_BAR */
+
 /* A row of a panel (a submenu over the grid). */
 enum {
     MENU_ROW_ACTION,            /* A does something */
     MENU_ROW_SUB,               /* A opens another panel: "label  value >" */
     MENU_ROW_CHOICE,            /* left/right (or A) change the value: "< value >" */
     MENU_ROW_INFO,              /* only shows a value */
+    MENU_ROW_BAR,               /* only draws `bar`: the label on the left, up to MENU_BAR_PARTS parts of the width on the right */
 };
 
 typedef struct {
     const char *label;
     const char *value;          /* on the right, or NULL */
     int kind;
+    const uint16_t *bar;        /* MENU_ROW_BAR: MENU_BAR_PARTS parts of the bar in 1/1000, in order (the rest is the background) */
+    uint32_t swatch;            /* 0xRRGGBB square before the label, 0: none */
 } menu_row_t;
 
 #define MENU_PANEL_ROWS 6       /* rows visible at once; the list scrolls */
+#define MENU_PANEL_ROWS_TALL 10 /* the native layouts (720p, 1080p) have room below: 50% more height (4 rows of 32 pixels) */
+int  menu_panel_rows(void);     /* the rows visible now: MENU_PANEL_ROWS, or MENU_PANEL_ROWS_TALL in a native layout */
 
 typedef struct {
     const char *title;          /* "Settings > Controllers" */
@@ -68,31 +75,6 @@ typedef struct {
     const menu_panel_t *rows;       /* the section's rows, or NULL; sel < 0: none chosen */
     int focus;                      /* 0: the sections, 1: the rows */
 } menu_page_t;
-
-/* The Lib tab (docs/RISORSE.md): the groups along the top, the list on
- * the left (a grey row for each file, then its resources), the preview and
- * the details on the right. */
-typedef struct {
-    const char *label;
-    const char *value;          /* right-aligned: a file's count, an item's tag */
-    int header;                 /* a file's row (not selectable) */
-} menu_lib_row_t;
-
-#define MENU_LIB_ROWS 13        /* rows of the list visible at once */
-
-typedef struct {
-    const char *const *groups;
-    int ngroups, group;
-    const menu_lib_row_t *rows;
-    int n, sel, top;            /* sel: the selected row (an item), top: the first one shown */
-    const char *empty;          /* why the list is empty */
-    const char *lines[5];       /* under the preview: name, numbers, file, author and licence, tags */
-    const char *open;           /* A's label ("Open in bm Studio"), or NULL */
-    const char *play;           /* Y's label ("Play"), or NULL */
-    /* draws the preview in the box (x, y, w, h), or NULL */
-    void (*preview)(g16_t *g, int x, int y, int w, int h, void *ctx);
-    void *ctx;
-} menu_lib_t;
 
 /* What each player plays with, and the network, for the icons of the bar */
 enum { MENU_DEV_NONE, MENU_DEV_KEYBOARD, MENU_DEV_PAD };
@@ -121,14 +103,12 @@ typedef struct {
     int charging;               /* ...and the bolt on the charger */
     int prompts;                /* MENU_PROMPTS_*: the device pressed last... */
     int prompts_colour;         /* ...the DS4's face buttons in their colours */
+    const char *ok_btn, *back_btn;  /* MENU_PROMPTS_RGB30: the face buttons ("A".."Y") of OK and Cancel; NULL: B and Y */
     int confirm_b;              /* MENU_PROMPTS_PAD, _RGB30: confirm is B, back A (the RGB30) */
     int no_monitor;             /* no monitor to go to (the RGB30): no hint for it */
     int keys_help;              /* F12 is held: the keys over everything (the system's, the menu's) */
-    const char *details;        /* line under the grid (path, size) */
-    const char *note;           /* last game, errors */
     const menu_panel_t *panel;  /* a submenu over the grid, or NULL */
     const menu_page_t *page;    /* Settings: a page instead of the grid, or NULL */
-    const menu_lib_t *lib;      /* the Lib tab instead of the grid, or NULL */
     const char *ask;            /* a question over everything (A yes, B no), or NULL */
     const char *ask_detail;
     const char *ask_yes;        /* the label of A ("Close it", "Delete") */
@@ -140,6 +120,8 @@ typedef struct {
     int notice_progress;
     const char *a_label;        /* A in the footer, instead of Play / Open; "" hides it */
     const char *y_label;        /* Y in the footer (e.g. "Apps" / "Games" in Market), or NULL */
+    const char *refresh_label;  /* "Refresh" in Market, or NULL */
+    int refresh_enabled;        /* 1 if Refresh can be pressed, 0 if greyed out */
     /* called while the frame waits for its time, until timer_ticks() is
      * `until` (the Market's downloads), or NULL */
     void (*idle)(uint32_t until);
@@ -149,19 +131,49 @@ typedef struct {
  * topmost thing: a cover (index; full = not cut by the edges of the grid),
  * a tab (index), Settings, a row of the panel (index in its rows), a
  * button of the hints (index 'A', 'B', 'X' or 'Y'), the panel or the
- * question elsewhere, a group or a row of the Lib tab (index), a section of
+ * question elsewhere, a subtab of the Market (index), a section of
  * the Settings page (index), or nothing. */
 enum { MENU_HIT_NONE, MENU_HIT_COVER, MENU_HIT_TAB, MENU_HIT_SETTINGS, MENU_HIT_ROW,
-       MENU_HIT_BUTTON, MENU_HIT_PANEL, MENU_HIT_ASK, MENU_HIT_GROUP, MENU_HIT_LIB,
+       MENU_HIT_BUTTON, MENU_HIT_PANEL, MENU_HIT_ASK, MENU_HIT_GROUP,
        MENU_HIT_SECTION };         /* a section of the Settings page while its rows have the focus */
 typedef struct { int kind, index, full; } menu_hit_t;
 menu_hit_t menu_ui_hit(int x, int y);
+
+/* What the pointer (M32) asks of the menu in one frame, the same for the Pi's
+ * menu (carts.c) and the RGB30's (rgb30/ui.c). The caller fills the "in"
+ * fields and applies the "out" fields to its own state. */
+typedef struct {
+    /* in */
+    int gfx;                    /* the graphic menu is on screen (else the motion is only dropped) */
+    int ask;                    /* a question is open */
+    int panel;                  /* a panel is open over the covers */
+    int panel_rows;             /* its rows */
+    int on_gear;                /* Settings is the tab: its sections can be clicked */
+    int market;                 /* the Market list is shown: its pages and Refresh can be clicked */
+    int covers;                 /* the covers of the list */
+    int market_page;            /* the page of the Market shown now */
+    /* out */
+    int dy;                     /* the wheel: rows down (up is negative) */
+    int action, back, opts, ybtn, refresh;
+    int tabto;                  /* a tab clicked, -1 none */
+    int settings;               /* the gear clicked */
+    int panel_sel;              /* a row of the panel under the pointer, -1 none */
+    int section;                /* a section of the Settings page clicked, -1 none */
+    int cover_sel;              /* a cover under the pointer, -1 none */
+    int page;                   /* a page of the Market clicked, -1 none */
+} menu_ptr_t;
+/* Reads the pointer (also when nothing shows it: the motion is dropped).
+ * Returns 1 if it is shown and the out fields say what it did. */
+int menu_ui_pointer(menu_ptr_t *io);
 
 /* Switches the screen to the menu mode (it has the pointer); -1 if it
  * cannot (the caller keeps the text menu). */
 int  menu_ui_open(framebuffer_t *fb);
 /* One frame: draws and shows it, waits for the next frame time. */
 void menu_ui_frame(framebuffer_t *fb, const menu_view_t *v);
+/* 1 if the selection and the tab have not changed for `us` microseconds (also before the first change).
+ * The background jobs start a new cover only then: while the user moves, they leave the CPU to the menu. */
+int  menu_ui_still(uint32_t us);
 /* Back to the console mode. */
 void menu_ui_close(framebuffer_t *fb);
 /* The same, the console left suspended: a game's loading screen takes the
@@ -169,7 +181,7 @@ void menu_ui_close(framebuffer_t *fb);
 void menu_ui_close_quiet(framebuffer_t *fb);
 
 /* A cover for cartridges without one: the title on a coloured label. */
-int  menu_make_cover(g16_sheet_t *s, const char *title, const char *kind);
+int  menu_make_cover(g16_sheet_t *s, const char *title);
 /* A cover from RGBA8888 pixels (the .bm COVER section, a Market PNG), any
  * size: a square scaled to the card; another shape (the 128x80 covers of
  * before) whole, as wide as the card, over a blurred darker copy of it. */

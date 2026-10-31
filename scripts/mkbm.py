@@ -7,6 +7,8 @@ mkbm.py - packs a native bm cartridge (.bm). Standard library only.
            [--audio bank.json|bank.bmau] [--models models.glb|pack.bm]
            [--title "My game"] [--author me]
            [--res 640x360|480x270|320x180|256x256|360x360]
+           [--targets pi,rgb30 [--input pad,keyboard] [--aspect wide] [--needs 3d] [--min-ram MB]
+            [--min-spec N] [--min-width PX]]   the compatibility block (header bytes 120..127)
 
 sheet.png: 8-bit RGB or RGBA PNG (non-interlaced); size multiple of 8 recommended.
 --sheet8:  store the sheet with a palette and runs (at most 256 colours): big
@@ -37,6 +39,7 @@ Format: see src/bm/bm.h.
 """
 import argparse
 import os
+import re
 import struct
 import sys
 import zlib
@@ -49,16 +52,17 @@ import bmmesh  # noqa: E402
 # files (bmmesh.cart_sections reads those as 8 and 9)
 SEC_LUA, SEC_SHEET, SEC_MAP, SEC_COVER, SEC_SHEET8, SEC_AUDIO = 1, 2, 3, 4, 5, 6
 SEC_MESH, SEC_ANIM = bmmesh.SEC_MESH, bmmesh.SEC_ANIM
-SEC_SPRITES, SEC_LAYERS, SEC_FLAGS, SEC_BOXES = 11, 12, 13, 14
+SEC_SPRITES, SEC_LAYERS, SEC_FLAGS, SEC_BOXES, SEC_DATA = 11, 12, 13, 14, 15
 
 
 SEC_INFO = 10
 INFO_MAX = 16 * 1024
 RESOLUTIONS = ["640x360", "480x270", "320x180", "256x256", "360x360", "720x720"]
+TYPES = {"game": 0, "app": 1, "utility": 2}   # bm.info "type:", bits 2-3 of the u16 at 18 (src/bm/project.h)
 
 
 def read_info(path):
-    """bm.info: (the INFO section text, UTF-8 <= 16 KiB; its top-level keys)."""
+    """bm.info: (the INFO section text, UTF-8 <= 16 KB; its top-level keys)."""
     text = "".join(ln for ln in open(path, encoding="utf-8").read().splitlines(True)
                    if not ln.lstrip().startswith("#"))       # comments stay in the file
     raw = text.encode("utf-8")
@@ -154,6 +158,22 @@ def read_layers(specs):
     return out
 
 
+def data_section(items):
+    """[(name, bytes)] -> the DATA section (src/bm/bm.h): named blobs the kernel reads from an installed app"""
+    if not 1 <= len(items) <= 64:
+        raise SystemExit("--data: 1 to 64 blobs")
+    names = [n for n, _ in items]
+    if len(set(names)) != len(names) or any(not n or len(n.encode()) > 15 for n in names):
+        raise SystemExit("--data: names unique, 1 to 15 bytes")
+    head = struct.pack("<HH", len(items), 0)
+    off = 4 + 24 * len(items)
+    table, bodies = b"", b""
+    for n, blob in items:
+        table += n.encode().ljust(16, b"\0") + struct.pack("<II", off + len(bodies), len(blob))
+        bodies += blob + b"\0" * ((-len(blob)) % 4)
+    return head + table + bodies
+
+
 def layers_section(layers):
     """the LAYERS section (src/bm/bm.h) of 2..8 layers, or None for one
     layer called "main" (the MAP section alone)"""
@@ -227,6 +247,12 @@ def read_sprite_file(path, sheet_w=None, sheet_h=None):
                 raise SystemExit(f"{path}:{i}: frame 1-{frames} or *, w and h >= 1")
             boxes.append((zname, fr, kind, x, y, w, h))
             continue
+        slices, down = 0, False
+        if f[0] in ("stack", "stackv"):         # stack name x y w h n: n slices of w x h side by side;
+            down = f[0] == "stackv"             # stackv: one under the other (bit 0 of byte 27)
+            if len(f) != 7 or not f[6].isdigit() or not 2 <= int(f[6]) <= 255:
+                raise SystemExit(f"{path}:{i}: {f[0]} name x y w h n (n 2-255)")
+            slices, f = int(f[6]), f[1:6]
         if len(f) < 5 or len(f) > 7:
             raise SystemExit(f"{path}:{i}: name x y w h [frames [fps]]")
         name, (x, y, w, h), frames, fps = f[0], map(int, f[1:5]), int(f[5]) if len(f) > 5 else 1, \
@@ -235,16 +261,17 @@ def read_sprite_file(path, sheet_w=None, sheet_h=None):
             raise SystemExit(f"{path}:{i}: {name!r}: names are unique, at most {ZONE_NAME} bytes")
         if w < 1 or h < 1 or not 1 <= frames <= 16 or not 0 <= fps <= 255 or x < 0 or y < 0:
             raise SystemExit(f"{path}:{i}: w, h >= 1, frames 1-16, fps 0-255")
-        if sheet_w and (x + w * frames > sheet_w or y + h > sheet_h):
+        if sheet_w and (x + w * (frames if down else max(frames, slices)) > sheet_w
+                        or y + h * (slices if down else 1) > sheet_h):
             raise SystemExit(f"{path}:{i}: {name!r} is out of the sheet ({sheet_w}x{sheet_h})")
-        zones.append((name, x, y, w, h, frames, fps))
+        zones.append((name, x, y, w, h, frames, fps, slices | 0x100 if down else slices))
     if not 1 <= len(zones) <= SPRITES_MAX:
         raise SystemExit(f"{path}: 1 to {SPRITES_MAX} zones")
     if len(boxes) > BOXES_MAX:
         raise SystemExit(f"{path}: at most {BOXES_MAX} boxes")
     sprites = struct.pack("<HH", len(zones), 0) + b"".join(
-        n.encode().ljust(ZONE_NAME, b"\0") + struct.pack("<HHHHBBH", x, y, w, h, fr, fps, 0)
-        for n, x, y, w, h, fr, fps in zones)
+        n.encode().ljust(ZONE_NAME, b"\0") + struct.pack("<HHHHBBH", x, y, w, h, fr, fps, sl)
+        for n, x, y, w, h, fr, fps, sl in zones)
     return sprites, boxes_section(boxes)
 
 
@@ -446,14 +473,64 @@ def mark_project(data):
     return bytes(out)
 
 
-def mark_b16(data):
-    """a .b16 cartridge (M42): bit 1 of the u16 at 18, square screen"""
+def mark_type(data, name):
+    """bits 2-3 of the u16 at 18: the type of bm.info (game 0, app 1, utility 2; src/bm/project.h)"""
     out = bytearray(data)
-    struct.pack_into("<H", out, 18, (struct.unpack_from("<H", out, 18)[0] & ~1) | 2)
-    w, h = struct.unpack_from("<HH", out, 12)
-    if w != h:
-        struct.pack_into("<HH", out, 12, 360, 360)
+    struct.pack_into("<H", out, 18, (struct.unpack_from("<H", out, 18)[0] & ~12) | (TYPES[name] << 2))
     return bytes(out)
+
+
+COMPAT_AT = 120                     # the compatibility block, bytes 120..127; flag bit 4 (src/bm/bm.h)
+FLAG_COMPAT = 16
+COMPAT_BITS = {
+    "targets": {"pi": 1, "rgb30": 2},
+    "input": {"pad": 1, "keyboard": 2, "text": 4, "mouse": 8, "mouse_optional": 16},
+    "aspect": {"wide": 1, "square": 2, "any": 4, "safe_area": 8},
+    "needs": {"3d": 1, "audio": 2, "net": 4, "mouse_hw": 8},
+}
+
+
+def compat_bits(kind, text):
+    """'pad,keyboard' -> the bits of COMPAT_BITS[kind]; SystemExit on an unknown name"""
+    bits = 0
+    for name in (t.strip().lower() for t in text.split(",") if t.strip()):
+        if name not in COMPAT_BITS[kind]:
+            raise SystemExit(f"--{kind}: {name!r} is not one of {', '.join(COMPAT_BITS[kind])}")
+        bits |= COMPAT_BITS[kind][name]
+    return bits
+
+
+def mark_compat(data, targets, input_=0, aspect=0, needs=0, min_ram=0, min_spec=0, min_w16=0):
+    """the compatibility block: bytes 120..127 and flag bit 4 (docs/BM-FORMAT.md). targets is a bit set
+    (1 Pi, 2 RGB30) and must not be 0; the other bytes are 0 when a cartridge does not declare them"""
+    if not targets & 3:
+        raise SystemExit("compatibility block: targets must name pi, rgb30 or both")
+    if not 0 <= min_ram <= 0xFFFF or not 0 <= min_spec <= 255 or not 0 <= min_w16 <= 255:
+        raise SystemExit("compatibility block: min RAM is 0..65535 MB, min spec 0..255, min width 0..4080")
+    out = bytearray(data)
+    struct.pack_into("<H", out, 18, struct.unpack_from("<H", out, 18)[0] | FLAG_COMPAT)
+    struct.pack_into("<BBBBHBB", out, COMPAT_AT, targets & 3, input_ & 255, aspect & 255, needs & 255,
+                     min_ram, min_spec, min_w16)
+    return bytes(out)
+
+
+def mark_type(data, name):
+    """bits 2-3 of the u16 at 18: the type of bm.info (game 0, app 1, utility 2; src/bm/project.h)"""
+    out = bytearray(data)
+    struct.pack_into("<H", out, 18, (struct.unpack_from("<H", out, 18)[0] & ~12) | (TYPES[name] << 2))
+    return bytes(out)
+
+
+def lists_rgb30(data):
+    """True when the compatibility block of the cartridge lists the RGB30 (header byte 120, bit 1)"""
+    return bool(struct.unpack_from("<H", data, 18)[0] & FLAG_COMPAT and data[COMPAT_AT] & 2)
+
+
+def rgb30_warnings(data, label):
+    """a cartridge that lists the RGB30 and needs a mouse device: a warning on stderr (the build goes on)"""
+    if struct.unpack_from("<H", data, 18)[0] & FLAG_COMPAT:
+        if data[COMPAT_AT + 3] & COMPAT_BITS["needs"]["mouse_hw"]:
+            print(f"warning: {label}: needs mouse_hw: the RGB30 has no mouse", file=sys.stderr)
 
 
 def export_from(src, a, out):
@@ -463,12 +540,8 @@ def export_from(src, a, out):
     w, h = struct.unpack_from("<HH", raw, 12)
     title = raw[24:72].split(b"\0", 1)[0].decode("utf-8", "replace")
     author = raw[72:104].split(b"\0", 1)[0].decode("utf-8", "replace")
-    is_b16 = a.b16 or out.lower().endswith(".b16")
     if a.res_set:
         w, h = (int(v) for v in a.res.split("x"))
-        struct.pack_into("<HH", raw, 12, w, h)
-    elif is_b16 and w != h:
-        w, h = 360, 360
         struct.pack_into("<HH", raw, 12, w, h)
     if a.title:
         title = a.title
@@ -477,10 +550,8 @@ def export_from(src, a, out):
         author = a.author
         raw[72:72 + 32] = author.encode("utf-8")[:31].ljust(32, b"\0")
     flags = struct.unpack_from("<H", raw, 18)[0] & ~(1 | 2)
-    if is_b16:
-        flags |= 2
     struct.pack_into("<H", raw, 18, flags)
-    raw[104:128] = b"\0" * 24
+    raw[104:120] = b"\0" * 16               # built from; the compatibility block at 120..127 stays
     if a.sheet8:
         secs = list(bmmesh.cart_sections(bytes(raw)))
         if any(t == SEC_SHEET for t, _ in secs) and not any(t == SEC_SHEET8 for t, _ in secs):
@@ -488,6 +559,7 @@ def export_from(src, a, out):
             for t, payload in secs:
                 if t == SEC_SHEET:
                     sw, sh = struct.unpack_from("<HH", payload, 0)
+                    from bmres import sheet8_encode      # lazy: bmres imports this module
                     enc = sheet8_encode(sw, sh, payload[4:])
                     new_secs.append((SEC_SHEET8, enc) if enc else (t, payload))
                 else:
@@ -510,9 +582,16 @@ def export_from(src, a, out):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("-o", "--output", help="output cartridge (.bm, .bme, or .b16)")
-    ap.add_argument("--from", dest="src", help="source .bm or .bme to export or repack (e.g. to .b16)")
-    ap.add_argument("--b16", action="store_true", help="export a .b16 edition (checks the 8 MiB limit)")
+    ap.add_argument("-o", "--output", help="output cartridge (.bm or .bme)")
+    ap.add_argument("--from", dest="src", help="source .bm or .bme to repack")
+    ap.add_argument("--targets", help="compatibility block: the kernels the cartridge runs on, pi,rgb30 "
+                                      "(flag bit 4, bytes 120..127). Needed by the options below")
+    ap.add_argument("--input", default="", help="pad,keyboard,text,mouse,mouse_optional")
+    ap.add_argument("--aspect", default="", help="wide,square,any,safe_area")
+    ap.add_argument("--needs", default="", help="3d,audio,net,mouse_hw")
+    ap.add_argument("--min-ram", type=int, default=0, help="minimum RAM in MB")
+    ap.add_argument("--min-spec", type=int, default=0, help="minimum spec revision (BM_SPEC_REV)")
+    ap.add_argument("--min-width", type=int, default=0, help="minimum screen width in pixels (stored in units of 16)")
     ap.add_argument("--lua")
     ap.add_argument("--sheet")
     ap.add_argument("--sheet8", action="store_true", help="store the sheet with a palette and runs")
@@ -525,11 +604,14 @@ def main():
     ap.add_argument("--cover", help="picture for the menu (PNG, any size: 88x88; not square: fitted)")
     ap.add_argument("--models", help="3D models: a .glb from bm Studio, or a .bm with models")
     ap.add_argument("--uv-inset", type=float, help="texture inset of the models, sheet pixels (default 0.25)")
+    ap.add_argument("--data", action="append", default=[], metavar="NAME=FILE",
+                    help="a named blob in the DATA section (the kernel reads it from the installed app)")
     ap.add_argument("--title", default="")
     ap.add_argument("--author", default="")
     ap.add_argument("--info", help="bm.info of the project (INFO section, docs/PROJECT-LAYOUT.md): "
                                    "key: value lines; name, author and resolution are the defaults of "
-                                   "--title, --author and --res")
+                                   "--title, --author and --res; targets, input, aspect, needs, min_ram, "
+                                   "min_spec and min_width are the defaults of the flags of the same name")
     ap.add_argument("--res", default=None, choices=RESOLUTIONS)
     a = ap.parse_args()
     info_body, info = read_info(a.info) if a.info else (None, None)
@@ -541,14 +623,24 @@ def main():
         a.res = a.res or info.get("resolution")
         if a.res and a.res not in RESOLUTIONS:
             ap.error(f"{a.info}: resolution {a.res} is not one of {', '.join(RESOLUTIONS)}")
+        # the compatibility block: the same names as the flags; a flag wins over the key
+        a.targets = a.targets or info.get("targets")
+        a.input = a.input or info.get("input", "")
+        a.aspect = a.aspect or info.get("aspect", "")
+        a.needs = a.needs or info.get("needs", "")
+        for dest, key in (("min_ram", "min_ram"), ("min_spec", "min_spec"), ("min_width", "min_width")):
+            if not getattr(a, dest) and info.get(key):
+                try:
+                    setattr(a, dest, int(info[key]))
+                except ValueError:
+                    ap.error(f"{a.info}: {key}: {info[key]!r} is not a number")
     a.res_set = a.res is not None
     if not a.res:
-        a.res = "360x360" if a.b16 else "640x360"
-    if not a.output and a.src and a.b16:
-        base, _ = os.path.splitext(a.src)
-        a.output = base + ".b16"
+        a.res = "640x360"
     if not a.output or (not a.lua and not a.src):
-        ap.error("specify -o and --lua (or --from SRC [--b16] [-o OUT])")
+        ap.error("specify -o and --lua (or --from SRC -o OUT)")
+    if a.output.lower().endswith(".b16"):
+        ap.error("a .b16 is not written any more: one cartridge type, .bm (its header says the kernels)")
     if a.src and not a.lua:
         data, title, res_str = export_from(a.src, a, a.output)
     else:
@@ -562,6 +654,9 @@ def main():
         mesh, extra = None, []
         if info is not None:
             extra.append((SEC_INFO, info_body))
+        if a.data:
+            extra.append((SEC_DATA, data_section([(d.split("=", 1)[0], open(d.split("=", 1)[1], "rb").read())
+                                                  for d in a.data])))
         if a.models and a.models.endswith(".bm"):
             secs = dict(bmmesh.cart_sections(open(a.models, "rb").read()))
             if SEC_MESH not in secs:
@@ -594,11 +689,21 @@ def main():
                     sprites, boxes)
         if a.output.lower().endswith(".bme"):
             data = mark_project(data)
-        elif a.b16 or a.output.lower().endswith(".b16"):
-            data = mark_b16(data)
+        if info and info.get("type"):
+            if info["type"] not in TYPES:
+                raise SystemExit(f"{a.info}: type: {info['type']!r} must be game, app or utility")
+            data = mark_type(data, info["type"])
         title, res_str = a.title, a.res
-    if (a.b16 or a.output.lower().endswith(".b16")) and len(data) > 8 * 1024 * 1024:
-        raise SystemExit(f"{a.output}: {len(data)} bytes is over a .b16's 8 MiB limit")
+    # no size limit here: the Market takes 100 MB a file (scripts/mkmarket.py), the console loads what fits in RAM
+    if a.targets:
+        data = mark_compat(data, compat_bits("targets", a.targets), compat_bits("input", a.input),
+                           compat_bits("aspect", a.aspect), compat_bits("needs", a.needs), a.min_ram,
+                           a.min_spec, (a.min_width + 15) // 16)
+    elif a.input or a.aspect or a.needs or a.min_ram or a.min_spec or a.min_width:
+        ap.error("--input, --aspect, --needs and the minimums (or the keys input, aspect, needs, min_ram, "
+                 "min_spec and min_width of bm.info) go with --targets (or the key targets)")
+    if lists_rgb30(data):
+        rgb30_warnings(data, a.output)      # after the compatibility block: it reads it
     if a.output and os.path.dirname(a.output):
         os.makedirs(os.path.dirname(os.path.abspath(a.output)), exist_ok=True)
     open(a.output, "wb").write(data)

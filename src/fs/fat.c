@@ -131,7 +131,7 @@ int fat_mount(void)
     vol.fsinfo_reset = 0;
     vol.mounted = 1;
     err = "ok";
-    ksnprintf(desc, sizeof desc, "FAT%d, %lu MiB, label %s", vol.fat32 ? 32 : 16,
+    ksnprintf(desc, sizeof desc, "FAT%d, %lu MB, label %s", vol.fat32 ? 32 : 16,
               (unsigned long)(total / 2048), vol.label[0] ? vol.label : "-");
     return 0;
 }
@@ -139,6 +139,33 @@ int fat_mount(void)
 const char *fat_error(void) { return err; }
 const char *fat_describe(void) { return vol.mounted ? desc : err; }
 uint32_t fat_cluster_bytes(void) { return vol.mounted ? vol.spc * 512 : 0; }
+uint32_t fat_total_clusters(void) { return vol.mounted ? vol.clusters : 0; }
+
+int fat_free_step(fat_free_t *st, uint32_t max_sectors)
+{
+    const uint32_t end = vol.clusters + 2;
+    const uint32_t per = vol.fat32 ? 128 : 256;     /* FAT entries per sector */
+    if (!vol.mounted)
+        return -1;
+    if (st->next < 2)
+        st->next = 2;
+    if (max_sectors < 1)
+        max_sectors = 1;
+    if (max_sectors > 256)
+        max_sectors = 256;
+    while (max_sectors-- && st->next < end) {
+        const uint8_t *s = sector(vol.fat_lba + st->next / per);
+        if (!s)
+            return -1;
+        uint32_t c = st->next, stop = (c / per + 1) * per;
+        for (; c < stop && c < end; c++) {
+            const uint32_t v = vol.fat32 ? rd32(s + (c % per) * 4) & 0x0FFFFFFF : rd16(s + (c % per) * 2);
+            st->free += v == 0;
+        }
+        st->next = c;
+    }
+    return st->next >= end;
+}
 
 static uint32_t next_cluster(uint32_t c)
 {
@@ -625,9 +652,17 @@ static int zero_cluster(uint32_t c)
     return 0;
 }
 
-/* "config.txt" -> "CONFIG  TXT"; -1 if not a valid 8.3 name */
+/* "config.txt" -> "CONFIG  TXT"; -1 if not a valid 8.3 name. A new name is
+ * always written in lowercase, whatever case the caller gives: `g_nt` (byte
+ * 12 of the entry) gets 0x08 when the base has a letter and 0x10 when the
+ * extension has one. The stored short name stays in capitals, as FAT needs;
+ * Windows, Linux and the console show the name in lowercase. */
+static uint8_t g_nt;                    /* the flags of the last to_83 */
+
 static int to_83(const char *name, uint8_t out[11])
 {
+    int let_b = 0, let_e = 0;
+    g_nt = 0;
     memset(out, ' ', 11);
     int i = 0, n = 0;
     for (; name[i] && name[i] != '.'; i++, n++) {
@@ -644,26 +679,79 @@ static int to_83(const char *name, uint8_t out[11])
     }
     for (int k = 0; k < 11; k++) {
         uint8_t ch = out[k];
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
+            if (k < 8) let_b = 1; else let_e = 1;
+        }
         if (ch >= 'a' && ch <= 'z') out[k] = (uint8_t)(ch - 32);
         else if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' ||
                    ch == '-' || ch == ' ' || ch == '~'))
             return -1;
     }
+    g_nt = (uint8_t)((let_b ? 0x08 : 0) | (let_e ? 0x10 : 0));
     return 0;
 }
 
-#define FAT_DATE ((2026 - 1980) << 9 | 1 << 5 | 1)   /* no clock: 2026-01-01 */
+#define FAT_DATE_FIXED ((2026 - 1980) << 9 | 1 << 5 | 1)   /* no clock: 2026-01-01 */
+
+static unsigned long (*clock_fn)(void);
+
+void fat_set_clock(unsigned long (*seconds_since_1970)(void))
+{
+    clock_fn = seconds_since_1970;
+}
+
+/* Days since 1970-01-01 to a civil date (proleptic Gregorian). */
+static void civil_from_days(long z, int *y, unsigned *m, unsigned *d)
+{
+    z += 719468;
+    const long era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = (unsigned)(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    *d = doy - (153 * mp + 2) / 5 + 1;
+    *m = mp < 10 ? mp + 3 : mp - 9;
+    *y = (int)(yoe + era * 400) + (*m <= 2);
+}
+
+/* The FAT date and time words of now: the network's clock when it has the
+ * time (UTC), else the fixed date and time 0. */
+static void fat_stamp(uint16_t *date, uint16_t *time)
+{
+    unsigned long t = clock_fn ? clock_fn() : 0;
+    int y;
+    unsigned m, d;
+    if (t == 0) {
+        *date = FAT_DATE_FIXED;
+        *time = 0;
+        return;
+    }
+    civil_from_days((long)(t / 86400), &y, &m, &d);
+    if (y < 1980 || y > 2107) {
+        *date = FAT_DATE_FIXED;
+        *time = 0;
+        return;
+    }
+    const unsigned sod = (unsigned)(t % 86400);
+    *date = (uint16_t)((y - 1980) << 9 | m << 5 | d);
+    *time = (uint16_t)(sod / 3600 << 11 | sod % 3600 / 60 << 5 | sod % 60 / 2);
+}
 
 static void make_entry(uint8_t de[32], const uint8_t name[11], uint8_t attr,
-                       uint32_t cluster, uint32_t size)
+                       uint32_t cluster, uint32_t size, uint8_t nt)
 {
     memset(de, 0, 32);
     memcpy(de, name, 11);
     de[11] = attr;
-    wr16(de + 16, FAT_DATE);                    /* created */
-    wr16(de + 18, FAT_DATE);                    /* accessed */
+    de[12] = nt;                                /* NT lowercase flags */
+    uint16_t date, time;
+    fat_stamp(&date, &time);
+    wr16(de + 14, time);                        /* created, time */
+    wr16(de + 16, date);                        /* created */
+    wr16(de + 18, date);                        /* accessed */
     wr16(de + 20, vol.fat32 ? cluster >> 16 : 0);
-    wr16(de + 24, FAT_DATE);                    /* written */
+    wr16(de + 22, time);                        /* written, time */
+    wr16(de + 24, date);                        /* written */
     wr16(de + 26, cluster);
     wr32(de + 28, size);
 }
@@ -750,15 +838,16 @@ int fat_mkdirs(const char *path)
             err = "not an 8.3 name";
             return -1;
         }
+        const uint8_t nt = g_nt;
         if (fsinfo_unknown() || dir_cluster(parent, &pc) || pick_free(&nc, 1) || zero_cluster(nc))
             return -1;
         uint8_t dot[64];
         static const uint8_t n_dot[11] = { '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
         static const uint8_t n_dotdot[11] = { '.', '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
-        make_entry(dot, n_dot, 0x10, nc, 0);
-        make_entry(dot + 32, n_dotdot, 0x10, pc == vol.root_cluster ? 0 : pc, 0);
+        make_entry(dot, n_dot, 0x10, nc, 0, 0);
+        make_entry(dot + 32, n_dotdot, 0x10, pc == vol.root_cluster ? 0 : pc, 0, 0);
         uint8_t de[32];
-        make_entry(de, name, 0x10, nc, 0);
+        make_entry(de, name, 0x10, nc, 0, nt);
         if (patch_sector(cluster_lba(nc), 0, dot, 64) || set_fat(nc, eoc()) || add_entry(pc, de))
             return -1;
     }
@@ -782,7 +871,7 @@ int fat_writing(void)
     return writing;
 }
 
-#define RUN_SECTORS 64                  /* a run of clusters next to each other: 32 KiB */
+#define RUN_SECTORS 64                  /* a run of clusters next to each other: 32 KB */
 
 /* Sectors in one command, read back into check and compared; if it fails
  * or differs, one sector at a time (from now on, too). */
@@ -840,7 +929,7 @@ static int locate(const char *path, const char *dir, const char *name, fat_entry
  * a tick: no cluster is ever free in the FAT while one of the two owns it,
  * and the directory is read and changed in one go. */
 static int store(const char *path, const char *dir, const char *name, const uint8_t n83[11],
-                 const void *data, size_t len)
+                 uint8_t nt, const void *data, size_t len)
 {
     const uint32_t csize = vol.spc * 512;
     const uint32_t n = (uint32_t)((len + csize - 1) / csize);
@@ -864,10 +953,10 @@ static int store(const char *path, const char *dir, const char *name, const uint
         ours = 1;
     }
 
-    /* the data: clusters next to each other in one piece, up to 32 KiB in
+    /* the data: clusters next to each other in one piece, up to 32 KB in
      * one command (runs); else a sector at a time, a cluster a piece. Of
      * the last cluster only the sectors with data (before: all of it,
-     * zeros past the end: 64 writes for a byte with 32 KiB clusters) */
+     * zeros past the end: 64 writes for a byte with 32 KB clusters) */
     const uint8_t *p = data;
     for (uint32_t i = 0, k; i < n; i += k) {
         const size_t at = (size_t)i * csize;
@@ -909,15 +998,17 @@ static int store(const char *path, const char *dir, const char *name, const uint
     if (found) {
         uint8_t f[12];                          /* +20: one sector write */
         wr16(f, vol.fat32 ? first >> 16 : 0);   /* cluster, high */
-        wr16(f + 2, 0);                         /* write time */
-        wr16(f + 4, FAT_DATE);                  /* write date */
+        uint16_t date, time;
+        fat_stamp(&date, &time);
+        wr16(f + 2, time);                      /* write time */
+        wr16(f + 4, date);                      /* write date */
         wr16(f + 6, first);                     /* cluster, low */
         wr32(f + 8, (uint32_t)len);
         if (patch_sector(e.dir_lba, e.dir_off + 20, f, 12))
             goto out;
     } else {
         uint8_t de[32];
-        make_entry(de, n83, 0x20, first, (uint32_t)len);
+        make_entry(de, n83, 0x20, first, (uint32_t)len, nt);
         if (add_entry(dc, de))
             goto out;
     }
@@ -947,10 +1038,11 @@ int fat_write_file(const char *dir, const char *name, const void *data, size_t l
         err = "not an 8.3 name";
         return -1;
     }
+    const uint8_t nt = g_nt;
     uint32_t dc;
     if (dir_cluster(dir, &dc))
         return -1;
-    return store(NULL, dir, name, n83, data, len);
+    return store(NULL, dir, name, n83, nt, data, len);
 }
 
 int fat_replace(const char *path, const void *data, size_t len)
@@ -966,7 +1058,7 @@ int fat_replace(const char *path, const void *data, size_t len)
         err = "a directory";
         return -1;
     }
-    return store(path, NULL, NULL, NULL, data, len);
+    return store(path, NULL, NULL, NULL, 0, data, len);
 }
 
 int fat_delete(const char *path)

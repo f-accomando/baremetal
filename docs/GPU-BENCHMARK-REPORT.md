@@ -5,6 +5,8 @@ Includes QEMU instruction metrics, physical Raspberry Pi Zero W verification ben
 
 Code status: complete, tested on PC and in QEMU, verified on physical Raspberry Pi hardware (`kernel.img`). GPU is the default 3D pipeline for games; software ARM rasterizer serves as fallback.
 
+The Texture Room cartridge was removed from the kernel on 24 Oct 2026. The numbers below stay as measurements. The 3D Bench scene `room` draws the same room.
+
 ---
 
 ## 1. Executive Summary
@@ -28,7 +30,7 @@ Code status: complete, tested on PC and in QEMU, verified on physical Raspberry 
 | **GPU Architecture** | Unused | Custom bare-metal driver: 12 QPUs, TMU texturing, 24-bit tiled depth buffer |
 | **Software Rasterizer** | Float edges, single branchy loop | 32.32 Fixed-point edges, specialized span loops, early bounding-sphere culling |
 | **Z-Buffer Clear** | Synchronous CPU `memset` | Asynchronous DMA z-clear during frame transition |
-| **Resolution Modes** | 640×360, 320×180 | Adds **480×270** (exact 4× integer scale to 1080p) and square 360×360 (.b16) |
+| **Resolution Modes** | 640×360, 320×180 | Adds **480×270** (exact 4× integer scale to 1080p) and square 360×360 |
 | **Interleaved 2D/3D Depth**| Not supported | Preserved via V3D tiled depth reload when required |
 | **Fault Recovery** | System crash | Automatic fallback to ARM software renderer on GPU timeout with kernel log trace |
 | **Benchmarking Tools** | Basic stress test | `make bench3d`, `make count-insns`, `tools/qpuasm.py`, V3D emulator, and `make test-gpu3d` |
@@ -37,7 +39,7 @@ Code status: complete, tested on PC and in QEMU, verified on physical Raspberry 
 
 ## 3. Host Simulation Metrics (`qemu-arm`)
 
-CPU instructions per frame counted using `qemu-arm` on `tests/bm/bench3d.c` scenes (`make count-insns`, ARM1176 @ -O2). Excludes cache latency to isolate raw CPU computation work.
+CPU instructions per frame counted using `qemu-arm` on a file that is not in this repository scenes (`make count-insns`, ARM1176 @ -O2). Excludes cache latency to isolate raw CPU computation work.
 
 | Scene | Software (Pre) | Software (Post) | GPU Acceleration (ARM Part) |
 |---|---:|---:|---:|
@@ -72,7 +74,7 @@ Measurements recorded at 1000 MHz CPU, 250 MHz Core, 250 MHz V3D, 400 MHz SDRAM.
 | **3D Spheres (Lua)** | 1,115 tri (29 spheres) | 2,323 tri (61 spheres) | **2.1×** |
 
 ### 4.2 Hardware GPU Throughput
-Verification via diagnostic test `g`:
+Verification via the diagnostic test `g` (removed on 24 Oct 2026):
 - **Small Triangles Throughput**: 20,000 triangles prepared in 7.7 ms; binning 2.7 ms + rendering 4.1 ms = **3.0 Million triangles/second**.
 - **Pixel Fill Rate**: 20 fullscreen buffers rendered in 5.7 ms = **811 Mpixel/second** (vs. ~45 Mpixel/s software fill).
 

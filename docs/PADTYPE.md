@@ -1,5 +1,7 @@
 # Typing with the pad (assistive typing)
 
+
+
 Write **Italian, English and Lua with the controller alone**, in two ways:
 
 - **Quick composition** (*compose*): the d-pad writes the consonants and the prediction finishes
@@ -169,7 +171,7 @@ keeps working at the same time.
 
 ## 5. Pad Typing (the cartridge)
 
-`carts/typing`, in the Games tab: typing practice and test.
+a file that is not in this repository, in the Games tab: typing practice and test.
 
 - **Menu**: language (Italiano, English, Lua), initial mode (compose or keyboard), wait
   for the double (150–600 ms), text (eight per language, written for bm, or *free writing*),
@@ -205,22 +207,22 @@ presses per character.
 
 ```lua
 local pt = require "padtype"
-pt.set({ delay = 0.25, fallback = "keyboard" })   -- o "off": Share spegne
-pt.on("compose")                                   -- "keyboard", nil: spenta
-local host = pt.text_host("it")                    -- un testo; o un host proprio:
---   host.before()  il testo prima del cursore, sulla sua riga
+pt.set({ delay = 0.25, fallback = "keyboard" })   -- or "off": Share turns it off
+pt.on("compose")                                   -- "keyboard", nil: off
+local host = pt.text_host("it")                    -- a text; or a host of your own:
+--   host.before()  the text before the cursor, on its line
 --   host.insert(s), host.erase(n), host.newline(), host.move(dir)
---   host.lang      "it", "en", "lua", "ask", {it = 1, ask = 2} o "none"
---   host.prose     maiuscole a inizio frase (di default: non per "lua")
---   host.words     i nomi del codice (predict.count_words)
+--   host.lang      "it", "en", "lua", "ask", {it = 1, ask = 2} or "none"
+--   host.prose     capitals at the start of a sentence (default: not for "lua")
+--   host.words     the names in the code (predict.count_words)
 function _update()
   if not pt.update(host) then
-    -- il pad è dell'applicazione (spenta)
+    -- the pad belongs to the application (off)
   end
 end
 function _draw()
-  -- il testo; al cursore pt.pending() (P.C_PEND), pt.ghost() (C_GHOST),
-  -- le pt.open_len() lettere prima (C_OPEN), le pt.flash() (C_PRED)
+  -- the text; at the cursor pt.pending() (P.C_PEND), pt.ghost() (C_GHOST),
+  -- the pt.open_len() letters before (C_OPEN), the pt.flash() (C_PRED)
   pt.draw(150, 226)
 end
 ```
@@ -236,8 +238,8 @@ waiting press, right away), `pt.suggestions()`, `pt.syllables(host, prima, conso
 
 - `src/ai/padtype.lua` (`require "padtype"`, in the kernel, in bmhost and in the RGB30
   image): rules, syllables, keyboard, overlay, `coach`, `text_host`, the texts.
-- `carts/typing/main.lua` (Pad Typing, cover from a script);
-  `carts/code/main.lua` (bm Code: `pad_host`, Share).
+- a file that is not in this repository (Pad Typing, cover from a script);
+  a file that is not in this repository (bm Code: `pad_host`, Share).
 - `tests/padtype/pad_test.lua` (`make test-padtype`, in `make test`): the rules one by
   one (wait and double, levels, syllables and rotation, ○, words, punctuation, L1/R1,
   L1+R1, L3, Share, R3, diagonals) and all the texts written to the end in both modes,

@@ -4,7 +4,9 @@
 #include "mmio.h"
 #include "prop.h"
 #include "timer.h"
+#include "watchdog.h"
 #include "dma.h"
+#include "lib/printf.h"
 
 #define TAG_ALLOCATE_BUFFER   0x00040001u
 #define TAG_GET_PITCH         0x00040008u
@@ -62,10 +64,15 @@ int fb_init_depth(framebuffer_t *fb, uint32_t width, uint32_t height,
     msg[i++] = MBOX_TAG_LAST;
     msg[0] = (uint32_t)i * 4;
 
-    if (!mbox_call(MBOX_CH_PROP, msg))
+    if (!mbox_call(MBOX_CH_PROP, msg)) {
+        kprintf("fb_init_depth: mbox_call failed\n");
         return -1;
-    if (msg[5] == 0 || msg[6] == 0 || msg[alloc] == 0 || msg[pitch] == 0)
+    }
+    if (msg[5] == 0 || msg[6] == 0 || msg[alloc] == 0 || msg[pitch] == 0) {
+        kprintf("fb_init_depth: msg[5]=%lu msg[6]=%lu alloc=%lu pitch=%lu\n",
+                (unsigned long)msg[5], (unsigned long)msg[6], (unsigned long)msg[alloc], (unsigned long)msg[pitch]);
         return -2;
+    }
 
     fb->width  = msg[5];
     fb->height = msg[6];
@@ -82,8 +89,11 @@ int fb_init_depth(framebuffer_t *fb, uint32_t width, uint32_t height,
     fb->depth  = msg[depth_idx];
     fb->bus    = msg[alloc];
     dma_map_region((uint32_t)fb->mem, fb->size, msg[alloc]);
-    if (fb->depth != depth)
+    if (fb->depth != depth) {
+        kprintf("fb_init_depth: depth mismatch got %lu want %lu\n",
+                (unsigned long)fb->depth, (unsigned long)depth);
         return -3;
+    }
     return 0;
 }
 
@@ -132,6 +142,7 @@ void fb_show(framebuffer_t *fb, uint32_t index)
 
 int fb_flip(framebuffer_t *fb)
 {
+    watchdog_progress();
     if (fb->buffers < 2)
         return 0;
 
@@ -158,16 +169,4 @@ int fb_flip(framebuffer_t *fb)
      * nothing is drawn into a page still being scanned out */
     fb->base = fb->mem + ((drawn + 1) % fb->buffers) * fb->height * fb->pitch;
     return fb->vsync;
-}
-
-int fb_vsync_probe(uint32_t *us, int n)
-{
-    for (int i = 0; i < n; i++) {
-        uint32_t v[1] = { 0 };
-        uint32_t t0 = timer_ticks();
-        if (prop_query(TAG_WAIT_FOR_VSYNC, v, 1) != 0)
-            return -1;
-        us[i] = timer_ticks() - t0;
-    }
-    return 0;
 }

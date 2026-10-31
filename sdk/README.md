@@ -12,8 +12,8 @@ the menu of one you move to another on the same file.
 
 On the PC there are command-line tools for the same files: `scripts/mkbm.py --models`
 (a `.glb` or a `.bm` of models into a cartridge), `scripts/bmmesh.py`,
-`scripts/bmres.py` (the resources), `tools/bmreduce.py`, `tools/cutout2mesh.py`,
-`tools/meshy2mesh.py`, `tools/local2mesh.py`, `tools/img2mesh.py`.
+`scripts/bmres.py` (the resources), `tools/bmreduce.py`, a file that is not in this repository,
+`tools/meshy2mesh.py`, `tools/local2mesh.py`, a file that is not in this repository.
 The files the tools work on are **projects** (`.bme`); a **game** (`.bm`) is opened
 to read it and take its pieces, and saving it makes an editable copy (see *Projects and
 games* below).
@@ -48,8 +48,7 @@ end
 the models and skeletons, saved by the console's bm Studio or bm Animator) or `models.glb`
 in `carts/<game>/`; `make` puts it into the cartridge with `mkbm.py --models`. If the game doesn't
 have its own `sheet.png`, the sheet is the one of `models.bm` or of the `.glb`. Complete example:
-`carts/village` (Studio Village: the houses, the trees and the villager with its three animations
-are in `models.bm`).
+the `overbit` sample game (not in this repository) (its models and skeletons are in `models.bm`, made by `art/models.py`).
 
 ## Limits
 
@@ -66,7 +65,7 @@ are in `models.bm`).
 
 ## On the console: bm SDK, the hub of the project
 
-**bm SDK** (`carts/editor/main.lua`, built into the kernel, **Dev** tab; from a game
+**bm SDK** (a file that is not in this repository, built into the kernel, **Dev** tab; from a game
 **X** → *Open in the SDK*; from the monitor `e`) is the point where a game starts and from which
 the other programs of the suite are reached on the same file.
 
@@ -85,15 +84,13 @@ with the F keys (Y + left/right on the gamepad), Esc the menu, **F12** held the 
 - **F1, the project**: on the left *OPEN IN* (1 bm Code, 2 bm Pixel, 3 bm Studio, 4 bm
   Animator, 5 bm Mesh, 6 bm Sound: the SDK saves and opens the program on the same file; in
   its menu **Back to bm SDK** saves and returns) and *PROJECT* (t title, a author, r screen, b
-  target `.bm`/`.b16`, n a template). On the right what is in the file: lines, KiB and **tokens**
+  target Pi, RGB30 or both, n a template). On the right what is in the file: lines, KB and **tokens**
   of the code, the drawn cells of the sheet, those of the map, the models, the
   skeletons and the animations, the sound bank; the numbers of the last test run; how to ask
   the assistant.
 - **F1 again, the dev kit**: the tokens and the biggest functions, the memory the game's
   data takes while it runs (sheet, map, models, skeletons, sounds, z-buffer: the
-  same sum as `stat(13)`; Lua is added on top), the saved file against the **8 MiB**
-  of a `.b16` ([docs/B16.md](../docs/B16.md) §8.5) and, with the `.b16` target, the lines that
-  format won't have (`math.random`, `time()`, files...). After a test run (**F5**) its
+  same sum as `stat(13)`; Lua is added on top) and the size of the saved file. After a test run (**F5**) its
   numbers: fps, average and maximum ms of `_update` + `_draw`, frames over 16.7 ms,
   the maximum RAM (Lua + data), the instructions of the heaviest frame, the triangles and
   who drew the 3D (`cart_arg().run`). In games the time of a frame comes from F11
@@ -136,28 +133,28 @@ goes back as it was: a big sheet stays small).
 
 **Projects and games** (`src/bm/project.h`, `docs/API.md`): all the tools of the suite
 (SDK, bm Code, bm Studio, bm Animator, bm Mesh, bm Pixel, Sound) change only **projects**
-(`.bme`); a **game** (`.bm`, `.b16`) they only read. With a game open, the first
+(`.bme`); a **game** (`.bm`) they only read. With a game open, the first
 save asks *Save an editable copy: NAME.BME?* and from there the tool works on the copy
 (the second value of `cart_save`/`cart_write`/`cart_put_audio`); a new project is
 `GAME.BME`. *Build the game .bm* (`cart_build`) writes the project's game in `/carts` and
-replaces it at every build. In the bm menu projects are in Dev with the label "Project".
+replaces it at every build. *Publish to the Market...* (`cart_publish(path)`) builds the .bm, then the Publish panel opens a pull request that the Market owner approves. In the bm menu projects are in Dev with the label "Project".
 The stand-ins of the PC tests follow the same rules (`tests/studio/project_rules.lua`). Tests: `tests/studio/sdk_host.lua` (in `make
 test-studio`: every game template runs 400 frames on the stand-ins), QEMU
-`test_editor` and `test_sdk_suite` (Studio Village: the 3D page, the
+`test_editor` and `test_sdk_suite` (the test kit: the 3D page, the
 assistant's saved model, bm Studio and back).
 
-## On the RGB30: bm SDK (RGB30), the `.b16` edition
+## On the RGB30: bm SDK (RGB30)
 
-**bm SDK (RGB30)** (`carts/sdk_b16/`) is a separate edition of the SDK for the RGB30's 360×360
+**bm SDK (RGB30)** (a file that is not in this repository) is a separate version of the SDK for the RGB30's 360×360
 screen and its pad, **built into the RGB30's kernel** (`kernel8.img`) as a tool, as the Pi's SDK
 is built into the Pi's: the **Dev** tab has it (its last cover, **bm SDK**), and a game's options
 (**X** on its cover in Games) have **Open in bm SDK**. It has its own sources and build rules:
-the Pi's bm SDK (`carts/editor`, in the Pi's kernel) does not change with it, the Pi's kernel
-does not have it, and neither replaces the other. It is not in the Market.
+the Pi's bm SDK (a file that is not in this repository, in the Pi's kernel) does not change with it, the Pi's kernel
+does not have it, and neither replaces the other. It is not in the Market. It has no Publish panel.
 
 - **The screen**: 360×360 (×2 on the panel), 45 columns and 22 rows of 8×16 text: the tabs on
   top, the hint row and the status bar at the bottom (a long message takes both). The pages are
-  the Pi's, laid out again (`carts/sdk_b16/layout.lua`, the cartridge's own: regions cut with
+  the Pi's, laid out again (a file that is not in this repository, the cartridge's own: regions cut with
   `split`, on the grid): the project's rows across the screen with the contents and the last try
   under them, the dev kit on the whole page; the code on the whole width (40 columns); the
   sprites with a 192×192 canvas on the left and, on the right, the sheet around the cell, the
@@ -176,9 +173,9 @@ does not have it, and neither replaces the other. It is not in the Market.
   the menu. A name (title, file) is typed with padtype's keyboard: Start takes it, back deletes
   and, on an empty line, closes. A keyboard works as on the Pi (F1–F4, Esc, Ctrl+S, F12).
 - **What it can do**, as a tool (the Pi's tool session, `src/kernel/devtool.c`): open any
-  `.bm`, `.bme` or `.b16` (in `/carts`, `bm/` and the root) and save its project where it is, one
+  `.bm` or `.bme` (in `/carts`, `bm/` and the root) and save its project where it is, one
   of an earlier session too (Save as: `/carts`). A game is read only: saving it, the console asks
-  and makes its editable copy next to it (`bm/VILLAGE.B16` → `bm/VILLAGE.BME`). **Build** (Ctrl+B,
+  and makes its editable copy next to it (`bm/TESTKIT.BM` → `bm/TESTKIT.BME`). **Build** (Ctrl+B,
   X > *Build the game .bm*) makes the project's game next to it: from a project in `bm/` the
   Games tab shows it, from `/carts` it does not (that tab lists `bm/`). **Try** (F5, X > *Try the
   game*) saves, then the console plays the game: Start + Select (or Ctrl+Esc) leaves it and the
@@ -186,8 +183,7 @@ does not have it, and neither replaces the other. It is not in the Market.
   error. The suite's other programs (bm Code, Pixel, Studio, Animator, Mesh, Sound) are the Pi's:
   the RGB30's kernel has none, so it does not offer them (*Open in ...*). The assistant answers
   where the kernel has its knowledge (not on the RGB30).
-- A new project is 360×360 with the target `.b16`; the dev kit lists what the `.b16` profile
-  leaves out ([docs/B16.md](../docs/B16.md) §0: files, `math.random`, `screen()`...).
+- A new project is 360×360 with the target Pi plus RGB30.
 
 Build: `make TARGET=rgb30` (`rgb30.mk` joins it, packs it as `build/rgb30/sdk_b16.bm` and
 `src/rgb30/bm_embed.S` takes it into `kernel8.img`). Tests: `make test-sdk-b16`
@@ -199,7 +195,7 @@ test` (`test_sdk_tool`: Open in bm SDK, F5 and back, the Dev tab).
 ## On the console: bm Studio and bm Animator
 
 On the console there are the same two programs, with the same names: **bm Studio**
-(`carts/studio/main.lua`, the models) and **bm Animator** (`carts/animator/main.lua`,
+(a file that is not in this repository, the models) and **bm Animator** (a file that is not in this repository,
 skeletons, animations and sprites). They are cartridges built into the kernel, in the **Dev** tab;
 from a game they are opened with **X** on the cover, **Open in bm Studio** or **Open in bm
 Animator** (from the monitor the keys `3` and `6`), and from the menu of one you move to the other on the
@@ -342,7 +338,7 @@ the whole pose.
 
 ## On the console: bm Mesh
 
-**bm Mesh** is the mesh editor, built into the kernel (`carts/mesh/main.lua`): **Dev**
+**bm Mesh** is the mesh editor, built into the kernel (a file that is not in this repository): **Dev**
 tab, or **X** on the cover of a game → **Open in bm Mesh** (from the monitor, the
 key `4`). It reads three kinds of meshes of a `.bm`, marked in the list with a letter:
 
@@ -403,7 +399,7 @@ the sheet coordinates) and open in bm Code like the rest of the code.
 
 ## On the console: bm Pixel
 
-**bm Pixel** is the pixel art editor, built into the kernel (`carts/pixel/main.lua`):
+**bm Pixel** is the pixel art editor, built into the kernel (a file that is not in this repository):
 **Dev** tab, or **X** on the cover of a game → **Open in bm Pixel** (from the monitor,
 the key `5`). It works on the **sprite sheet** of the `.bm`, the same one used by games
 (`spr`, `sspr`, `map`), the SDK and bm Studio (the textures of the models). Three pages
@@ -473,27 +469,23 @@ The console's bm Studio and bm Animator have a test bench on the PC
 (`tests/studio/tools3d_host.lua`, inside `make test-studio`, with the console's Lua 5.4):
 bm's APIs replaced (a folder acts as the SD; the drawings check their arguments, the
 chip keys their names), keys and gamepad simulated, and the whole path: bm Studio
-on the village, blocks, tiles (also several together), selection and moves, vertices,
+on the test kit, blocks, tiles (also several together), selection and moves, vertices,
 painting, views, models, undo, save and reopen; then bm Animator on the same
 file (`cart_tool`): bones, mirror, names, parent, skin, keyframes, onion, animations,
 sprites into the sheet, saving. The files are reread by Python
 (`tests/studio/check_files.py`: the block's faces turned outward, the red tile on the
 floor and the one on the wall, the skeleton and the animation) and by the kernel's parser
-(`test_bm`). In QEMU, `test_studio_animator` opens the village in bm Studio from the game's
-options, tries the tools, builds, saves, tries the game, switches to bm Animator,
-animates, saves and puts the villager's sprites into the sheet.
+(`test_bm`).
 
 bm Mesh has its own test bench on the PC (`tests/studio/mesh_host.lua`, in `make
 test-studio`): `cart_meshes()` replaced by a `load` of the game code with the same
 rules as the kernel, and the whole path (the 13 meshes of Astro Wing, mesh → model equal to
 what the code gives to `mesh()`, mesh → code that rerun gives the same meshes,
 moves, undo, subdivision, mirror, new faces, merging, color, extrusion,
-duplication, the villager with the skeleton after moved and deleted vertices, save as).
+duplication, the walker with the skeleton after moved and deleted vertices, save as).
 The files it writes are reread by `check_files.py`, by `bmmesh.py` and by the kernel
 (`test_meshcap`: each skeleton matches its model). `test_meshcap` also tests the
-real capture (`src/bm/meshcap.c`) on Astro Wing, Texture Room and Chaos Kitchen. In QEMU,
-`test_mesh` opens Astro Wing from the options, copies the ship as a model, moves its vertices,
-copies it as code and saves.
+real capture (`src/bm/meshcap.c`) on Astro Wing and Chaos Kitchen.
 
 bm Pixel has its own test bench on the PC (`tests/studio/pixel_host.lua`, in `make
 test-studio`): the sheet in a table with the colors as the kernel keeps them, a `cart_write`
@@ -503,16 +495,13 @@ mirroring, rotating, scrolling, undo and redo, the assistant, the palette, the t
 sheet, save, reopen, new sheet, try the game). The files are reread by `check_files.py`
 (the pixels not redrawn with their 24 bits, the palette, models and skeletons intact) and
 by the kernel (`test_meshcap`); `test_bm` tests the kernel's SHEET8 packer, the sheet in place
-of the old one in `bm_rewrite_with` and the enlarged `sspr`. In QEMU, `test_pixel` opens Studio
-Village from the options, draws and saves: in the file only the drawn pixels change, the others
-stay identical byte for byte; `test_pixel_big` does the same with the sheet of Titan Clash
-(2048×3448): it changes a single pixel and the palette stays the same.
+of the old one in `bm_rewrite_with` and the enlarged `sspr`.
 
 ## Structure
 
 ```
 carts/editor/main.lua        bm SDK, the hub of the project (built into the kernel, Dev tab)
-carts/sdk_b16/               bm SDK (RGB30), the .b16 edition (built into kernel8, its Dev tab)
+carts/sdk_b16/               bm SDK (RGB30) (built into kernel8, its Dev tab)
 src/kernel/devtool.c         the tool session (a tool, its games, cart_tool): the Pi's and the RGB30's
 carts/studio/main.lua        bm Studio (built into the kernel, Dev tab)
 carts/animator/main.lua      bm Animator (built into the kernel, Dev tab)
@@ -524,6 +513,7 @@ scripts/bmmesh.py            MESH, ANIM and .glb for mkbm.py
 tests/studio/tools3d_host.lua    bm Studio and bm Animator on the PC, with bm's APIs replaced
 tests/studio/mesh_host.lua       bm Mesh on the PC
 tests/studio/pixel_host.lua      bm Pixel on the PC
+tests/studio/humanoid_host.lua    bm Mesh and bm Animator on the PC: a humanoid of 1500 triangles, 16 bones, a walk
 tests/studio/sdk_host.lua        the bm SDK on the PC (every game template runs 400 frames)
 tests/studio/sdk_b16_host.lua    bm SDK (RGB30) on the PC: 360x360, the RGB30's pad
 tests/studio/check_files.py      their files reread by the build's Python

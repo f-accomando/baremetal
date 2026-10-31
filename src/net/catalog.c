@@ -3,6 +3,7 @@
  * the market's key built into the kernel), the records, the files.
  */
 #include "catalog.h"
+#include "sha_job.h"
 
 #include "mbedtls/pk.h"
 #include "mbedtls/sha256.h"
@@ -146,7 +147,7 @@ static int is_known_app(const char *id)
 {
     static const char *const apps[] = {
         "sdk", "editor", "sdk-b16", "code", "pixel", "studio",
-        "animator", "mesh", "sound", "assistant", "write", "typing"
+        "animator", "mesh", "sound", "assistant", "write", "typing", "bmweb", "agent"
     };
     for (size_t i = 0; i < sizeof apps / sizeof apps[0]; i++)
         if (strcmp(id, apps[i]) == 0)
@@ -155,7 +156,7 @@ static int is_known_app(const char *id)
 }
 
 /* g is the last game of c (already added): the same id is allowed once per
- * kind, a .bm for the Pi and a .b16 for the handhelds (Overbit has both) */
+ * kind: a catalog of an earlier release may list a .bm and an old .b16 of one game */
 static const char *finish(const catalog_t *c, const catalog_game_t *g)
 {
     if (!g->title[0]) return "without a title";
@@ -249,6 +250,9 @@ int catalog_parse(const uint8_t *m, size_t len, catalog_t *c, char *err, size_t 
             bad_line = text(g->license, sizeof g->license, line + 8);
         } else if (g && strncmp(line, "about ", 6) == 0) {
             bad_line = text(g->about, sizeof g->about, line + 6);
+        } else if (g && strncmp(line, "targets ", 8) == 0) {
+            /* 1 Pi, 2 RGB30, 3 both (the BM_TARGET_* bits of src/bm/bm.h); another value is a newer catalog's */
+            g->targets = (line[8] >= '1' && line[8] <= '3' && !line[9]) ? (uint8_t)(line[8] - '0') : 0;
         } else if (g && strncmp(line, "file ", 5) == 0) {
             bad_line = parse_file(line + 5, &g->file, CATALOG_MAX_FILE);
         } else if (g && strncmp(line, "cover ", 6) == 0) {
@@ -294,6 +298,8 @@ int catalog_check_file(const catalog_file_t *f, const uint8_t *data, size_t len)
     unsigned char hash[32];
     if (!f->size || len != f->size)
         return -1;
+    if (sha_offload(data, len, hash, catalog_hash_tick) == 0)       /* a worker core hashed it */
+        return memcmp(hash, f->sha256, sizeof hash) == 0 ? 0 : -1;
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
     int rc = mbedtls_sha256_starts(&ctx, 0);

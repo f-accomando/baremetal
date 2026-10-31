@@ -1,5 +1,6 @@
 # Native `.bm` cartridges: API and first cartridge
 
+
 > A step-by-step practical guide (sprites, maps, 3D models, sound, lights, saves):
 > [GAME-GUIDE.md](GAME-GUIDE.md).
 
@@ -10,7 +11,7 @@ sprite sheet and a CSV map).
 
 ## The first cartridge in 5 minutes
 
-1. Create `carts/hello/main.lua`:
+1. Create a file that is not in this repository:
 
    ```lua
    local x, y = 300, 160
@@ -44,7 +45,7 @@ sprite sheet and a CSV map).
    **Cover** (optional): `--cover cover.png`, a PNG of any size that the menu prints on
    the card: an 88×88 square (2026-10-04; 128×80 before). A square picture is scaled
    down; others stay whole, as wide as the square, over a blurred and darker copy of
-   themselves that fills the rest. In the build a file `carts/hello/cover.png` is enough;
+   themselves that fills the rest. In the build a file a file that is not in this repository is enough;
    those of the demo games are drawn by a script. Without a cover the menu
    prints the title.
 
@@ -83,8 +84,7 @@ error, the cartridge stops and the error, with its line, appears on the console.
 | `_leave()` | (optional) in a network match (`online(true)`), when the player confirms leaving: the game tells the server (or the host), then the cartridge closes without being suspended |
 
 Globals: `SCREEN_W` and `SCREEN_H` (640 and 360; 480 and 270 with `--res 480x270`; 320 and
-180 with `--res 320x180`; 256 and 256 with `--res 256x256`; 360 and 360 with `--res 360x360`, the
-`.b16`'s screen). The cartridge can change its
+180 with `--res 320x180`; 256 and 256 with `--res 256x256`; 360 and 360 with `--res 360x360`). The cartridge can change its
 resolution while it runs with `screen(w, h)` (below): from the next frame the new sizes hold.
 The screen is **not** cleared by itself: `_draw` usually starts with `cls()`.
 
@@ -115,7 +115,9 @@ The reference is split by area. **Read only the file you need** (and grep inside
 | [api/tools.md](api/tools.md) | Keyboard and files · Assistant (M30) |
 | [api/light3d.md](api/light3d.md) | nano8 · Light · Light by levels · 3D (software) · Collision worlds |
 | [api/bmlib.md](api/bmlib.md) | The games' shared library |
+| [api/jobs.md](api/jobs.md) | Pure jobs on the worker cores (`job_run`, `job_poll`) |
 | [api/riff.md](api/riff.md) | Music as patterns |
+| [api/video.md](api/video.md) | Video clips (.bmv) |
 | [api/bmnet.md](api/bmnet.md) | Games over the network |
 
 ## Budget and tips
@@ -123,13 +125,15 @@ The reference is split by area. **Read only the file you need** (and grep inside
 - 60 fps = **16.7 ms** per frame for `_update` + `_draw` + the copy to the screen. At the
   top left of the demo, `stat(1)` shows how much the cartridge uses.
 - The **dev kit**: the performance overlay over any game, **off by default**. It is turned
-  on from Settings > Screen and sound > "Performance overlay" (Off, Top, Bottom: it stays
-  saved), with F11 on the keyboard (a system key, also in the tools), with `p` from the
+  on with `perf=top` or `perf=bottom` in `bm/config.txt`, with F11 on the keyboard (a system key, also in the tools), with `p` from the
   serial line or with `devkit(mode)` from the game: once at the top right, again at the
-  bottom right, again off. F11, `p` and `devkit()` last one run: every game starts (and
+  bottom right, again off. On a pad (the RGB30 has no F11), press L1 and R1
+  together: a smaller block (two rows: `60fps 8.2ms tri 15.4k`, `c49% g31%` for the CPU and the GPU) at the top right; the same
+  chord hides it. F11, `p`, the chord and `devkit()` last one run: every game starts (and
   resumes) as Settings says. One small block:
 
-      60fps 8.2ms           frames a second; ms of work in a frame (the parts below)
+      60fps 8.2ms tri 15.4k frames a second; ms of work in a frame (the parts below); in a 3D game the
+                            triangles drawn (`stat(4)`): `k` thousands, `m` millions, one decimal
       cpu [=====---]  49%   the CPU's frame in its parts, % of 16.7 ms
       gpu [===-----]  31%   the GPU's busy time, % of 16.7 ms (only while the GPU draws the 3D)
 
@@ -168,12 +172,12 @@ The reference is split by area. **Read only the file you need** (and grep inside
   menu when there is a network. `bm/config.txt`: `session_report=0` never, `=1` always;
   without the line, only with a `github_token`.
 
-  From the code: `stat(1)`, `stat(2)`, `stat(6)`, `stat(10)`, `stat(11)`–`stat(16)`,
+  From the code: `stat(1)`, `stat(2)`, `stat(6)`, `stat(10)`, `stat(11)`–`stat(18)`,
   `devkit()`, `profile()`. The limit is 20 million instructions per call. The
   **SDK's dev kit** (F1 twice) has the same numbers for the project: tokens, the biggest
-  functions, the data's memory, the file against the 8 MiB of a `.b16` and the numbers of
+  functions, the data's memory, the file size and the numbers of
   the last try (F5). At the end of a run the serial line also writes the line `dev kit:
-  Lua peak ... KiB, data ... KiB, busiest frame ...k instructions, ... frames over 16.7 ms,
+  Lua peak ... KB, data ... KB, busiest frame ...k instructions, ... frames over 16.7 ms,
   ... tokens`.
 
 - Drawing is in C: a `spr` or `rectfill` call costs a few microseconds, but every call from

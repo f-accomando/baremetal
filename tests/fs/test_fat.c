@@ -10,11 +10,15 @@
 #define _DEFAULT_SOURCE
 #include "fs/fat.h"
 #include "drivers/sd.h"
+#include "kernel/sdmap.h"
+#include "bm/bm.h"
+#include "bm/project.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static FILE *img;
 static uint32_t writes, runs;           /* sectors written; writes of more than one */
@@ -199,6 +203,320 @@ static int nest_tick(void)
     return 0;
 }
 
+static uint32_t count_free(void)
+{
+    fat_free_t st = { 0, 0 };
+    int r;
+    while ((r = fat_free_step(&st, 3)) == 0)
+        ;
+    return r == 1 ? st.free : ~0u;
+}
+
+static void test_free_count(void)
+{
+    const uint32_t cb = fat_cluster_bytes();
+    uint32_t f0 = count_free();
+    uint8_t *p = pattern(9000, 77);
+    CHECK(fat_write_file("/", "FREE9K.BIN", p, 9000) == 0);
+    free(p);
+    uint32_t f1 = count_free();
+    CHECK(f0 - f1 == (9000 + cb - 1) / cb);
+    CHECK(f0 < fat_total_clusters());
+    CHECK(fat_delete("/FREE9K.BIN") == 0);
+    CHECK(count_free() == f0);
+}
+
+size_t sdmap_core_save(char *out, size_t n);        /* sdmap_core.c: the cache text */
+int sdmap_core_load(const char *text, size_t len);
+
+static int has_file(const sdmap_t *r, const char *path, uint32_t bytes)
+{
+    for (int i = 0; i < r->nfiles; i++)
+        if (!strcasecmp(r->files[i].path, path) && r->files[i].bytes == bytes)
+            return 1;
+    return 0;
+}
+
+/* the date and time words of a file's directory entry, read from the image */
+static void entry_stamp(const char *path, unsigned *date, unsigned *time)
+{
+    fat_entry_t e;
+    uint8_t sec[512];
+    CHECK(fat_find(path, &e) == 0);
+    CHECK(sd_read(e.dir_lba, 1, sec) == 0);
+    *date = sec[e.dir_off + 24] | sec[e.dir_off + 25] << 8;
+    *time = sec[e.dir_off + 22] | sec[e.dir_off + 23] << 8;
+}
+
+static unsigned long fake_now;
+static unsigned long fake_clock(void) { return fake_now; }
+
+/* the file dates: 2026-01-01 without a clock, the clock's UTC time with one */
+static void test_clock(void)
+{
+    uint8_t *buf = pattern(100, 3);
+    unsigned date, time;
+    CHECK(fat_write_file("/", "NOCLK.DAT", buf, 100) == 0);
+    entry_stamp("/NOCLK.DAT", &date, &time);
+    CHECK(date == ((2026 - 1980) << 9 | 1 << 5 | 1) && time == 0);
+    fat_set_clock(fake_clock);
+    fake_now = 0;                               /* the net does not have the time yet */
+    CHECK(fat_write_file("/", "UNKNOWN.DAT", buf, 100) == 0);
+    entry_stamp("/UNKNOWN.DAT", &date, &time);
+    CHECK(date == ((2026 - 1980) << 9 | 1 << 5 | 1) && time == 0);
+    fake_now = 1792053725;                      /* 2026-10-15 08:42:05 UTC */
+    CHECK(fat_write_file("/", "CLOCK.DAT", buf, 100) == 0);
+    entry_stamp("/CLOCK.DAT", &date, &time);
+    CHECK(date == ((2026 - 1980) << 9 | 10 << 5 | 15));
+    CHECK(time == (8 << 11 | 42 << 5 | 5 / 2));
+    fake_now = 1709164800 + 86399;              /* 2024-02-29 23:59:59 (leap day) */
+    CHECK(fat_write_file("/", "LEAP.DAT", buf, 100) == 0);
+    entry_stamp("/LEAP.DAT", &date, &time);
+    CHECK(date == ((2024 - 1980) << 9 | 2 << 5 | 29) && time == (23 << 11 | 59 << 5 | 29));
+    fat_set_clock(NULL);
+    free(buf);
+}
+
+/* Settings > System > Bridge writes /bm/bridge.txt over the file a PC put there: the new word is what the next boot reads
+ * (the user's report of 27 Oct: the card still said off after fast) */
+static void test_bridge_file(void)
+{
+    CHECK(fat_mkdirs("/bm") == 0);
+    CHECK(fat_write_file("/bm", "bridge.txt", "off\n", 4) == 0);
+    CHECK(fat_write_file("/bm", "bridge.txt", "fast\n", 5) == 0);
+    CHECK(fat_write_file("/bm", "bridge.txt", "on\n", 3) == 0);
+    CHECK(fat_write_file("/bm", "bridge.txt", "fast\n", 5) == 0);
+    fat_entry_t e;
+    uint8_t *data = NULL;
+    size_t len = 0;
+    CHECK(fat_find("/bm/bridge.txt", &e) == 0 && fat_load(&e, &data, &len) == 0);
+    CHECK(len == 5 && data && memcmp(data, "fast\n", 5) == 0);
+    free(data);
+    int same = 0;                       /* one entry only: no second "bridge.txt" for fat_find to meet first */
+    fat_dir_t d;
+    CHECK(fat_opendir(&d, "/bm") == 0);
+    while (fat_readdir(&d, &e))
+        if (!strcasecmp(e.name, "bridge.txt"))
+            same++;
+    CHECK(same == 1);
+}
+
+static void test_sdmap(void)
+{
+    uint8_t *buf = pattern(5000, 5);
+    CHECK(fat_mkdirs("/bm") == 0);
+    CHECK(fat_mkdirs("/bme") == 0);
+    CHECK(fat_mkdirs("/glb") == 0);
+    CHECK(fat_mkdirs("/bmm") == 0);
+    CHECK(fat_write_file("/glb", "a.glb", buf, 4500) == 0);
+    CHECK(fat_write_file("/bmm", "a.bmm", buf, 2500) == 0);
+    CHECK(fat_write_file("/bm", "G.BM", buf, 3000) == 0);
+    CHECK(fat_write_file("/bm", "LOG.TXT", buf, 2000) == 0);
+    CHECK(fat_write_file("/bme", "P.BME", buf, 5000) == 0);
+    CHECK(fat_write_file("/", "kernel.img", buf, 4000) == 0);
+    CHECK(fat_write_file("/", "X.DAT", buf, 1000) == 0);
+    free(buf);
+    sdmap_core_reset();
+    int r;
+    while ((r = sdmap_core_step(2)) == 1)
+        ;
+    CHECK(r == 0);
+    const sdmap_t *m = sdmap_core_result();
+    CHECK(m->bm >= 5000 && m->bme == 5000 && m->kernel == 4000);
+    CHECK(m->glb == 4500 && m->bmm == 2500);          /* their own parts of the bar */
+    CHECK(m->free > 0 && m->free + m->kernel + m->bm + m->bme + m->glb + m->bmm + m->other == m->total);
+    int found = 0;
+    for (int i = 0; i < m->ndirs; i++)
+        if (!strcasecmp(m->dirs[i].path, "/bme")) {
+            found = 1;
+            CHECK(m->dirs[i].files == 1 && m->dirs[i].kb == 4);
+        }
+    CHECK(found);
+    /* /glb and /bmm are folders of their own: an entry each, with their files and bytes */
+    int glb = 0, bmm = 0;
+    for (int i = 0; i < m->ndirs; i++) {
+        if (!strcasecmp(m->dirs[i].path, "/glb")) {
+            glb++;
+            CHECK(m->dirs[i].files == 1 && m->dirs[i].kb == 4);
+        }
+        if (!strcasecmp(m->dirs[i].path, "/bmm")) {
+            bmm++;
+            CHECK(m->dirs[i].files == 1 && m->dirs[i].kb == 2);
+        }
+    }
+    CHECK(glb == 1 && bmm == 1);
+    CHECK(has_file(m, "/glb/a.glb", 4500) && has_file(m, "/bmm/a.bmm", 2500));
+    CHECK(has_file(m, "/bm/LOG.TXT", 2000) && has_file(m, "/X.DAT", 1000));
+    CHECK(!has_file(m, "/bm/G.BM", 3000) && !has_file(m, "/bme/P.BME", 5000) && !has_file(m, "/kernel.img", 4000));
+    for (int i = 1; i < m->nfiles; i++)
+        CHECK(m->files[i - 1].bytes >= m->files[i].bytes);
+    CHECK(sdmap_core_permille() == 1000);
+
+    /* the cache text: saved, loaded back the same */
+    char text[8192];
+    size_t tn = sdmap_core_save(text, sizeof text);
+    CHECK(tn > 0);
+    sdmap_t was = *m;
+    sdmap_core_reset();
+    CHECK(sdmap_core_load(text, tn) == 1);
+    m = sdmap_core_result();
+    CHECK(m->total == was.total && m->bme == was.bme && m->glb == was.glb && m->bmm == was.bmm && m->bm == was.bm && m->ndirs == was.ndirs && m->nfiles == was.nfiles);
+    CHECK(m->nfiles > 0 && !strcmp(m->files[0].path, was.files[0].path));
+    CHECK(sdmap_core_load("sdmap 3\n", 8) == 0);
+    CHECK(sdmap_core_load("sdmap 2\nD x\n", 12) == 0);
+}
+
+/* Projects (.bme) live in /bme (src/bm/project.h): the paths, the copy of a game, the build */
+static void test_project(void)
+{
+    char out[96], err[64];
+    CHECK(bm_project_path("/carts/Il mio gioco.bm", out, sizeof out) == 0 && !strcmp(out, "/bme/ilmiogio.bme"));
+    CHECK(bm_project_path("pong.bm", out, sizeof out) == 0 && !strcmp(out, "/bme/pong.bme"));
+    CHECK(bm_is_project("/bme/PONG.BME") && bm_is_project("/carts/old.bme") && !bm_is_project("/bm/pong.bm"));
+
+    /* a game in the games folder, as the card has it */
+    uint8_t cart[BM_HEADER_SIZE + 16];
+    memset(cart, 0, sizeof cart);
+    memcpy(cart, "BMCART\0\0", 8);
+    cart[8] = 1;
+    cart[10] = BM_HEADER_SIZE & 255;
+    cart[11] = BM_HEADER_SIZE >> 8;
+    CHECK(fat_mkdirs(bm_games_dir()) == 0);
+    CHECK(fat_write_file(bm_games_dir(), "PONGX.BM", cart, sizeof cart) == 0);
+    char game[40];
+    snprintf(game, sizeof game, "%s/PONGX.BM", bm_games_dir());
+
+    /* its editable copy: /bme/pongx.bme, then /bme/pongx1.bme when that is taken */
+    CHECK(bm_copy_name(game, out, sizeof out) == 0 && !strcmp(out, "/bme/pongx.bme"));
+    CHECK(bm_make_copy(game, out, err, sizeof err) == 0);
+    fat_entry_t e;
+    CHECK(fat_find("/bme/PONGX.BME", &e) == 0 && !e.is_dir);
+    CHECK(bm_copy_name(game, out, sizeof out) == 0 && !strcmp(out, "/bme/pongx1.bme"));
+
+    /* Ctrl+B: a project in /bme builds into the games folder, not next to itself */
+    CHECK(bm_build("/bme/PONGX.BME", out, sizeof out, err, sizeof err) == 0);
+    char want[40];
+    snprintf(want, sizeof want, "%s/pongx1.bm", bm_games_dir());       /* PONGX.BM is a game it did not build */
+    CHECK(!strcmp(out, want));
+    CHECK(fat_find(want, &e) == 0);
+    CHECK(bm_build("/bme/PONGX.BME", out, sizeof out, err, sizeof err) == 0 && !strcmp(out, want));   /* its own game, replaced */
+    CHECK(fat_find("/bme/PONGX1.BM", &e) != 0);
+
+    /* an old project next to its game is built next to it, and is still a project */
+    CHECK(fat_write_file(bm_games_dir(), "OLDG.BME", cart, sizeof cart) == 0);
+    snprintf(game, sizeof game, "%s/OLDG.BME", bm_games_dir());
+    CHECK(bm_build(game, out, sizeof out, err, sizeof err) == 0);
+    snprintf(want, sizeof want, "%s/oldg.bm", bm_games_dir());
+    CHECK(!strcmp(out, want));
+    CHECK(bm_build("/bme/PONGX.BM", out, sizeof out, err, sizeof err) != 0);     /* only a project is built */
+
+    /* W6 of the development notes: the INFO keys of a project give the compatibility block of the game */
+    {
+        static const char info[] = "name: Both\ntargets: pi,rgb30\ninput: pad,keyboard\naspect: square\nneeds: 3d\n"
+                                   "min_ram: 300\nmin_spec: 4\nmin_width: 640\n";
+        uint8_t withinfo[BM_HEADER_SIZE + 16 + sizeof info];
+        memcpy(withinfo, cart, BM_HEADER_SIZE);
+        memset(withinfo + BM_HEADER_SIZE, 0, 16 + sizeof info);
+        withinfo[17] = 1;                                   /* one section: INFO */
+        withinfo[BM_HEADER_SIZE] = BM_SEC_INFO;
+        withinfo[BM_HEADER_SIZE + 4] = BM_HEADER_SIZE + 16;
+        withinfo[BM_HEADER_SIZE + 8] = sizeof info - 1;
+        memcpy(withinfo + BM_HEADER_SIZE + 16, info, sizeof info - 1);
+        withinfo[120] = 1;                                  /* the project had a block of its own: the keys replace it */
+        withinfo[18] |= BM_FLAG_COMPAT;
+        CHECK(fat_write_file("/bme", "WITHKEYS.BME", withinfo, BM_HEADER_SIZE + 16 + sizeof info - 1) == 0);
+        CHECK(bm_build("/bme/WITHKEYS.BME", out, sizeof out, err, sizeof err) == 0);
+        uint8_t *g;
+        size_t gl;
+        fat_entry_t ge;
+        CHECK(fat_find(out, &ge) == 0 && fat_load(&ge, &g, &gl) == 0);
+        static const uint8_t want[8] = { 3, 3, 2, 1, 44, 1, 4, 40 };
+        CHECK(!memcmp(g + 120, want, 8) && (g[18] & BM_FLAG_COMPAT) && !(g[18] & 1));   /* as mkbm.py */
+        free(g);
+
+        /* no targets key: the block of the project stays */
+        withinfo[120] = 2;
+        withinfo[121] = 8;
+        memset(withinfo + BM_HEADER_SIZE + 16, ' ', sizeof info - 1);
+        memcpy(withinfo + BM_HEADER_SIZE + 16, "name: Keep\n", 11);
+        CHECK(fat_write_file("/bme", "KEEPBLK.BME", withinfo, BM_HEADER_SIZE + 16 + sizeof info - 1) == 0);
+        CHECK(bm_build("/bme/KEEPBLK.BME", out, sizeof out, err, sizeof err) == 0);
+        CHECK(fat_find(out, &ge) == 0 && fat_load(&ge, &g, &gl) == 0 && g[120] == 2 && g[121] == 8 &&
+              (g[18] & BM_FLAG_COMPAT));       /* no targets key: the block stays */
+        free(g);
+
+        /* a key of the block without targets: the build stops and says why */
+        static const char bad[] = "name: Bad\ninput: pad\n";
+        uint8_t badcart[BM_HEADER_SIZE + 16 + sizeof bad];
+        memcpy(badcart, withinfo, BM_HEADER_SIZE + 16);
+        memcpy(badcart + BM_HEADER_SIZE + 16, bad, sizeof bad - 1);
+        badcart[BM_HEADER_SIZE + 8] = sizeof bad - 1;
+        CHECK(fat_write_file("/bme", "BADKEYS.BME", badcart, BM_HEADER_SIZE + 16 + sizeof bad - 1) == 0);
+        CHECK(bm_build("/bme/BADKEYS.BME", out, sizeof out, err, sizeof err) != 0 && strstr(err, "targets"));
+    }
+}
+
+/* A new name is stored as an 8.3 entry in capitals with the NT lowercase
+ * flags (byte 12: 0x08 base, 0x10 extension): Windows, Linux and the console
+ * show lowercase. Lookups stay case-insensitive; an old file keeps its name. */
+static int nt_flags(const char *path, const char *short11)
+{
+    fat_entry_t e;
+    uint8_t sec[512];
+    if (fat_find(path, &e) != 0 || sd_read(e.dir_lba, 1, sec) != 0)
+        return -1;
+    if (memcmp(sec + e.dir_off, short11, 11) != 0)
+        return -2;
+    return sec[e.dir_off + 12];
+}
+
+static void test_lowercase(void)
+{
+    fat_entry_t e;
+    CHECK(fat_mkdirs("/lc") == 0);
+    CHECK(fat_write_file("/lc", "UPPER.TXT", "a", 1) == 0);         /* a caller in capitals */
+    CHECK(fat_write_file("/lc", "lower.txt", "b", 1) == 0);
+    CHECK(fat_write_file("/lc", "Mixed.Bin", "c", 1) == 0);
+    CHECK(fat_write_file("/lc", "noext", "d", 1) == 0);
+    CHECK(fat_write_file("/lc", "a1.dat", "e", 1) == 0);
+    CHECK(fat_write_file("/lc", "x.123", "f", 1) == 0);
+    CHECK(fat_write_file("/lc", "123.456", "g", 1) == 0);
+    CHECK(nt_flags("/lc/upper.txt", "UPPER   TXT") == 0x18);
+    CHECK(nt_flags("/lc/lower.txt", "LOWER   TXT") == 0x18);
+    CHECK(nt_flags("/lc/mixed.bin", "MIXED   BIN") == 0x18);
+    CHECK(nt_flags("/lc/noext", "NOEXT      ") == 0x08);
+    CHECK(nt_flags("/lc/a1.dat", "A1      DAT") == 0x18);
+    CHECK(nt_flags("/lc/x.123", "X       123") == 0x08);
+    CHECK(nt_flags("/lc/123.456", "123     456") == 0);
+    /* the directory listing gives the lowercase name */
+    fat_dir_t d;
+    int seen_upper = 0, seen_lower = 0;
+    CHECK(fat_opendir(&d, "/lc") == 0);
+    while (fat_readdir(&d, &e)) {
+        if (strcmp(e.name, "upper.txt") == 0) seen_lower++;
+        if (strcmp(e.name, "UPPER.TXT") == 0) seen_upper++;
+    }
+    CHECK(seen_lower == 1 && seen_upper == 0);
+    /* a lookup in any case finds it, and a replace keeps the one entry */
+    CHECK(fat_find("/LC/UPPER.TXT", &e) == 0 && fat_find("/lc/Upper.Txt", &e) == 0);
+    CHECK(fat_replace("/LC/upper.TXT", "zz", 2) == 0);
+    CHECK(read_back("/lc/upper.txt", (const uint8_t *)"zz", 2));
+    CHECK(fat_write_file("/lc", "UPPER.txt", "yyy", 3) == 0);       /* same file, found again */
+    CHECK(read_back("/LC/UPPER.TXT", (const uint8_t *)"yyy", 3));
+    CHECK(nt_flags("/lc/upper.txt", "UPPER   TXT") == 0x18);
+    int n = 0;
+    CHECK(fat_opendir(&d, "/lc") == 0);
+    while (fat_readdir(&d, &e))
+        n += strcasecmp(e.name, "upper.txt") == 0;
+    CHECK(n == 1);
+    /* a folder made in lowercase too */
+    CHECK(fat_mkdirs("/lc/sub") == 0);
+    CHECK(fat_find("/lc/sub", &e) == 0 && e.is_dir && strcmp(e.name, "sub") == 0);
+    CHECK(fat_opendir(&d, "/LC/SUB") == 0);
+    /* a file that was in capitals on the card of before is not renamed */
+    CHECK(fat_delete("/lc/lower.txt") == 0 && fat_find("/lc/lower.txt", &e) != 0);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 4) {
@@ -233,6 +551,12 @@ int main(int argc, char **argv)
         CHECK(read_back("/bm/save/sizes.sav", p, sizes[i]));
         free(p);
     }
+    test_free_count();
+    test_sdmap();
+    test_bridge_file();
+    test_project();
+    test_clock();
+    test_lowercase();
 
     /* 200 files: the directory grows over several clusters */
     for (int i = 0; i < 200; i++) {
@@ -463,7 +787,7 @@ int main(int argc, char **argv)
             int twice = 0;
             CHECK(fat_opendir(&md, "/mix") == 0);
             while (fat_readdir(&md, &me))
-                twice += strcmp(me.name, "TWICE.BIN") == 0;
+                twice += strcasecmp(me.name, "twice.bin") == 0;
             CHECK(twice == 1);                  /* one entry, not two */
             CHECK(fat_delete("/mix/twice.bin") == 0);
             CHECK(fats_equal());

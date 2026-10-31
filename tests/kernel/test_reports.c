@@ -169,7 +169,7 @@ int main(void)
 
     /* GitHub refuses: not again at once, again after 15 minutes */
     puts_ok = 0;
-    report("Stress test\n");
+    report("Bench report\n");
     check(nfiles == 1 && puts_n == 3, "a report made on the network: tried at once (refused, it waits)");
     check(!reports_auto_due(), "  not again at once");
     now_us += 14u * 60u * 1000000u;
@@ -183,7 +183,7 @@ int main(void)
     /* a send stopped half way (a game starts, the Market's tab) goes again
      * at the next chance, without waiting 15 minutes */
     ip = 0;
-    report("GPU test\n");
+    report("CPU bench\n");
     ip = 0x0101a8c0;
     check(reports_auto_due(), "a report waits, the network comes: due");
     cancelled = 1;
@@ -194,7 +194,7 @@ int main(void)
 
     /* another network (another address): due again if something waits */
     ip = 0;
-    report("Diagnostics\n");
+    report("Render bench\n");
     ip = 0x0201a8c0;
     check(reports_auto_due() && reports_send_pending() == 0, "a new address: what waits goes");
 

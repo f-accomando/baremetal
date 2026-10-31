@@ -11,7 +11,7 @@
  * a file still waits to be written); after the data OK, CE (crc), WE (SD
  * write error), KA (a kernel for another Pi), and for S QD (queued: the
  * file arrived whole and the console writes it from its menu, a game that
- * is running is replaced once it is closed; 2026-10-10). On the RGB30 a
+ * is running is replaced once it is closed; 2026-10-10). On both consoles a
  * .bm / .b16 for carts/ goes to bm/, the folder its menu lists.
  */
 #ifndef NETXFER_H
@@ -59,7 +59,12 @@ int  netxfer_write_pending(void);
 enum { NETXFER_RECEIVING = 1, NETXFER_QUEUED, NETXFER_WRITING };
 int  netxfer_updating(const char *path);
 /* The file arriving or being written: its state (above; 0 none), its name
- * ("PONG.BM", n bytes at most), the bytes in so far and its size. */
+ * ("pong.bm", n bytes at most), the bytes in so far and its size. */
 int  netxfer_file_state(char *name, size_t n, uint32_t *done, uint32_t *total);
+
+/* Staged kernel management (2026-10-24): kernel parked without forced reboot */
+int  netxfer_has_staged_kernel(void);
+const char *netxfer_staged_kernel_desc(void);
+int  netxfer_apply_staged_kernel(void);
 
 #endif

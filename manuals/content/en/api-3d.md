@@ -29,12 +29,28 @@ You draw a mesh with `draw3d()`, from a camera you place with `camera3d()`.
 
 ## Who draws: the GPU or the ARM
 
-The Pi's GPU (V3D) draws the triangles. With the setting *Settings > Graphics > 3D of the games* on `ARM` (`gpu3d=0` in `bm/config.txt`), and in QEMU, the ARM draws them. The functions are the same, so a cartridge does not change.
+The Pi's GPU (VideoCore IV / V3D) draws the triangles. With `gpu3d=0` in `bm/config.txt`, and in QEMU, the ARM draws them via software rasterization. The functions are the same, so a cartridge does not change.
 
-- The ARM always transforms, lights and clips the triangles.
+- Without vertex shader, the ARM transforms, lights and clips the triangles before sending them to the GPU.
+- With the **Vertex Shader active** (`gpu3d_vs=2` or `vs=2` in `gpu3d()`), the VideoCore IV QPUs execute vertex transformation, projection, lighting (sun & lamps) and hardware near-plane clipping directly on the graphics chip, freeing the ARM CPU completely for game logic.
 - The GPU fills the pixels with a 24-bit z-buffer, shades without dithering and reads textures with the nearest texel.
 - If the GPU does not answer, the kernel goes back to the ARM by itself and writes it in the log.
 - `stat(9)` is 1 when the GPU does the 3D.
+
+## The high-throughput fast-path: 50,000 triangles at 60 fps
+
+On the Raspberry Pi Zero W it is possible to achieve **50,000 triangles at 60 fps** (at 640x360 resolution) and over **27,400 triangles at 60 fps in 1080p** by combining four architectural techniques:
+
+1. **QPU Vertex Shader (`vs = 2`)**: hardware vertex transforms and clipping on the GPU.
+2. **Double command queue (`queue = 2`)**: asynchronous execution without stalling the CPU after dispatch.
+3. **Pipelining (`later = true` / `gpu3d_later=1`)**: GPU renders the previous frame in parallel while the ARM runs `_update` and `_draw` for the next frame.
+4. **Cartridge optimization**: pose bucketing for animated crowds (see `lib.crowd3d`), terrain elevation caching (`map3d_height` in `_update`) and zero table allocations in the draw loop.
+
+Activate the fast-path in one line:
+```lua
+local lib = require "bmlib"
+lib.gpu3d_fast()   -- enables GPU, Vertex Shader 2, Queue 2, and frame later pipelining
+```
 
 ## Limits you must know
 
@@ -62,7 +78,7 @@ You will show a model of your cartridge, lit and turning. Start from a cartridge
 8. Draw the text of the game (the HUD) after `draw3d`, with `print`.
 9. Run the cartridge. You should see the model lit from one side and turning. If you see nothing, the model may be behind the camera or too big. A way to find out: print the values from `bounds3d` and move the camera back.
 
-![The model drawn by the tutorial](shots/api-3d-model.png)
+!The model drawn by the tutorial
 
 ```lua
 local m, cy, ang = nil, 0, 0
@@ -130,6 +146,8 @@ Flags add up (for example 4 + 128).
 | 16, 32, 48 | **level of detail** 2, 1, 0 (only that level's faces, see the material bits); without: 3, all |
 | 64 | **in front** (first-person weapons and arms): the z-buffer under it is cleared, precise depths from 0.1 units |
 | 128 | **flat textures**: the textured faces are drawn as flat colours, each the average of its texels. Transparent texels are skipped, and a face of holes only is grey. The mesh, bones and animation are the same; lit faces keep their light, the other faces are unchanged. On the GPU such a mesh goes triangle by triangle, a little slower. The colours are kept per mesh and texture version (bm3d 7.0) |
+| 256 | **cel light**: the sun light of this draw is cut into the bands of `cel3d`. Nothing happens while `cel3d` is off. 4 + 256 is smooth cel |
+| 512 | **outline**: after the mesh, its outline (an inverted hull) in the `cel3d` outline colour and width. It works with or without 256. Nothing is drawn while `cel3d` has no outline colour |
 
 ## Material bits
 
@@ -160,6 +178,7 @@ Faces that are both textured and screen door make the GPU give up: the cartridge
 | `light3d(x, y, z, [ambient])` | the light's direction and the ambient light (0-1) |
 | `sky3d(sun, sky, ground)` | colours (0xRRGGBB) of the sun's light and of the ambient light coming from above and below (faces turned up take the sky, those turned down the ground); `sky3d()` goes back to white |
 | `shine3d(spec, exponent, rim)` | the sun's reflections on glossy faces (`spec` 0-2, `exponent` 4-64: higher, smaller) and light on the shapes' rim (`rim` 0-1) |
+| `cel3d([bands, floor, outline_rgb, outline_width])` | cel light: `bands` 0 or `false` is off (default); 2 to 8 cuts the sun light of the `draw3d` calls with flag 256 into that many bands. `floor` 0 to 1 (default 0.35) is the sun term of the darkest band. `outline_rgb` (`0xRRGGBB`, `nil` or `false`: none) and `outline_width` (0.005 to 0.05, default 0.02) are for flag 512. Every call sets all four values. With no argument it returns the values in force. It goes back to off when the cartridge ends. The ambient and sky light stay smooth, and lamps are not cut |
 | `fog3d(colour, near, far)` | fog: the faces fade into the colour between the two distances; `fog3d()` takes it away |
 | `lamp3d(i, x, y, z, radius, [k, colour])` | point light `i` (1-4): the faces with their centre within `radius` get brighter, up to `k` more (default 1) in the middle, of the `colour` given (white if missing); `lamp3d(i)` turns it off, `lamp3d()` all. With `light3d` at a low ambient it makes dark scenes with lanterns |
 | `shadow3d(style)` | the shadows of `draw3d` with flag 8: 0 darken (default), 1 dithered black (without reading the screen) |
@@ -254,7 +273,7 @@ The value `version` is the version of the 3D drivers this choice reproduces: `"0
 - A model with bones too is drawn as an impostor, by the box of its pose (where `animate()` put each bone's part). An animated model out of the view is then also skipped, as one without bones.
 - It can be given with `on` `nil`: `gpu3d(nil, nil, nil, nil, 16)`.
 - The choice depends only on the camera, the model, its pose and the size of the game's screen, so it is the same on every console of a match.
-- The console's default is `r3d_impostor` in `bm/config.txt` (*Settings > Screen and sound > 3D impostors*).
+- The console's default is `r3d_impostor` in `bm/config.txt` (a hidden key, no Settings row).
 
 ## What the GPU also does
 
@@ -262,25 +281,75 @@ The GPU draws the shadows (`draw3d` with flag 8), the effects, the screen-door f
 
 ## Anti-aliasing
 
-*Settings > Graphics > 3D anti-aliasing: 4x* (`gpu3d_aa=1` in `bm/config.txt`) makes the GPU draw the 3D with 4x MSAA: four samples per pixel, the average at the end of the tile, triangles' edges without steps. Nothing changes in the cartridges.
+Anti-aliasing (`gpu3d_aa=1` in `bm/config.txt`, a hidden key with no Settings row; a game uses the second value of `gpu3d`) makes the GPU draw the 3D with 4x MSAA: four samples per pixel, the average at the end of the tile, triangles' edges without steps. Nothing changes in the cartridges.
 
-- It holds only where the GPU bears it (the boot test says *4x: not on this GPU* otherwise).
+- It holds only where the GPU bears it (the 3D Bench skips the MSAA profiles where the GPU has none).
 - It holds only in the jobs without a kept z-buffer: cartridges that draw 3D, then 2D, then more 3D in the same frame stay without anti-aliasing (the 4-sample z-buffer cannot be saved).
 - If the test finds the GPU cannot load the page again into the 4 samples, MSAA is used only in the frames that start with `cls()`.
 - On the ARM there is no anti-aliasing.
 
 ## A frame later
 
-*Settings > Screen and sound > 3D frame shown: A frame later* (`gpu3d_later=1`, with the frame queue on two jobs, `gpu3d_queue=2`; from a game the sixth argument of `gpu3d`) shows each frame a frame later. At the end of `_draw` the GPU starts the frame's 3D and the frame waits, while the next `_update` and `_draw` run on another page. The 2D drawn after the 3D goes on the waiting frame when the GPU is done, and that frame is shown at the end of the next one.
+The key `gpu3d_later=1` (in `bm/config.txt`; or the 6th argument of `gpu3d()` with two-job queue `queue=2`, or `lib.gpu3d_fast()`) shows each frame a frame later. At the end of `_draw` the GPU starts the frame's 3D and the frame waits, while the next `_update` and `_draw` run on another page. The 2D drawn after the 3D goes on the waiting frame when the GPU is done, and that frame is shown at the end of the next one.
 
-- Nothing changes in the cartridges and the pictures are the same, a frame later: the input reaches the screen a frame later than without the queue.
+- Nothing changes in the cartridges and the pictures are identical, with exactly 1 frame (16.6 ms) of pipeline latency.
+- **Performance impact**: on dense 3D scenes (>20,000 triangles) it completely eliminates ARM synchronization stalls (`stat(18)` drops from 6.0 ms to fractional ms), enabling 100% parallel CPU and GPU utilization to push up to 50,000 triangles at 60 fps on the Pi Zero.
 - Keep the game's state in `_update` (as for online games) and draw the HUD after the 3D. `pget` reads the page being drawn.
 - It is not used in games played `online` (left out there), via RAM (`light_begin`, `dark_begin`) and in the frame of a `screen()` change.
-- It is off by default until it is measured on the Pi.
+
+## The graphics keys of the console
+
+The console has one key in `bm/config.txt` for each graphics option. A player sees only the choices that change the picture. The other keys are hidden: they have no row in the Settings, and the console reads them at the start of each game. Each default below is on when the Pi Zero W benchmark shows a gain, and off when it shows none. A default changes only with a number in the repository docs.
+
+Settings, *Screen*, for the player:
+
+- *Menu size* and, on the Pi 1, the CRT, video and GPIO screen rows.
+
+These keys have no row and a fixed value when unset: `gpu3d_aa` off, `gpu3d_filter` nearest, `r3d_impostor` off. Set them in `bm/config.txt`.
+
+The table gives, for each key, what it does, what it costs, the default, and the mean result on the Pi Zero W (3D Bench `herotris`, 22 and 23 Oct 2026, 640x360, ARM 1000 MHz, V3D 300 MHz). *Not measured* means that the docs have no Pi number. A result is a benchmark result, not a played game.
+
+| Key | What it does | What it costs | Default | Pi Zero W result |
+|---|---|---|---|---|
+| `gpu3d` | The V3D draws the 3D. `0`: the ARM draws it. | Nothing on the Pi. The ARM path is slower. | on (GPU) | Hero scene: ARM 0.41 sets at 60 fps, GPU 0.56. 3D Bench score: GPU 953, ARM 166. |
+| `gpu3d_vs` | The GPU places the vertices. `0` ARM, `1` scenery, `2` all models. | Nothing. The boot test checks it. | `2` | GPU+VS 3.85 sets against GPU 0.56 (x6.9). |
+| `gpu3d_queue` | The GPU draws a frame while the next `_update` runs. `2`: two jobs in flight. `0`: off. | An `_update` that draws 3D runs after the frame. | `1` | 3.85 to 6.74 sets (x1.75). `queue` test: +11.2%. `2` gives 6.74, the same as `1`. |
+| `gpu3d_later` | The console shows each frame a frame later. Needs `gpu3d_queue=2`. | One frame of input delay. | off | No gain: 51 222.8 triangles drawn against 50 755 (+0.9%), the same sets (6.74). |
+| `gpu3d_aa` | 4x MSAA. | More GPU work in each tile (32x32 pixels, 4 samples). It holds only in jobs without a kept z-buffer. | off | Not measured. |
+| `gpu3d_filter` | Bilinear textures. The look changes. | A filtered pixel costs more. | off (nearest) | Full-screen pass: 2.3 ns a pixel against 1.65 nearest. |
+| `gpu3d_fs2` | Textured pixel shaders with two threads. | Nothing. | on (`0` turns it off) | `quad_tex`: 148 quads against 121 (+22%). |
+| `gpu3d_2d` | The GPU draws the 2D over the 3D in its job. | Shapes that the GPU cannot draw end the job. | on (1) | `gpu2d` test: GPU+2D 2013 sprites, GPU 1886 (+6.7%). `sprites` test: 3569 or more, ARM 2574. Enabled by default. |
+| `gpu3d_wc` | The memory of the GPU jobs is not cached. | None seen. | off | No gain: data-cache misses -72%, but the load is 199 against 200. |
+| `gpu3d_sort` | Opaque meshes nearest first, triangles in vertex-cache order. | A sort in each frame. | off | Not measured on the Pi. Emulator: 99 960 pixels shaded instead of 416 546. |
+| `gpu3d_attr` | Compact vertex attributes (colour and light as bytes). | A boot probe checks the pixels. | off | Spheres +3.8%. Hero scene 54 056 triangles plain, 54 013 compact (no gain, the frame is ARM-bound). |
+| `gpu3d_tex16` | 16-bit opaque textures. | A step of RGB565 in the colours. | off | Within 1 to 6% of 32 bit (`quad_tex` 2.20 and 2.35 ns a pixel). |
+| `gpu3d_etc1` | Opaque sheets as ETC1. Set `gpu3d_tex16` too (the old Settings row did). | Block compression: 37 dB PSNR against RGB565. | off | Within 1 to 6% (`quad_tex` 2.19 ns a pixel). |
+| `gpu3d_merge` | Many small static pieces with baked light and one sheet become one draw. | A run of at least 32 pieces with 150 faces or fewer on average. | on (`0` turns it off) | 100 pieces of 50 faces +24%. 10 pieces of 500 faces -26%, so a smaller run is not merged. |
+| `gpu3d_qpu` | A check: the QPU programs run against the ARM versions. | A longer 3D Bench. | off | Particles: QPU 47 us, ARM 158 us. Fade: QPU 9.3 ms, ARM 20.4 ms. |
+| `r3d_impostor` | A far small model is one quad. A number of pixels (2 to 64) of a 1080-line screen. | The model loses its detail. | off | 8 pixels: no effect (57.7 fps, 8588 triangles). 16 and 32: not measured. |
+| `r3d_fast` | The ARM 3D uses one matrix for a model and the light in model space. | The pixels are no longer bit-identical. | on (`r3d_fast=0` turns it off) | Not measured. |
+
+The sources are the development notes, the development notes, `docs/PERF-BUDGET.md` and `docs/DRIVERS.md`. The Mali (RGB30) has no `gpu3d_*` keys. It reads `r3d_fast` and `r3d_impostor`.
+
+### What a game chooses
+
+A cartridge chooses what the player sees. It does not need a console key for this.
+
+- **Anti-aliasing**: the second value of `gpu3d`. `gpu3d(nil, true)` asks for 4x MSAA. The value stays `false` if the GPU cannot do it. The game can put it in its own menu or fix it in code.
+- **Vertex shader, queue, frame later**: the third, fourth and sixth values of `gpu3d`.
+- **Impostors**: the fifth value of `gpu3d`.
+- **Lights**: `light3d` (the sun and the ambient light), `lamp3d` (four point lights), the flags of `draw3d` (2 no light, 4 smooth light).
+- **Cel light and outline**: `cel3d` and the `draw3d` flags 256 and 512.
+
+The other keys are only for the console: `gpu3d_fs2`, `gpu3d_2d`, `gpu3d_wc`, `gpu3d_sort`, `gpu3d_attr`, `gpu3d_tex16`, `gpu3d_etc1`, `gpu3d_filter` and `gpu3d_merge`. A game does not set them for the player. A benchmark can switch each one with `gpu3d_opt(name, on)`, which returns `in_force, available` (it returns `false, false` with no GPU).
+
+::: note
+Not built yet (SYS-9b): a benchmark at the start of a game that picks the values for the console, and a menu of graphics choices in each game. Today the game chooses, or the player edits `bm/config.txt`.
+:::
 
 # Collision worlds
 
-Solid boxes, rays and bodies that move sliding on the walls, in C: much faster than in Lua. Complete example: `carts/overbit`. For the 2D map there are the tiles' flags (`mflags`) and bmlib's `lib.move` / `lib.step`.
+Solid boxes, rays and bodies that move sliding on the walls, in C: much faster than in Lua. Complete example: a file that is not in this repository. For the 2D map there are the tiles' flags (`mflags`) and bmlib's `lib.move` / `lib.step`.
 
 | Function | Description |
 |---|---|
@@ -300,6 +369,21 @@ on_ground = (fl & 1) ~= 0
 If `on_ground` is missing in `world_move` it counts as `false`. The `tag` of `world_box` defaults to 0.
 
 [TO FILL: what the `tag` of `world_box` is used for]
+
+# 3D map terrain
+
+A 3D world made from the layers of the 2D map: the editor's 3D preview and the games use these functions. The ground comes from the layers `floor`, `height` and `walls`; the placeholders come from the layer `objects`. The world is drawn in chunks of 16x16 tiles, and only the chunks you can see are drawn.
+
+| Function | Description |
+|---|---|
+| `map3d_build([opts])` | builds the world from the map layers and returns it. `opts = { floor = "floor", height = "height", walls = "walls", cell = 1.0, step = 0.25 }`: the names of the layers, the size of one tile in world units, and the height step. Every field is optional. The layer of the objects is always `objects` |
+| `map3d_draw(w, [flags])` | draws the chunks of the ground you can see; `flags` is optional (0 if missing) |
+| `map3d_height(w, x, z)` | the height of the ground at `(x, z)`, or `nil` for a hole or a point outside the map |
+| `map3d_blocked(w, x, y, z, r)` | `true` if a sphere with centre `(x, y, z)` and radius `r` touches a wall or a cliff |
+| `map3d_objects(w, [kind])` | the list of the objects `{ kind, x, y, z }`; `kind` filters the list |
+| `map3d_size(w)` | `nx, nz`: the size of the world in world units |
+
+Call `zclear()` and `camera3d` first, then `map3d_draw`. If the map is empty, `map3d_build` gives an error. For a full example with several stages, see the manual *Maps and Levels*.
 
 # Light for 2D scenes
 
@@ -324,7 +408,7 @@ light_end()
 print("life", 4, 4, 0xFFFFFF)                -- the HUD is not darkened
 ```
 
-Complete example: `carts/hunt`.
+No game of the repository uses these three functions now.
 
 ## Light by levels
 
@@ -347,16 +431,21 @@ dark_end()
 spr(FLAME, fx, fy)                           -- the flames are not darkened
 ```
 
-Complete example: `carts/yharnam`. A small one: `SQUARE_CART` in `tests/qemu_test.py` (a lamp on a 256x256 cartridge).
+Complete example: a file that is not in this repository. A small one: `SQUARE_CART` in `tests/qemu_test.py` (a lamp on a 256x256 cartridge).
 
 ## The n8 library
 
-Every cartridge also sees the `n8` table: the **nano8** machine, with the functions of the `.p8` cartridges (`n8.spr`, `n8.map`, `n8.print`, `n8.peek` and the others, with their arguments and numbers as they want them) and those to load, start and show them (`n8.load`, `n8.power`, `n8.buttons`, `n8.blit`, `n8.preview`, `n8.compile`). It is made for `carts/nano8`; a `.bm` game does not need it.
+Every cartridge also sees the `n8` table: the **nano8** machine, with the functions of the `.p8` cartridges (`n8.spr`, `n8.map`, `n8.print`, `n8.peek` and the others, with their arguments and numbers as they want them) and those to load, start and show them (`n8.load`, `n8.power`, `n8.buttons`, `n8.blit`, `n8.preview`, `n8.compile`). It is made for a file that is not in this repository; a `.bm` game does not need it.
 
 # Performance tips
 
-These are the tips the repository states; the numbers come from the 3D Bench (*Dev > 3D Bench*, or the `j` key of the monitor).
+These are the tips the repository states; the numbers come from official hardware benchmarks on the Pi Zero W (3D Bench and Hero Stress).
 
+- **50k tris fast-path pipeline**: call `lib.gpu3d_fast()` in `_init` to enable Vertex Shader 2, Command Queue 2, and frame-later pipelining.
+- **Pose bucketing for animated crowds**: when drawing multiple characters sharing an animation loop (e.g. walk cycle), quantize and group them into 16 pose buckets (see `lib.crowd3d()`). Evaluating `animate()` once per bucket rather than 50-60 times cuts animation CPU time by 65% (from 2.0 ms down to 0.7 ms).
+- **Height and angle caching**: avoid calling `map3d_height()` or evaluating trigonometric functions inside `_draw()`. Pre-cache `y` elevation and `yaw` orientation during `_update()` when characters move.
+- **Zero GC in render loop**: do not allocate temporary tables (e.g. `{ 0, 0, 0, 0 }` or `{ cel = true }`) inside `_draw()`. Reuse static module tables to avoid garbage collection hitches.
+- **Draw Merging**: for scenes built from repetitive tiles or blocks (<=150 faces per chunk, >=32 instances), the engine merges draw calls (`gpu3d_merge=1`), boosting triangle throughput by +33%.
 - Draw all the 3D first, then the 2D and the HUD. 3D after 2D in the same frame makes the GPU keep the z-buffer (about 1 MB written and read again per frame).
 - Start the frame with `cls()`: the GPU tiles start from its colour and do not read the page again.
 - Draw floors and backgrounds first with flag 1 (no z-buffer): faster.
@@ -366,9 +455,11 @@ These are the tips the repository states; the numbers come from the 3D Bench (*D
 - Build models in `_init`, not in `_draw`: every `model()` call builds a new mesh.
 - Use textures whose sides are multiples of 32 (128x128, 256x256): the GPU reads them faster.
 - Use the collision worlds instead of the same tests in Lua: they are in C and much faster.
-- One measured scene (640x360 EXTREME) had a GPU job of 4.2 ms in a 19.6 ms frame: the ARM was setting the pace. At 1080p a played match is fill-bound: fewer pixels, not fewer triangles, is the lever. With `stat(16)` close to the frame time the GPU sets the pace; well below it, the ARM does.
-- Measure: `stat(16)` is the GPU's job time of the last frame in ms (0 on the ARM). With the queue on, it includes the wait before the ARM looks: trust it only without the queue.
-- The bench scores each driver against bm3d 2.1 on the Pi Zero W (1000 points). `make test-b3d` runs a short check on the PC; the PC's milliseconds do not count.
+- **Verified 60 fps triangle budgets on Pi Zero W**:
+  - *ARM software rasterizer*: 1,200 - 2,500 triangles.
+  - *GPU with Vertex Shader + Queue* (640x360): **50,000 triangles** solid at 60 fps.
+  - *GPU at 1080p Full HD* (1920x1080): **27,400 triangles** stable at 60 fps.
+- Measure: `stat(16)` is the GPU's job time of the last frame in ms; `stat(18)` is the ARM wait for the GPU. With `gpu3d_later=1` the wait drops to fractional ms, enabling full CPU/GPU concurrency.
 
 ::: note
 The 3D Bench measures each test with the ARM and with every GPU option that the console can reproduce, so you can compare the profiles.

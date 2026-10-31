@@ -59,17 +59,17 @@ bm Sound modifica solo **progetti** (`.bme`). Un gioco (`.bm`) lo legge soltanto
 
 ## Giochi e sound pack
 
-Premi Esc, poi scegli **Open a game or a sound pack...** (oppure premi Ctrl+O). L'elenco mostra quello che c'è in `/carts`, nella radice della scheda e in `/bm/sounds`, con l'etichetta "game" o "sound pack".
+Premi Esc, poi scegli **Open a game or a sound pack...** (oppure premi Ctrl+O). L'elenco mostra quello che c'è in `/carts`, nella radice della scheda, in `/bme` (progetti, anche i sound pack) e in `/bm/sounds` (sound pack più vecchi), con l'etichetta "game" o "sound pack".
 
 - Se il file non ha ancora suoni, bm Sound lo dice e parti da banchi vuoti. **Save** ci scrive i suoni.
-- Se apri un gioco (`.bm`), il primo salvataggio chiede *Save an editable copy: NAME.BME?* e da lì in poi lavori sulla copia.
+- Se apri un gioco (`.bm`), il primo salvataggio chiede *Save an editable copy: name.bme?* e da lì in poi lavori sulla copia.
 - **New project** (Ctrl+N) parte da banchi vuoti: il suono 0 si chiama `SOUND` e la canzone 0 si chiama `SONG`, con l'ordine `{0}` (pattern 0). **The demo project** carica un banco con suoni e canzoni: premi START per ascoltare la canzone.
 
 ::: note
 La barra in alto mostra le quattro pagine, `OCT` (l'ottava del pianoforte), il player (`STOP`, `SFX`, `PATTERN` o `SONG n`) e il nome del file. Un punto giallo prima del nome indica modifiche non ancora salvate.
 :::
 
-![La pagina SOUNDS: il nome, i tre grafici e le barre di un gruppo di parametri](shots/editor-sound-sounds.png)
+!La pagina SOUNDS: il nome, i tre grafici e le barre di un gruppo di parametri
 
 # Le pagine
 
@@ -119,7 +119,7 @@ Ogni passo ha una nota, un suono, un volume e un effetto. Gli effetti sono gli s
 | L | DELAY | l'inizio, in sedicesimi di passo |
 | X | CUT | la fine, in sedicesimi di passo |
 
-![La pagina SFX: i campi dell'intestazione, le corsie e il riquadro del passo](shots/editor-sound-sfx.png)
+!La pagina SFX: i campi dell'intestazione, le corsie e il riquadro del passo
 
 ## PATTERN
 
@@ -131,7 +131,26 @@ L'intestazione ha tre campi: STEPS (da 1 a 64), TEMPO e SWING. Tempo e swing app
 - Una nota è una cella colorata; il colore è più forte quando il volume è più alto. `--` in rosso è una nota OFF (la nota viene rilasciata). Un angolo bianco segna un passo con un effetto.
 - Mentre suona una canzone o il pattern, il passo in esecuzione è illuminato.
 
-![La pagina PATTERN: otto tracce, sedici passi](shots/editor-sound-pattern.png)
+!La pagina PATTERN: otto tracce, sedici passi
+
+### Solo
+
+Il solo ti fa sentire una traccia da sola.
+
+- Premi `a` (pad: **B** sul nome della traccia) per mettere in solo la traccia su cui sei. Le altre tracce non suonano quando il pattern gira.
+- Puoi mettere in solo più di una traccia. Vai su un'altra traccia e premi di nuovo `a`.
+- Premi di nuovo `a` su una traccia in solo per toglierla.
+- L'intestazione di una traccia in solo mostra una `S` accanto al segno di silenzio. Una riga della pagina mostra `SOLO` con i numeri delle tracce.
+- Il solo serve solo per ascoltare. Non viene salvato nel file. I segni di silenzio (`M`) restano come sono.
+
+### Il piano roll
+
+La griglia è la vista predefinita. Premi `f` (pad: **B** su un passo) per vedere una traccia come piano roll.
+
+- Il roll mostra una traccia. Il lato verticale è l'altezza: una finestra di 20 semitoni con un righello di nomi di nota. La finestra scorre quando il cursore ne esce. Il lato orizzontale è il tempo: i passi.
+- Su e giù muovono il cursore dell'altezza. Invio mette una nota al cursore. Se il passo ha già una nota, Invio sposta la nota al cursore. Se la nota è già al cursore, Invio la toglie.
+- Gli altri tasti funzionano come nella griglia. Funziona anche il mouse: un clic sul roll mette il cursore lì e fa ciò che fa Invio.
+- Premi di nuovo `f` per tornare alla griglia. Le due viste mostrano gli stessi dati, quindi il file è lo stesso.
 
 ## SONG
 
@@ -152,7 +171,7 @@ L'ECHO e la ROOM di un suono dicono quanta parte di esso va all'eco e alla stanz
 
 Sotto gli slot un riquadro mostra il pattern scelto e una piccola immagine delle sue note.
 
-![La pagina SONG: l'ordine dei pattern](shots/editor-sound-song.png)
+!La pagina SONG: l'ordine dei pattern
 
 ## L'assistente (F6)
 
@@ -164,7 +183,7 @@ F6 (oppure **Compose with the assistant...** nel menu Esc) apre un pannello che 
 - Gli strumenti che usano diventano suoni del banco; un suono con lo stesso nome viene riusato.
 - Ctrl+Z annulla.
 
-![Il pannello dell'assistente sopra la pagina PATTERN](shots/editor-sound-assist.png)
+!Il pannello dell'assistente sopra la pagina PATTERN
 
 Tasti nel pannello: Su e Giù scelgono, Sinistra e Destra cambiano la variante, Invio la mette nel banco, Esc chiude, Tab passa alla modalità successiva (pad: X), PgUp e PgDn scorrono, scrivendo si imposta la richiesta, Ctrl+U la cancella.
 
@@ -174,7 +193,7 @@ F7 (oppure **Riff...** nel menu) apre un riquadro dove scrivi un pattern in una 
 
 # Comandi
 
-Il pad e la tastiera fanno le stesse cose. La riga in basso dello schermo mostra i tasti della pagina in cui sei. Tieni premuto F12 per vedere i tasti in qualsiasi momento.
+Il pad e la tastiera fanno le stesse cose. La riga in basso dello schermo mostra i tasti della pagina in cui sei. La barra termina con il chip F12 keys. Fai clic su di esso, oppure tieni premuto F12, per vedere ogni tasto della pagina.
 
 | Azione | Pad | Tastiera |
 |---|---|---|
@@ -195,6 +214,8 @@ Il pad e la tastiera fanno le stesse cose. La riga in basso dello schermo mostra
 | Pianoforte, fila bassa | - | `z s x d c v g b h n j m` |
 | Pianoforte, fila alta (un'ottava sopra) | - | `q 2 w 3 e r 5 t 6 y 7 u` |
 | Ottava del pianoforte | - | `,` / `.` |
+| PATTERN: solo della traccia | B sul nome della traccia | `a` |
+| PATTERN: piano roll o griglia dei passi | B su un passo | `f` |
 | Salvare | - | Ctrl+S |
 | Salvare come nuovo sound pack | - | Ctrl+Shift+S |
 | Aprire | - | Ctrl+O |
@@ -202,12 +223,15 @@ Il pad e la tastiera fanno le stesse cose. La riga in basso dello schermo mostra
 | Annullare | - | Ctrl+Z |
 | Copiare / incollare l'elemento | - | Ctrl+C / Ctrl+V |
 | Esportare in un gioco | - | Ctrl+E |
+| Importare un file WAV o MIDI | - | Ctrl+W |
 | Provarlo nel gioco | - | F5 o Ctrl+R |
 | Assistente | - | F6 |
 | Riff | - | F7 |
 | Uscire | START + SELECT | Esc, poi **Exit** |
 
 Funziona anche il mouse: un clic sceglie, un doppio clic fa quello che fa A, la rotella cambia il valore sotto il puntatore e una barra trascinata a sinistra o a destra lo cambia.
+
+Nell'editor del nome un clic su una casella sceglie quella lettera. Nella riga riff un clic vi mette il cursore.
 
 ::: note
 Un breve tocco su SELECT apre il menu. Se premi SELECT con sinistra/destra o su/giù, cambia pagina o elemento e il menu non si apre.
@@ -222,12 +246,13 @@ Un breve tocco su SELECT apre il menu. Se premi SELECT con sinistra/destra o su/
 | Play / Stop | avvia o ferma la musica o l'effetto (START) |
 | Undo | annulla l'ultima modifica (Ctrl+Z) |
 | Save | scrive nel file aperto; senza file, chiede il nome di un pack |
-| Save as a new sound pack... | chiede 8 caratteri e scrive `/bm/sounds/NAME.BME` |
+| Save as a new sound pack... | chiede 8 caratteri e scrive `/bme/name.bme` |
 | Open a game or a sound pack... | apre un altro file (Ctrl+O) |
 | Import from... | prende un suono, un effetto, un pattern o una canzone da un altro file |
 | Export to a game... | scrive questo banco in un gioco |
 | Instrument... | solo pagina SOUNDS: un suono già pronto |
 | Samples... | un campione nel suono |
+| Import WAV or MIDI... | un file WAV come campione, un file MIDI come canzone, da `/docs` (Ctrl+W) |
 | Compose with the assistant... | apre l'assistente (F6) |
 | Riff... | apre Riff (F7) |
 | Try it in the game | con un gioco aperto: lo salva e lo avvia |
@@ -268,7 +293,7 @@ Se non senti nulla, controlla che il volume della console sia alto e che il pass
 5. Riempi altri passi. Con i tasti del pianoforte (`z s x d c v`) viene messa una nota e il cursore passa al passo successivo.
 6. Fai lo stesso sulla traccia 2 con un altro suono, per un basso o una batteria.
 7. Premi Spazio. Il pattern suona e il passo in esecuzione è illuminato.
-8. Per silenziare una traccia mentre ascolti, vai alla sua intestazione e premi Invio. Compare una `M`. Premi di nuovo Invio per riattivarla.
+8. Per silenziare una traccia mentre ascolti, vai alla sua intestazione e premi Invio. Compare una `M`. Premi di nuovo Invio per riattivarla. Per sentire una sola traccia, premi `a` su di essa: è un solo.
 
 ::: try
 Metti un breve suono di rumore sulla traccia 1 ai passi 1, 5, 9 e 13, e un basso sulla traccia 2 ai passi 1 e 9.
@@ -296,11 +321,34 @@ Puoi prendere un suono, un effetto, un pattern o una canzone da un altro gioco o
 2. Nell'elenco scegli il file. L'elenco mostra giochi e sound pack. Mentre il cursore si ferma su un file, ne viene letto il contenuto: quanti suoni, effetti, pattern e canzoni ha.
 3. Scegli che cosa prendere: *a sound*, *a sound effect*, *a pattern*, *a song* o *everything*.
 4. Scegli l'elemento dall'elenco che segue.
-5. Un messaggio dice dove è finito: per esempio `imported as sound effect 5`. I suoni usati da un effetto, un pattern o una canzone arrivano con esso, in slot liberi. Un suono già uguale nel tuo banco non viene copiato due volte.
+5. Un messaggio dice dove è finito: per esempio `imported as sound effect 5`. I suoni usati da un effetto, un pattern o una canzone arrivano con esso, in slot liberi. Un suono già uguale nel tuo banco non viene copiato due volte. Un suono SAMPLE porta con sé anche il suo campione (un campione con gli stessi byte non viene copiato due volte).
 6. Premi Ctrl+S per salvare.
 
 ::: warn
 *everything* sostituisce l'intero banco su cui stai lavorando, dopo una domanda. Se non c'è uno slot libero, l'importazione si ferma con un messaggio come `no free sound slots`. Dopo un'importazione la cronologia dell'annulla viene cancellata.
+:::
+
+## Importare un file WAV o MIDI
+
+Puoi portare nel banco una registrazione o un brano dalla scheda SD. Metti il file nella cartella `/docs` della scheda, con un nome di tipo 8.3 (`kick.wav`, `tune.mid`).
+
+1. Apri il menu Esc e scegli **Import WAV or MIDI...** (oppure premi Ctrl+W).
+2. Nell'elenco scegli il file. L'elenco mostra i file `.wav` e `.mid` di `/docs` con la loro dimensione.
+3. Per un file WAV scegli come tenerlo: *as it is*, *mono*, *mono, 22050 Hz* o *mono, 11025 Hz*. Le ultime rendono il campione più piccolo. Un messaggio dice il risultato, per esempio `sample 2 TONE: 22050 Hz mono, 0.5 s, in sound 00`.
+4. Il campione va in fondo ai campioni del banco, e il suono su cui sei lo suona (l'onda diventa SAMPLE). La nota base e il loop del file vengono mantenuti, se il file li ha. Un campione con gli stessi byte non viene aggiunto due volte.
+5. Per un file MIDI compare una nuova canzone con il nome del file. I suoi pattern hanno 64 passi (oppure battute intere dell'indicazione di tempo del file), e la canzone ha il tempo del file. Un messaggio dice che cosa è stato fatto, per esempio `song 3: 1 patterns, 120 BPM, 4 new sounds`.
+6. Premi Ctrl+S per salvare.
+
+Che cosa legge l'importazione WAV: interi a 8, 16, 24 e 32 bit e numeri in virgola mobile a 32 e 64 bit, mono o stereo, fino a 4 MB. Una frequenza sopra 48000 Hz viene portata a 48000 Hz.
+
+Che cosa fa l'importazione MIDI:
+- Un passo è una semicroma. Le note vanno sul passo più vicino.
+- Ogni canale MIDI ottiene un suono. La sua onda segue il programma General MIDI (un basso è un SAW, un pianoforte un PLUCK). Il canale delle percussioni (10) suona il kit di batteria della console: `bd`, `sd`, `hh`, `oh`, `cp`, `rim`, `tom`, `cb`.
+- Un pattern ha 8 tracce, una nota alla volta su una traccia. Gli accordi vanno su più tracce. Una nota che finisce prima della successiva riceve un passo OFF.
+- Si usano solo il primo tempo e la prima indicazione di tempo.
+
+::: warn
+Una nota MIDI oltre le 8 tracce viene scartata, e il messaggio dice quante. Se il banco ha meno slot di pattern liberi di quelli che servono alla canzone, la canzone viene tagliata agli slot che ci sono. Un pattern che una canzone del banco già suona non viene preso. La cronologia dell'annulla viene cancellata. Un campione oltre il limite di 64 campioni o oltre la memoria del banco viene rifiutato. Un file con campioni a 12 bit, più di 2 canali o una frequenza sotto 1000 Hz viene rifiutato con un messaggio. Non verificato sul Pi e sull'RGB30.
 :::
 
 ## Suonarlo nel tuo gioco
@@ -332,8 +380,8 @@ Un effetto usa una voce libera e la traccia della musica su quella voce resta mu
 
 # Salvare ed esportare
 
-- **Save** (Ctrl+S) scrive il banco nel file aperto. Con un gioco aperto, il primo salvataggio chiede la copia modificabile `NAME.BME`. Dopo un salvataggio la barra dice che il gioco suona i nuovi suoni.
-- **Save as a new sound pack...** (Ctrl+Shift+S) chiede un nome di al massimo 8 caratteri e scrive `/bm/sounds/NAME.BME`. Un sound pack è un piccolo programma che suona le tue canzoni e i tuoi effetti; puoi riaprirlo dopo in bm Sound.
+- **Save** (Ctrl+S) scrive il banco nel file aperto. Con un gioco aperto, il primo salvataggio chiede la copia modificabile `name.bme`. Dopo un salvataggio la barra dice che il gioco suona i nuovi suoni.
+- **Save as a new sound pack...** (Ctrl+Shift+S) chiede un nome di al massimo 8 caratteri e scrive `/bme/name.bme`. Un sound pack è un piccolo programma che suona le tue canzoni e i tuoi effetti; puoi riaprirlo dopo in bm Sound.
 - **Export to a game...** (Ctrl+E) elenca i giochi e, dopo una domanda, scrive questo banco in quello che scegli. I suoi suoni e la sua musica vengono sostituiti da questi.
 
 ::: warn
@@ -363,6 +411,5 @@ Export sostituisce i suoni del gioco che scegli. La domanda nomina il file: legg
 - Copia un pattern o un suono con Ctrl+C e incollalo con Ctrl+V per fare una variazione senza perdere l'originale.
 - Le note delle file del pianoforte suonano sul suono della pagina; cambia l'ottava con `,` e `.`.
 - Ctrl+Z annulla l'ultima modifica, anche un incolla, una cancellazione o un pezzo dell'assistente.
+- Se **Import WAV or MIDI...** dice `no .WAV or .MID file in /docs on the SD card`, i file non sono nella cartella `/docs`, oppure i loro nomi sono più lunghi del tipo 8.3.
 - Quando scegli un file in **Import from...**, una riga può dire `a sound bank this version cannot read`: quel file non si può importare.
-
-[DA COMPLETARE: come portare un file WAV nel banco sulla console]

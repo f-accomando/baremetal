@@ -25,7 +25,7 @@ The Pi Zero W 1.1 is the first target of bm. bm runs on it with no operating sys
 | CPU | ARM1176JZF-S (ARMv6), 1 core | `docs/HARDWARE.md` |
 | Clock | 700 MHz at boot, 1000 MHz requested from the firmware and measured | `docs/HARDWARE.md` |
 | FPU | VFPv2, double in hardware; bm turns on RunFast | `docs/HARDWARE.md` |
-| Cache | L1 16 KiB instructions + 16 KiB data; L2 128 KiB in the VideoCore | `docs/HARDWARE.md` |
+| Cache | L1 16 KB instructions + 16 KB data; L2 128 KB in the VideoCore | `docs/HARDWARE.md` |
 | Integer division | not in hardware (a libgcc routine): avoid it in hot loops | `docs/HARDWARE.md` |
 | MMU, caches, branch prediction | on, with the clock at 1000 MHz | `docs/HARDWARE.md` |
 
@@ -33,10 +33,10 @@ The Pi Zero W 1.1 is the first target of bm. bm runs on it with no operating sys
 
 | Item | Value | Source |
 |---|---|---|
-| Total RAM | 512 MiB LPDDR2, shared by CPU and GPU | `docs/HARDWARE.md` |
-| RAM for the ARM | 448 MiB (with `gpu_mem=64`) | `docs/HARDWARE.md` |
-| RAM for the GPU | 64 MiB; the framebuffer 640x360x4x2 takes 1.8 MiB | `docs/HARDWARE.md` |
-| Memory for Lua | limit 64 MiB | `docs/HARDWARE.md` |
+| Total RAM | 512 MB LPDDR2, shared by CPU and GPU | `docs/HARDWARE.md` |
+| RAM for the ARM | 448 MB (with `gpu_mem=64`) | `docs/HARDWARE.md` |
+| RAM for the GPU | 64 MB; the framebuffer 640x360x4x2 takes 1.8 MB | `docs/HARDWARE.md` |
+| Memory for Lua | limit 64 MB | `docs/HARDWARE.md` |
 | Copy bandwidth | memcpy about 100 MB/s, fill about 430 MB/s | `docs/HARDWARE.md`, `docs/PERFORMANCE.md` |
 | Reads from SDRAM (ARM) | about 4 times slower than writes | `docs/PERFORMANCE.md` |
 
@@ -65,13 +65,13 @@ The repo records these clocks from a real Pi Zero W (source: `docs/bench/2026100
 | Core clock | 250 MHz | `docs/HARDWARE.md` |
 | 3D unit (V3D) | 12 QPUs in 3 slices, filtered textures, 64x64 tiles with 24-bit z on chip | `docs/HARDWARE.md` |
 | Peak per Raspberry Pi | 1 Gpixel/s and 1.5 Gtexel/s | `docs/BENCH3D.md` |
-| Scaler (HVS) | enlarges the framebuffer to the TV mode at no CPU cost | `docs/progress/graphics.md` |
+| Scaler (HVS) | enlarges the framebuffer to the TV mode at no CPU cost | the development notes |
 | Output | mini-HDMI up to 1920x1080 at 60 Hz | `docs/HARDWARE.md` |
 | Firmware vsync | not available on the Pi Zero; bm paces 60 fps with its timer | `docs/HARDWARE.md` |
 
 bm does not use OpenGL ES. It writes the V3D registers itself, with fixed-function drawing and its own QPU shaders (sources: `docs/PERFORMANCE.md`, section 7, for the direct-register fixed-function driver; `docs/DRIVERS.md` for the shaders).
 
-![The 3D Bench on the Pi Zero W: the score page](shots/pi-zero-w-bench-score.png)
+!The 3D Bench on the Pi Zero W: the score page
 
 # ARM11 performance, as measured
 
@@ -84,8 +84,8 @@ Source: `docs/PERFORMANCE.md`, section 2, and `docs/HARDWARE.md`.
 | Operation | Cost |
 |---|---|
 | Fill 640x360, 32-bit | 2.2 ms |
-| Copy 450 KiB RAM to RAM, CPU / DMA | 3.70 / 2.99 ms |
-| Fill 450 KiB in RAM, CPU / DMA | 1.02 / 0.85 ms |
+| Copy 450 KB RAM to RAM, CPU / DMA | 3.70 / 2.99 ms |
+| Fill 450 KB in RAM, CPU / DMA | 1.02 / 0.85 ms |
 | 48-line strip RAM to screen, CPU / DMA | 0.87 / 0.26 ms |
 | Map + 256 sprites, direct / via a RAM buffer (benchmark `p`) | 8.58 / 11.85 ms |
 | Full frame copy through RAM, by DMA | 14.06 ms (slower than the CPU) |
@@ -95,7 +95,7 @@ Source: `docs/PERFORMANCE.md`, section 2, and `docs/HARDWARE.md`.
 
 ## How many objects fit in a frame
 
-The stress test counts the objects drawn per frame at 640x360, RGB565. Source: `docs/STRESS.md`, measure of 2026-10-05, ARM rows (the ARM rasterizer, bm3d 0.2).
+The old stress test (removed from the kernel on 24 Oct 2026) counted the objects drawn per frame at 640x360, RGB565. Source: `docs/STRESS.md`, measure of 2026-10-05, ARM rows (the ARM rasterizer, bm3d 0.2).
 
 | Test | 60 fps | 30 fps | Cost per object |
 |---|---:|---:|---:|
@@ -141,18 +141,18 @@ QEMU runs about 2 times slower than the Pi on sprites (2133 against 4482 at 60 f
 
 ## How bm draws in 2D
 
-- All 2D is C code on the ARM; Lua only gives the logic (source: `docs/progress/graphics.md`).
+- All 2D is C code on the ARM; Lua only gives the logic (source: the development notes).
 - Cartridges draw in RGB565 (16 bit). The console and the menu use 32 bit (source: `docs/HARDWARE.md`). RGB565 halves the bytes per pixel; 32 bit doubles the frame copy time from about 6.5 ms to about 13 ms with the CPU (source: `docs/PERFORMANCE.md`).
-- The framebuffer comes from the firmware mailbox. Its height is the screen height times the number of pages (1 to 3). A page flip changes the virtual offset (source: `docs/progress/graphics.md`).
-- The cartridges draw directly into the video memory by default, because copying from RAM reads back the slow SDRAM: 8.58 ms direct against 11.85 ms through RAM (source: `docs/PERFORMANCE.md`). *Settings > Screen and sound > Game drawing (.bm)* switches between `Direct` and `Via RAM` (source: `src/kernel/settings.c`).
+- The framebuffer comes from the firmware mailbox. Its height is the screen height times the number of pages (1 to 3). A page flip changes the virtual offset (source: the development notes).
+- The cartridges draw directly into the video memory by default, because copying from RAM reads back the slow SDRAM: 8.58 ms direct against 11.85 ms through RAM (source: `docs/PERFORMANCE.md`). The `draw` key of `bm/config.txt` (`direct` or `ram`) and the monitor switch it; Settings has no row for it (source: `src/kernel/settings.c`).
 - bm uses triple buffering, which removed the tearing on the lower half of the menu (source: `docs/PERFORMANCE.md`).
 - The 4x4 lighting grid, bilinear and dithered, is used by games with dynamic lights, at 320x180 (source: `docs/PERFORMANCE.md`).
 
 ## Resolutions and the scaler
 
-The cartridge resolutions are 640x360 (default), 480x270 and 320x180, plus the square 256x256 and 360x360 of the `.b16` edition. `screen(w, h)` switches at run time among 320x180, 384x216, 480x270, 640x360, 960x540, 1280x720 and 1920x1080 (sources: `docs/progress/graphics.md`, `docs/api/draw.md`).
+The cartridge resolutions are 640x360 (default), 480x270 and 320x180, plus the square 256x256 and 360x360. `screen(w, h)` switches at run time among 320x180, 384x216, 480x270, 640x360, 960x540, 1280x720 and 1920x1080 (sources: the development notes, `docs/api/draw.md`).
 
-The HVS scaler enlarges the picture to the TV. `scaling_kernel` in `config.txt` (at the root of the SD) picks its filter (source: `docs/progress/v3d.md`):
+The HVS scaler enlarges the picture to the TV. `scaling_kernel` in `config.txt` (at the root of the SD) picks its filter (source: the development notes):
 
 | Value | Filter | Status in the repo |
 |---|---|---|
@@ -160,7 +160,7 @@ The HVS scaler enlarges the picture to the TV. `scaling_kernel` in `config.txt` 
 | 6 | `SINC_HAMMING_3PI`, the firmware default | verified on the Pi: looks good, soft, 640x360 to 1080p |
 | 1 to 5, 7 | other sinc variants | listed by the firmware, not tried on the Pi |
 
-- [TO FILL: how the values 3, 5 and 7 of `scaling_kernel` look on the Pi; `docs/progress/v3d.md` lists them as untried]
+- [TO FILL: how the values 3, 5 and 7 of `scaling_kernel` look on the Pi; the development notes lists them as untried]
 
 ## What gfx16 offers
 
@@ -190,7 +190,7 @@ The console's own 32-bit primitives are in `src/gfx/draw.h`: `gfx_clear`, `gfx_r
 
 With `gpu3d_2d=1` (off when the key is missing) the GPU draws the 2D that comes after the 3D in the same job: `rect`, `pset`, horizontal and vertical lines, `spr`, `sspr` (also flipped and with whole-number zoom), the cells of `map()` and the text of `print`. The pixels are the same as the ARM's. Circles, oblique lines, triangles, `prompt` and a zoom that is not a whole number close the job, and the ARM draws them as before (sources: `docs/DRIVERS.md`, `src/kernel/settings.c`).
 
-Measured on the Pi: the 2D on the GPU costs 9.5 ns per pixel, 19.6 ms at 1080p (source: `docs/progress/v3d.md`).
+Measured on the Pi: the 2D on the GPU costs 9.5 ns per pixel, 19.6 ms at 1080p (source: the development notes).
 
 # The GPU and the 3D
 
@@ -198,7 +198,7 @@ bm has two ways to draw 3D, behind the same functions. Your cartridge does not c
 
 ## The ARM renderer (r3d)
 
-`src/bm/r3d.c` runs on the ARM. It transforms, lights, culls and clips with VFP floats and rasterizes in fixed point into a 16-bit z-buffer (1/z). It offers (source: `docs/progress/graphics.md`):
+`src/bm/r3d.c` runs on the ARM. It transforms, lights, culls and clips with VFP floats and rasterizes in fixed point into a 16-bit z-buffer (1/z). It offers (source: the development notes):
 
 - flat and Gouraud shading (dithered 4x4), perspective-correct textures from the sprite sheet, near-plane clipping;
 - sun and sky/ground light, specular, rim, up to 4 point lamps, fog;
@@ -206,7 +206,7 @@ bm has two ways to draw 3D, behind the same functions. Your cartridge does not c
 - planar shadows, a first-person layer, points, lines and billboards;
 - rigid skinning (one bone per vertex).
 
-It is the driver bm3d 0.2. It draws everything when `gpu3d=0`, in QEMU, when the GPU does not answer or fails the boot probe, and for what the GPU cannot do (source: `docs/progress/graphics.md`).
+It is the driver bm3d 0.2. It draws everything when `gpu3d=0`, in QEMU, when the GPU does not answer or fails the boot probe, and for what the GPU cannot do (source: the development notes).
 
 ## The V3D path (gpu3d)
 
@@ -224,46 +224,50 @@ It is the driver bm3d 0.2. It draws everything when `gpu3d=0`, in QEMU, when the
 | Situation | Who draws |
 |---|---|
 | A V3D answers and `gpu3d` is not 0 | the GPU (default) |
-| `gpu3d=0` in `bm/config.txt`, or *Settings > Screen and sound > 3D of the games: ARM* | the ARM |
+| `gpu3d=0` in `bm/config.txt` | the ARM |
 | QEMU | the ARM |
 | The GPU times out or a boot probe fails | the ARM takes over by itself, with a line in the log |
 | 2D that the GPU cannot reproduce exactly (list above) | the ARM, after the job |
 | A triangle that crosses the vertex guard band | clipped by the ARM |
 
-Sources: `docs/progress/graphics.md`, `docs/GPU-BENCHMARK-REPORT.md`, `docs/DRIVERS.md`.
+Sources: the development notes, `docs/GPU-BENCHMARK-REPORT.md`, `docs/DRIVERS.md`.
 
-Optional features are probed at boot. The probe checks that the GPU draws what the ARM would, and switches the feature off by itself if not. The status line (*Dev > GPU test*, or `g` in the monitor) says what was kept, for example `vertex shader yes` or `ETC1 textures yes (utiles 2x4, bytes BE)` (source: `docs/DRIVERS.md`).
+Optional features are probed at boot. The probe checks that the GPU draws what the ARM would, and switches the feature off by itself if not. The options line of the 3D Bench report says what was kept, for example `vertex shader yes` or `ETC1 textures yes (utiles 2x4, bytes BE)` (source: `docs/DRIVERS.md`).
 
 ## Options
 
-Each option is a key in `bm/config.txt` and a row in *Settings > Screen and sound*. The default is what applies when the key is missing (source: `src/kernel/settings.c`, `docs/DRIVERS.md`).
+Each option is a key in `bm/config.txt`. Only five keys have a row in *Settings > Screen*. The other keys are hidden: the console reads them from the file. The default is what applies when the key is missing (source: `src/kernel/settings.c`, `docs/DRIVERS.md`).
 
 | Key | What it does | Default |
 |---|---|---|
 | `gpu3d` | the GPU draws the 3D (0 = ARM) | on where a V3D answers |
 | `gpu3d_aa` | 4x MSAA | off |
 | `gpu3d_vs` | vertex shader: 0 ARM, 1 scenery, 2 all models | 2 |
-| `gpu3d_queue` | 1: the job starts and the next `_update` runs meanwhile; 2: two jobs in flight | off |
+| `gpu3d_queue` | 1: the job starts and the next `_update` runs meanwhile; 2: two jobs in flight; 0 turns it off | 1 (on) |
 | `gpu3d_later` | each frame shown a frame later (needs `gpu3d_queue=2`) | off |
-| `gpu3d_2d` | 2D over the 3D inside the GPU job | off |
+| `gpu3d_2d` | 2D over the 3D inside the GPU job | on (1) (`0` turns it off) |
 | `gpu3d_filter` | bilinear textures (the look changes) | off |
 | `gpu3d_wc` | job memory uncached | off |
 | `gpu3d_tex16` | 16-bit textures (RGB565; cut-out sheets as RGBA5551) | off |
 | `gpu3d_etc1` | opaque sheets as ETC1 (sets `gpu3d_tex16` too) | off |
 | `gpu3d_fs2` | textured pixel shaders with two threads | on (`0` turns it off) |
 | `gpu3d_sort` | meshes nearest first, triangles in vertex-cache order | off |
-| `gpu3d_attr` | compact vertex attributes | off |
+| `gpu3d_attr` | compact vertex attributes | off (`1` turns it on; the Pi measured no gain) |
+| `gpu3d_merge` | draw merging: consecutive draws of static map pieces with baked light and one sheet become one draw, only a run of at least 32 pieces with 150 faces or fewer on average (no Settings row) | on (`0` turns it off) |
+| `gpu3d_qpu` | `1`: the 3D Bench also runs the QPU programs against the ARM versions (a first check on the Pi) | off |
 | `r3d_fast` | ARM renderer: one matrix and light in model space (pixels no longer bit-identical) | `r3d_fast=1` to turn on |
 | `r3d_impostor` | far models as one quad (2 to 64 pixels of a 1080-line screen) | off |
 
-In the Settings the rows are named *3D of the games*, *3D anti-aliasing*, *3D vertices*, *3D frame queue*, *3D frame shown*, *2D over the 3D*, *3D textures*, *3D job memory*, *3D pixel shaders*, *3D draw order*, *3D corners*, *3D impostors* and *3D on the ARM* (source: `src/kernel/settings.c`).
+In the Settings the graphics rows are *Menu size* (and, on the Pi 1, the CRT, video and GPIO screen rows) (source: `src/kernel/settings.c`). The other `gpu3d_*` keys have no row. The 3D manual (volume 3, *The graphics keys of the console*) gives for each key what it does, what it costs and the Pi result.
+
+The cel light of `cel3d` (see the 3D volume) also runs on the Pi's GPU: with `gpu3d_vs=2` the lit vertex programs cut the light into the same bands. The game draws the same picture with the ARM lighting when `gpu3d_vs` is 0 or 1, or when the boot test sees the cel programs fail.
 
 Limits you meet:
 
 - MSAA works only in jobs without a kept z-buffer. A cartridge that draws 3D, then 2D, then 3D again in one frame stays without anti-aliasing (source: `docs/api/light3d.md`).
 - Textures with sides that are multiples of 32 go to the GPU in T-format, which is faster to read (source: `docs/api/light3d.md`).
 - ETC1 needs sheet sides that are multiples of 64x128 (or 128x64) texels (source: `docs/DRIVERS.md`).
-- On the Pi, 16-bit and ETC1 sheets gave the same speed as 32 bit in the 3D Bench, within 1 to 6%, because small sheets fit in the texture cache (source: `docs/progress/v3d.md`).
+- On the Pi, 16-bit and ETC1 sheets gave the same speed as 32 bit in the 3D Bench, within 1 to 6%, because small sheets fit in the texture cache (source: the development notes).
 - Draw all the 3D first and then the HUD. 3D drawn after 2D in the same frame forces the GPU to keep the z-buffer, about 1 MB written and read again per frame (source: `docs/api/light3d.md`).
 
 ## What the GPU gives, as measured
@@ -275,7 +279,7 @@ Source: `docs/GPU-BENCHMARK-REPORT.md`, section 4, at ARM 1000 MHz, core 250, V3
 | Small triangles | 3.0 million per second (20,000 prepared in 7.7 ms) |
 | Fill rate | 811 Mpixel/s (software fill about 45 Mpixel/s) |
 
-Stress test, most objects per frame at 640x360:
+Most objects per frame at 640x360 (old stress test):
 
 | Scene | ARM, 60 fps | GPU, 60 fps | GPU, 30 fps |
 |---|---:|---:|---:|
@@ -289,7 +293,7 @@ Real programs, same file:
 
 | Program | ARM | GPU |
 |---|---|---|
-| Texture Room HD 640x360 | 25.3 ms (8 crates) | 5.8 ms (32 crates, 573 triangles) |
+| Texture Room HD 640x360 (a test cartridge, removed since) | 25.3 ms (8 crates) | 5.8 ms (32 crates, 573 triangles) |
 | Chaos Kitchen | 14.1 ms | 6.8 ms (758 triangles) |
 
 The ARM instructions per frame fall too, in a QEMU host simulation (not measured on the Pi): Texture Room, 8 crates, 320x180, 446 triangles, goes from 3.86 million to 0.62 million (source: `docs/GPU-BENCHMARK-REPORT.md`, section "Host Simulation Metrics (qemu-arm)").
@@ -308,15 +312,15 @@ Overbit is bm's most demanding 3D title. Source: `docs/GPU-BENCHMARK-REPORT.md`,
 | ULTRA | 25.1 fps | 33.8 fps |
 | EXTREME | 24.7 fps | 31.0 fps |
 
-The GPU cuts the ARM instructions per frame by 23% to 32% across these presets. At 1080p a played match is limited by fill: the GPU takes 20.4 ms for 6105 triangles and 10.1 ms at 720p. Fewer pixels are the lever, not fewer triangles (source: `docs/progress/v3d.md`).
+The GPU cuts the ARM instructions per frame by 23% to 32% across these presets. At 1080p a played match is limited by fill: the GPU takes 20.4 ms for 6105 triangles and 10.1 ms at 720p. Fewer pixels are the lever, not fewer triangles (source: the development notes).
 
-- [TO FILL: Overbit played on the Pi with `gpu3d_attr=1`, `gpu3d_tex16=1` and `gpu3d_etc1=1` against all off; `docs/progress/v3d.md` lists it as still to measure]
+- [TO FILL: Overbit played on the Pi with `gpu3d_attr=1`, `gpu3d_tex16=1` and `gpu3d_etc1=1` against all off; the development notes lists it as still to measure]
 
 # The bm3d drivers
 
 ## One name, two drivers
 
-3D goes through **r3d** (scene, transforms, light, the ARM rasterizer) and **gpu3d** (the V3D backend with its shaders). They share one version, **bm3d X.Y**. The current one is bm3d 7.3 (source: `src/gpu/version3d.h`). You see it in *Settings > System > 3D driver*, in the GPU test, in the log when a game starts, in the 3D Bench and as the fourth value of `gpu3d()` (source: `docs/DRIVERS.md`).
+3D goes through **r3d** (scene, transforms, light, the ARM rasterizer) and **gpu3d** (the V3D backend with its shaders). They share one version, **bm3d X.Y**. The current one is bm3d 7.3 (source: `src/gpu/version3d.h`). You see it in *Settings > System > 3D driver*, in the log when a game starts, in the 3D Bench and as the fourth value of `gpu3d()` (source: `docs/DRIVERS.md`).
 
 ## The versions that matter
 
@@ -396,14 +400,14 @@ It is bm's single benchmark of the 3D. Each test grows its load until a frame pa
 2. Open the Dev tab and choose **3D Bench**. You can also press `j` in the serial monitor.
 3. Leave it alone. The Pi report of 2026-10-05 ends with `total 79 s`. Each step measures 6 frames and keeps the middle one, so a single slow frame does not move the result.
 4. Use left and right to change page. The first page is the score. Press B (or Esc) to leave.
-5. Take the SD card out and open `bm/bench/` on it: the run saved `3D0001.TXT`, `3D0002.TXT`, and so on.
+5. Take the SD card out and open `bm/bench/` on it: the run saved `3d0001.txt`, `3d0002.txt`, and so on.
 6. The next run reads the last report and compares against it. To keep a history, copy the files to `docs/bench/` in the repository.
 
 ::: try
 Run the 3D Bench twice. On the second run the pages show white ticks at the values of the first one, and a column "x last".
 :::
 
-![The 3D Bench: one test, its bars for each profile](shots/pi-zero-w-bench-test.png)
+!The 3D Bench: one test, its bars for each profile
 
 What you read (source: `docs/BENCH3D.md`):
 
@@ -417,40 +421,24 @@ What you read (source: `docs/BENCH3D.md`):
 The monitor's line runs only some tests and profiles (source: `docs/BENCH3D.md`).
 
 ::: copy
-:gpu; b3d tests=match,quad_tex profiles=GPU,FS2; send
+:b3d tests=match,quad_tex profiles=GPU,FS2; send
 :::
 
 From the PC, with the board on the network:
 
 ::: copy
-./easy_install.sh line "gpu; b3d; send"
+./easy_install.sh line "b3d; send"
 :::
 
 The console writes what it does until it says `the line is done`.
 
 ## The cost of a pixel
 
-Source: `docs/progress/v3d.md` and `docs/BENCH3D.md`. The `P` lines of the report give the ms to fill 640x360, 1280x720 and 1920x1080.
+Source: the development notes and `docs/BENCH3D.md`. The `P` lines of the report give the ms to fill 640x360, 1280x720 and 1920x1080.
 
 ::: copy
-./easy_install.sh line "gpu; b3d tests=quad_flat,quad_tex,bilinear,gpu2d profiles=ARM,GPU,FS2,2D,VSF; send"
+./easy_install.sh line "b3d tests=quad_flat,quad_tex,bilinear,gpu2d profiles=ARM,GPU,FS2,2D,VSF; send"
 :::
-
-## The GPU test and the stress test
-
-1. Open the Dev tab and choose **GPU test** (or `g` in the monitor). It runs the driver's steps, prints the status line and the probe log, and reports the triangle rate and the fill rate (sources: `docs/DRIVERS.md`, `docs/GPU-BENCHMARK-REPORT.md`).
-2. For the stress test of sprites and 3D, build the dedicated kernel on the PC and copy it to the SD (source: `docs/STRESS.md`):
-
-::: copy
-cd ~/bm && git pull
-make sdcard-stress
-cp dist/kernel.img /path/to/the/SD/ && sync
-:::
-
-3. Start the Pi. After the system summary the tests run, about 30 to 60 s in all, and the table of results stays on the screen: a photo is enough.
-4. To go back to the normal kernel, run `make sdcard` and copy `dist/kernel.img` again.
-
-If you have a serial cable, the stress test starts from the monitor with the `S` key.
 
 ## Compare the drivers on the same board
 
@@ -462,7 +450,7 @@ Do not compare numbers from kernels with different `options` lines, or with diff
 
 ## No report for a stopped test
 
-A test that you stop (Start+Select, Ctrl+Esc or PS after the frame on screen) leaves no report (source: `docs/progress/graphics.md`).
+A test that you stop (Start+Select, Ctrl+Esc or PS after the frame on screen) leaves no report (source: the development notes).
 
 ## If the current numbers are missing
 
@@ -478,8 +466,8 @@ A test that you stop (Start+Select, Ctrl+Esc or PS after the frame on screen) le
 - Divisions: use them per triangle at most, never per scanline or pixel. A denormal float traps unless RunFast is on; bm turns RunFast on at boot (source: `docs/PERFORMANCE.md`).
 - The firmware vsync is not available on the Pi Zero (source: `docs/HARDWARE.md`).
 - One USB OTG port with one HID device plus a mouse; up to 4 DualShock 4 over Bluetooth (source: `docs/HARDWARE.md`).
-- The 3D is not OpenGL: it is bm's own fixed-function driver. Running your own programs on the QPUs (particles, full-screen effects) is listed as not started (source: `docs/progress/v3d.md`).
-- No interrupt for the V3D: the driver polls (source: `docs/progress/v3d.md`).
+- The 3D is not OpenGL: it is bm's own fixed-function driver. Running your own programs on the QPUs (particles, full-screen effects) is listed as not started (source: the development notes).
+- No interrupt for the V3D: the driver polls (source: the development notes).
 
 ## Tips
 
@@ -508,4 +496,4 @@ The PowKiddy RGB30 (RK3566, AArch64) runs the same 3D Bench. Its report in the r
 
 A value of -1 means the first step already did not fit in 16.7 ms: `spheres_tex` on the Pi is -1 and 45.4 on the RGB30; `match` is -1 on the Pi and 1.3 on the RGB30.
 
-Since then the repo has started a driver for the RGB30's Mali-G52 GPU. It powers the GPU, runs jobs and clears a surface; a triangle is written and not yet tried on the device. The 3D of the RGB30 is still `r3d` on the ARM (source: `docs/progress/graphics-mali.md`). So on the RGB30 there are no GPU numbers to compare with the Pi's V3D.
+Since then the repo has started a driver for the RGB30's Mali-G52 GPU. It powers the GPU, runs jobs and clears a surface; a triangle is written and not yet tried on the device. The 3D of the RGB30 is still `r3d` on the ARM (source: the development notes). So on the RGB30 there are no GPU numbers to compare with the Pi's V3D.

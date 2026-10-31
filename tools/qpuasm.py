@@ -15,7 +15,7 @@ pixel's x), y_coord (regfile B 41: its y), small immediates (0..15,
 ra0-ra31, rb0-rb31, tlbc (colour), tlb_z, t0s t0t t0r t0b, t1s ..., nop;
 a mul destination can pack a float into one byte of a colour: r3.8a ..
 r3.8d, or into all four with .8888. A regfile A source can be unpacked
-on its read (M39): ra5.8a .. ra5.8d (a byte: 0..1 to a float op, 0..255
+on its read (bm3d 7.1): ra5.8a .. ra5.8d (a byte: 0..1 to a float op, 0..255
 to an integer op), ra5.16a / .16b, ra5.8dr (UNPACK_A). Signals: thrend sbwait sbdone ldtmu0
 ldtmu1 loadc; "small" is added by itself with an immediate.
 Reference: VideoCore IV 3D Architecture Reference Guide (Broadcom), chapter 3.
@@ -39,7 +39,8 @@ WADDR = {"r0": 32, "r1": 33, "r2": 34, "r3": 35, "tmu_noswap": 36, "r5": 37, "ho
          "tlb_alpha": 47, "vpm": 48, "mutex_release": 51, "sfu_recip": 52, "sfu_recipsqrt": 53,
          "sfu_exp": 54, "sfu_log": 55, "t0s": 56, "t0t": 57, "t0r": 58, "t0b": 59, "t1s": 60,
          "t1t": 61, "t1r": 62, "t1b": 63}
-RADDR = {"unif": 32, "vary": 35, "elem_num": 38, "nop": 39, "vpm": 48}   # readable from file A or B
+RADDR = {"unif": 32, "vary": 35, "elem_num": 38, "nop": 39, "vpm": 48,   # readable from file A or B
+         "mutex_acquire": 51}       # bm3d 7.x user programs: the read waits until the VPM mutex is ours
 # written through one register file: (address, file)
 WFILE = {"vr_setup": (49, "A"), "vw_setup": (49, "B"), "vr_addr": (50, "A"), "vw_addr": (50, "B")}
 PACK_A = {"16a": 1, "16b": 2}           # regfile A pack (pm 0): the low or high half of the register
@@ -116,9 +117,29 @@ def load_imm(line, lineno):
     return imm, hi
 
 
-def assemble_line(line, lineno):
+# bm3d 7.x: branches of user programs, relative, 3 delay slots. The condition
+# looks at the flags of all 16 lanes: all/any lanes with Z (or N) set / clear.
+BRANCH_COND = {"allz": 0, "allnz": 1, "anyz": 2, "anynz": 3, "alln": 4, "allnn": 5, "anyn": 6,
+               "anynn": 7, "always": 15}
+
+
+def branch(line, lineno, labels, at):
+    """bra[.cond] label: the target relative to the instruction 4 on, in bytes"""
+    m = re.fullmatch(r"bra(?:\.(\w+))?\s+(\w+)", line)
+    if not m or (m[1] or "always") not in BRANCH_COND:
+        raise SyntaxError(f"line {lineno}: bra[.allz|allnz|anyz|anynz|alln|allnn|anyn|anynn] label: {line}")
+    if labels is None or m[2] not in labels:
+        raise SyntaxError(f"line {lineno}: unknown label {m[2]}")
+    imm = (labels[m[2]] - (at + 4)) * 8 & 0xFFFFFFFF
+    hi = 15 << 28 | BRANCH_COND[m[1] or "always"] << 20 | 1 << 19 | WADDR["nop"] << 6 | WADDR["nop"]
+    return imm, hi
+
+
+def assemble_line(line, lineno, labels=None, at=0):
     if line.startswith("ldi "):
         return load_imm(line, lineno)
+    if line.startswith("bra"):
+        return branch(line, lineno, labels, at)
     parts = [p.strip() for p in line.split(";")]
     if len(parts) < 2 or len(parts) > 3:
         raise SyntaxError(f"line {lineno}: need 'add ; mul [; signal]': {line}")
@@ -158,6 +179,11 @@ def assemble_line(line, lineno):
             if ins.raddr_b not in (None, n) or ins.small is not None:
                 raise SyntaxError(f"line {lineno}: two regfile B reads")
             ins.raddr_b = n
+            return MUX_B
+        if tok == "vw_wait":                # the DMA store's end (regfile B read 50)
+            if ins.raddr_b not in (None, 50) or ins.small is not None:
+                raise SyntaxError(f"line {lineno}: two regfile B reads")
+            ins.raddr_b = 50
             return MUX_B
         if tok == "x_coord":                # X_PIXEL_COORD: regfile A only
             if ins.raddr_a not in (None, 41):
@@ -277,12 +303,15 @@ def assemble_line(line, lineno):
 
 
 def assemble(src):
-    out = []
+    """the instructions of src: (lo, hi) and their text; "name:" lines are labels"""
+    lines, labels = [], {}
     for n, line in enumerate(src.splitlines(), 1):
         line = line.split("#")[0].strip()
-        if line:
-            out.append((assemble_line(line, n), line))
-    return out
+        if line.endswith(":") and re.fullmatch(r"\w+:", line):
+            labels[line[:-1]] = len(lines)
+        elif line:
+            lines.append((n, line))
+    return [(assemble_line(line, n, labels, k), line) for k, (n, line) in enumerate(lines)]
 
 
 # ---------------------------------------------------------------- shaders of bm
@@ -580,7 +609,7 @@ SHADERS = {
         nop                 ; nop
         nop                 ; nop           ; sbdone
     """,
-    # M37, 2D on the GPU: text, the glyph's texel (white, alpha 0 where the
+    # bm3d 4.8, 2D on the GPU: text, the glyph's texel (white, alpha 0 where the
     # glyph is not lit) and the colour of the varyings (3): the colour where
     # the texel is opaque, nothing elsewhere (s, t, then the colour)
     "fs_text": """
@@ -614,7 +643,27 @@ SHADERS = {
         nop                 ; nop
         nop                 ; nop           ; sbdone
     """,
-    # zclear() inside a job (M35): a quad over the page at depth 1 (no
+    # bm3d 7.7: the shadow that darkens. The colour load signal reads the pixel
+    # from the tile buffer into r4; the shadow keeps 5/8 of it (as the ARM's
+    # (p >> 1) + (p >> 3)): r4 * 0.5 + r4 * 0.125, bytewise. Tested against
+    # the depth, not written. The three varyings (a black colour) are read and dropped.
+    "fs_shadow": """
+        nop                 ; nop
+        nop                 ; mov r1.8888, 0.5
+        mov nop, vary       ; mov r2.8888, 0.125
+        mov nop, vary       ; nop
+        mov nop, vary       ; nop
+        nop                 ; nop           ; sbwait
+        nop                 ; nop           ; loadc     # r4 = the pixel's colour
+        nop                 ; v8muld r0, r4, r1
+        nop                 ; v8muld r3, r4, r2
+        v8adds r0, r0, r3   ; nop
+        mov tlb_z, rb15     ; nop
+        mov tlbc, r0        ; nop           ; thrend
+        nop                 ; nop
+        nop                 ; nop           ; sbdone
+    """,
+    # zclear() inside a job (bm3d 4.1): a quad over the page at depth 1 (no
     # varyings) writes the far depth and gives each pixel back its colour
     # (the colour load signal reads the tile buffer into r4), so the 3D
     # after it sees a clear depth over what was drawn
@@ -630,7 +679,7 @@ SHADERS = {
     """,
 }
 
-# M39: the textured shaders with a thread switch: while the TMU fetches
+# bm3d 5.3: the textured shaders with a thread switch: while the TMU fetches
 # the texel the QPU runs the other thread (the record's flag 0 lets two
 # fragment shaders share a QPU). After the switch (two delay slots) the
 # accumulators are lost, so what the end needs is in the register file
@@ -897,7 +946,7 @@ def check_threaded(name, code):
         raise SyntaxError(f"{name}: no lthrsw")
 
 
-# Vertex and coordinate shaders for the GL shader state (M36): the V3D
+# Vertex and coordinate shaders for the GL shader state (bm3d 3.0): the V3D
 # reads the vertices of a mesh, the QPUs place them. The VCD puts word k of
 # the attributes of 16 vertices in row k of the VPM; a read of "vpm" gives
 # the next row (vr_setup), a write fills the next (vw_setup). Uniforms, in
@@ -945,7 +994,7 @@ XFORM = """
         fadd rb9, r2, 1.0   ; nop                       # z = 1 - NEAR / depth
 """
 
-# The lamps (M36): four, each read as x y z (camera space), 1/r^2 and its
+# The lamps (bm3d 3.0): four, each read as x y z (camera space), 1/r^2 and its
 # colour times k (bytes a b c): s = max(0, 1 - d^2/r^2), the light in
 # ra5 rb3 rb4 (bytes a b c) += s * colour. A lamp that is off has k 0.
 LAMP = """
@@ -1070,7 +1119,7 @@ SHADERS["vs_baked"] = """
         nop                 ; nop
 """
 
-# M39 (gpu3d_attr): vs_baked with compact attributes, x y z and two words
+# bm3d 7.1 (gpu3d_attr): vs_baked with compact attributes, x y z and two words
 # (5 instead of 9): the colour (bytes a b c, unpacked to byte / 255 as the
 # ARM writes it) and the light (bytes a b c, 128 = 1: unpacked as integers,
 # then exactly / 128 as the ARM's). The rest is vs_baked's.
@@ -1137,7 +1186,7 @@ def SHADE(dst):
         fadd {dst}, r0, unif ; nop
 """
 
-# Models lit by the sun (M36, the heroes): r3d's light_fast at each corner,
+# Models lit by the sun (bm3d 3.0, the heroes): r3d's light_fast at each corner,
 # with the corner's normal (the vertex's for Gouraud, the face's else) in
 # the axes of its bone: sky and ground by its height, the sun, the rim
 # (1 - n.V)^2, the highlight (n.H)^p where the sun lights it, the lamps;
@@ -1234,7 +1283,7 @@ SHADERS["vs_lit"] = """
         nop                 ; nop
 """
 
-# M39 (gpu3d_attr): vs_lit with compact attributes, 10 words instead of 14:
+# bm3d 7.1 (gpu3d_attr): vs_lit with compact attributes, 10 words instead of 14:
 # x y z, the normal, one word of the colour (bytes a b c, unpacked to byte
 # / 255) and the flags (byte d: 1 emissive, 2 glossy and not emissive,
 # unpacked as an integer), the point of the lamps. The rest is vs_lit's.
@@ -1472,7 +1521,77 @@ SHADERS["vs_lit_tex2"] = """
         nop                 ; nop
 """
 
-# Shadows (M36): the corner (ra0 ra1 ra2) into world axes relative to the
+# bm3d 7.33: plain colour faces of a skin on two bones (the joints of a continuous skin: Dark Night's
+# characters). vs_lit_tex2's corner with the colour (bytes a b c, 0..1) in place of s t, and vs_lit's
+# end: colour * light, the lamps in colour, the fog (colour + (fog - colour) * f), at most 1: the
+# varyings of fs_colour. No highlight: a glossy face on two bones stays on the ARM. Attributes
+# x y z w, the normal, colour a b c, emissive, the normal's weight (12 words). Uniforms as
+# vs_lit_tex2's with the fog's colour (a b c) after the fog's near and k.
+SHADERS["vs_lit2"] = """
+        ldi vr_setup, 0xc01a00                          # 12 rows
+        ldi vw_setup, 0x1a00
+        nop                 ; nop
+        nop                 ; nop
+        mov ra0, vpm        ; nop
+        mov ra1, vpm        ; nop
+        mov ra2, vpm        ; nop
+        mov ra25, vpm       ; nop                       # w: 1 bone A, 0 bone B
+        mov ra3, vpm        ; nop                       # the normal
+        mov ra4, vpm        ; nop
+        mov rb0, vpm        ; nop
+        mov rb1, vpm        ; nop                       # colour a
+        mov ra17, vpm       ; nop                       # colour b
+        mov ra7, vpm        ; nop                       # colour c
+        mov ra8, vpm        ; nop                       # emissive
+        mov rb25, vpm       ; nop                       # the normal's weight
+""" + XFORM2 + """
+        mov ra13, r4        ; nop                       # 1 / depth
+""" + DOT2("ra18", "rb25") + DOT2("ra14", "rb25") + DOT2("ra19", "rb25") + """
+        fmax r3, ra18, 0    ; nop                       # max(d, 0)
+        fmax r2, ra19, 0    ; nop
+        fsub r2, 1.0, r2    ; nop
+        nop                 ; fmul r2, r2, r2           # e^2: the rim
+""" + SHADE("ra5") + SHADE("rb3") + SHADE("rb4") + FOG + """
+        mov ra11, unif      ; nop                       # fog a b c
+        mov rb11, unif      ; nop
+        mov ra12, unif      ; nop
+""" + LAMP * 4 + """
+        fsub r0, 1.0, ra5   ; nop                       # emissive: full light
+        mov r1, rb3         ; fmul r0, r0, ra8
+        fadd ra5, ra5, r0   ; nop
+        fsub r1, 1.0, r1    ; nop
+        mov r2, rb4         ; fmul r1, r1, ra8
+        fadd rb3, rb3, r1   ; nop
+        fsub r2, 1.0, r2    ; nop
+        nop                 ; fmul r2, r2, ra8
+        fadd rb4, rb4, r2   ; nop
+        nop                 ; fmul r0, rb1, ra5         # colour * light
+        nop                 ; fmul r1, ra17, rb3
+        nop                 ; fmul r2, ra7, rb4
+        fsub r3, ra11, r0   ; nop                       # (fog - colour) * f + colour
+        nop                 ; fmul r3, r3, ra10
+        fadd r0, r0, r3     ; nop
+        fsub r3, rb11, r1   ; nop
+        nop                 ; fmul r3, r3, ra10
+        fadd r1, r1, r3     ; nop
+        fsub r3, ra12, r2   ; nop
+        nop                 ; fmul r3, r3, ra10
+        fadd r2, r2, r3     ; nop
+        fmin r0, r0, 1.0    ; nop
+        fmin r1, r1, 1.0    ; nop
+        fmin r2, r2, 1.0    ; nop
+        mov vpm, ra9        ; nop                       # screen x, y
+        mov vpm, rb9        ; nop                       # z
+        mov vpm, ra13       ; nop                       # 1 / w
+        mov vpm, r0         ; nop                       # colour a b c
+        mov vpm, r1         ; nop
+        mov vpm, r2         ; nop
+        nop                 ; nop           ; thrend
+        nop                 ; nop
+        nop                 ; nop
+"""
+
+# Shadows (bm3d 3.0): the corner (ra0 ra1 ra2) into world axes relative to the
 # camera by its bone (12 uniforms), then down along the sun to the ground's
 # plane, as r3d's draw_shadow: h = max(0, (y - plane) / Ly), x - Lx h,
 # plane + 0.01, z - Lz h, back into ra0 ra1 ra2 for XFORM (the camera's
@@ -1638,6 +1757,42 @@ SHADERS["cs_shadow"] = """
         nop                 ; nop
 """
 
+# bm3d 7.5: the cel light in the vertex shaders (cel3d, draw3d flag 256). The sun term
+# max(d, 0) (r3) is cut into bands as r3d's table does: the band
+# b = min(N - 1, floor(d * N)), the term floor + (1 - floor) * b / (N - 1). Four more
+# uniforms, after those the shader reads before B D R A: N (a float), N - 1 (an
+# integer), (1 - floor) / (N - 1), floor. A highlight (vs_lit, vs_lit8) becomes one
+# step as on the ARM: on where (n.H)^p is above 0.5, else off. The rest of each
+# program is the original text.
+CEL_E2 = "        nop                 ; fmul r2, r2, r2           # e^2: the rim\n"
+CEL_CUT = """        nop                 ; fmul r0, r3, unif         # cel: d * N
+        ftoi r0, r0         ; nop                       # the band, 0..N
+        min r0, r0, unif    ; nop                       # at most N - 1
+        itof r0, r0         ; nop
+        nop                 ; fmul r0, r0, unif         # band * (1 - floor) / (N - 1)
+        fadd r3, r0, unif   ; nop                       # + floor
+"""
+CEL_SPEC_AT = "        nop                 ; fmul ra16, r1, rb5        # the highlight of a glossy corner\n"
+CEL_SPEC = """        fsub.setf nop, r1, 0.5 ; nop                    # cel: the highlight is on above 0.5
+        mov.ifnn r1, 1.0    ; nop
+        mov.ifz r1, 0       ; nop
+        mov.ifn r1, 0       ; nop
+"""
+
+
+def cel_variant(src, spec):
+    assert src.count(CEL_E2) == 1
+    out = src.replace(CEL_E2, CEL_E2 + CEL_CUT)
+    if spec:
+        assert out.count(CEL_SPEC_AT) == 1
+        out = out.replace(CEL_SPEC_AT, CEL_SPEC + CEL_SPEC_AT)
+    return out
+
+
+for _name, _spec in (("vs_lit", 1), ("vs_lit8", 1), ("vs_lit_tex", 0), ("vs_lit_tex2", 0), ("vs_lit2", 0)):
+    SHADERS[_name + "_cel"] = cel_variant(SHADERS[_name], _spec)
+
+
 # shaders run on a Pi (Zero W) by others, as the reference of the encoding
 REFERENCE = [
     # Peter Lemon, V3D/ControlList/NV/Vertex_Array/Triangle/VertexColor
@@ -1707,6 +1862,41 @@ def same(got, words):
             return False
     return True
 
+
+# bm3d 7.17: the light of dark_end on the GPU. One quad over a tile of the page: for each pixel the light it gets
+# from the lamps of the variant is added up, S = sum of level * (1 - d2 / r2)^2 (0 outside the lamp), the colour factor is
+# M = A + S * W per channel (A the ambient's, W the lamps' tint; halved by the ARM: M / 2 is in 0..1), and the
+# pixel the colour load signal reads from the tile buffer is multiplied by it (v8muld, then doubled with a
+# saturating add). Uniforms: A (3), W (3), then for each lamp: x, y, 1 / r2, level (floats; level 0 = no lamp).
+LIGHT_VARIANTS = (0, 1, 2, 4, 6, 8, 12)      # lamps unrolled: a tile of the page takes the smallest one that holds its lamps
+
+
+def _fs_light(lamps):
+    t = ["nop ; nop", "nop ; nop", "itof ra0, x_coord ; nop", "itof rb0, y_coord ; nop",
+         "mov ra2, unif ; nop", "mov ra3, unif ; nop", "mov ra4, unif ; nop",
+         "mov rb2, unif ; nop", "mov rb3, unif ; nop", "mov rb4, unif ; nop", "mov r2, 0 ; nop"]
+    for _ in range(lamps):
+        t += ["fsub r0, ra0, unif ; nop",          # dx
+              "fsub r1, rb0, unif ; nop",          # dy
+              "nop ; fmul r0, r0, r0",
+              "nop ; fmul r1, r1, r1",
+              "fadd r0, r0, r1 ; nop",             # d2
+              "nop ; fmul r0, r0, unif",           # d2 / r2
+              "fsub r0, 1.0, r0 ; nop",
+              "fmax r0, r0, 0 ; nop",              # 1 - d2 / r2, 0 outside
+              "nop ; fmul r0, r0, r0",
+              "nop ; fmul r0, r0, unif",           # times the level
+              "fadd r2, r2, r0 ; nop"]             # S
+    for c, b in enumerate("abc"):
+        t += ["nop ; fmul r0, r2, rb%d" % (2 + c), "fadd r0, r0, ra%d ; nop" % (2 + c), "nop ; mov r1.8%s, r0" % b]
+    t += ["nop ; mov r1.8d, 1.0", "nop ; nop ; sbwait", "nop ; nop ; loadc",
+          "nop ; v8muld r0, r4, r1", "v8adds r0, r0, r0 ; nop", "mov tlb_z, rb15 ; nop",
+          "mov tlbc, r0 ; nop ; thrend", "nop ; nop", "nop ; nop ; sbdone"]
+    return "\n".join("        " + x for x in t) + "\n    "
+
+
+for _n in LIGHT_VARIANTS:
+    SHADERS["fs_light%d" % _n] = _fs_light(_n)
 
 # bm3d 6.3: a fragment shader run for one pixel on its encoded words, to
 # check that a two-thread shader (name_t) writes what its one-thread
@@ -1871,7 +2061,7 @@ def check_same_writes(name, code, base, base_code, n=300):
 
 
 def unpack_test():
-    """M39: the regfile A unpack, field by field as the reference guide
+    """bm3d 7.1: the regfile A unpack, field by field as the reference guide
     lays the instruction out (unpack bits 59:57, pm 56, raddr_a 23:18, the
     input muxes 6 = regfile A), and the lines it must refuse"""
     ok = True

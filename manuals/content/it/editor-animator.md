@@ -31,6 +31,13 @@ footer: manuali bm - editor-animator
 - I modelli stanno nella sezione MESH della cartuccia, scheletri e animazioni nella sezione ANIM. bm Animator cambia solo queste due sezioni (e lo sprite sheet, quando ci metti gli sprite).
 - Il gioco usa il risultato con `model()` e `animate()`.
 
+## Quale editor per cosa
+
+- **bm Studio**: modelli statici. Oggetti, props ed edifici, fatti di blocchi e tile. La mappa 3D di un gioco si fa nella pagina mappa di bm SDK.
+- **bm Mesh**: modelli organici. Personaggi ed eroi, e tutta la modifica fine di vertici e triangoli.
+- **bm Animator**: rig e animazioni. Mette uno scheletro in un modello e lo muove. Non costruisce modelli.
+- bm Studio e bm Mesh scrivono la stessa sezione MESH, quindi un modello passa da un editor all'altro.
+
 ## Da sapere
 
 - Il Pi Zero W ha bm Animator. Il kernel dell'RGB30 no: non offre i programmi della suite.
@@ -44,6 +51,8 @@ footer: manuali bm - editor-animator
 - Da un gioco: premi **X** sulla sua copertina e scegli **Open in bm Animator**.
 - Da un altro strumento della suite: la voce di menu **Open in bm Animator** (ce l'ha bm Studio) passa allo stesso file.
 
+*Open...* elenca anche i file di modello `.bmm` di `/bmm`. Un `.bmm` si apre con tutti i suoi modelli e scheletri. **Save** riscrive lo stesso `.bmm`; **Save as** crea un progetto `.bme`; **Try the game** dice che un file di modello non ha un gioco.
+
 Se l'elenco dei file è vuoto, lo schermo dice `no .bm files: make models in bm Studio`. Se apri un file senza modelli 3D, dice `no models: make them in bm Studio`. Il testo `open a .bm with 3D models (made in bm Studio)` compare quando l'app parte senza file e ci sono dei file `.bm`.
 
 ## Progetti e giochi
@@ -51,13 +60,13 @@ Se l'elenco dei file è vuoto, lo schermo dice `no .bm files: make models in bm 
 | File | Cos'è | Cosa ne fa bm Animator |
 |---|---|---|
 | `.bme` | un progetto | lo apre, lo modifica, lo salva al suo posto |
-| `.bm`, `.b16` | un gioco | lo legge soltanto |
+| `.bm` | un gioco | lo legge soltanto |
 
-Con un gioco aperto, il primo salvataggio chiede `Save an editable copy: NAME.BME?`. Rispondi sì: da lì lavori sulla copia, accanto al gioco. Il gioco non viene mai modificato.
+Con un gioco aperto, il primo salvataggio chiede `Save an editable copy: name.bme?`. Rispondi sì: da lì lavori sulla copia, in `/bme`. Il gioco non viene mai modificato.
 
 ## Da sapere
 
-- L'elenco dei file mostra i `.bm` e i `.bme` di `/carts` e della radice della scheda SD.
+- L'elenco dei file mostra i progetti `.bme` di `/bme` e i `.bm` e `.bme` di `/carts` e della radice della scheda SD.
 - La pagina del menu mostra il nome del file e `*modified*` quando c'è qualcosa da salvare.
 
 ## Provalo, passo per passo
@@ -68,14 +77,14 @@ Con un gioco aperto, il primo salvataggio chiede `Save an editable copy: NAME.BM
 4. Vedi la pagina **F1** con il modello che gira. Gli elenchi a sinistra sono MODELS e ANIMATIONS, solo con i nomi; il nome del modello con vertici, triangoli e ossa sta nella striscia di informazioni a destra del pannello.
 
 ::: try
-Premi `]` e `[` per passare al modello successivo e al precedente del file. La riga di stato dice `model` e il nome.
+Premi `]` e `` per passare al modello successivo e al precedente del file. La riga di stato dice `model` e il nome.
 :::
 
 # Lo schermo e i comandi
 
 La disposizione è quella delle altre app della console: a sinistra un pannello con gli elenchi, sopra la vista 3D due righe che dicono cosa c'è e cosa si sta facendo, in basso i tasti della pagina. Le cose scelte sono in giallo. Tieni premuto **F12**, o premi **?**, per vedere i tasti della pagina.
 
-![Il player (F1): un modello con lo scheletro visibile](shots/editor-animator-play.png)
+![Il player (F1): un modello con lo scheletro visibile
 
 ## Pagine e tasti globali
 
@@ -89,6 +98,8 @@ La disposizione è quella delle altre app della console: a sinistra un pannello 
 | `Ctrl+S` | salva |
 | `Ctrl+Shift+S` | salva con nome (nome 8.3 in `/carts`) |
 | `Ctrl+O` | apri un altro file |
+| `Ctrl+I` | importa un modello da `/bmm` o `/glb` |
+| `Ctrl+E` | esporta il modello in `/bmm` |
 | `F5` o `Ctrl+R` | prova il gioco (salva prima, poi torna alla stessa pagina) |
 | `F6` | l'assistente, dove il kernel ce l'ha |
 | `Ctrl+Z`, `Ctrl+Y` | annulla, ripeti |
@@ -120,6 +131,7 @@ La disposizione è quella delle altre app della console: a sinistra un pannello 
 | `n` | crea lo scheletro, o aggiunge un osso sotto quello scelto |
 | su, giù | scegli l'osso |
 | `Tab` | lavora sulla coda dell'osso o sulla testa |
+| `j` | testa sola: **w a s d r f** spostano solo la testa dell'osso, lontano dalla coda del genitore (di nuovo: le giunture vanno insieme) |
 | `w` `a` `s` `d` `r` `f` | sposta l'estremità scelta di 1/8 (maiuscolo: 1/32) |
 | `m` | specchia l'osso e i suoi figli sull'altro lato |
 | `p` | scegli il genitore |
@@ -128,10 +140,23 @@ La disposizione è quella delle altre app della console: a sinistra un pannello 
 | `k` | pelle: ogni faccia segue l'osso più vicino |
 | `K` | pelle: ogni angolo segue l'osso più vicino (morbida) |
 | `v` | modalità pelle: scegli le facce a mano |
+| `h` | mostra solo le facce di questo osso; ancora: con le ossa sotto di lui; ancora: tutte |
+| `o` `i` | asse di rotazione x, y, z / passo di rotazione 5, 15, 45, 90 gradi |
+| `,` `.` | ruota questo osso e le ossa sotto di lui attorno alla sua testa, un passo indietro o avanti |
+| `u` | scrivi i gradi da ruotare |
+| `t` | posa di prova: piega ogni osso e segna in rosso le facce che si allungano o si strappano |
 | `q` `e` | ruota la vista a scatti |
 | `z` | inquadra il modello |
 
-In modalità pelle: le frecce scelgono una faccia, spazio la segna, `c` segna quelle collegate, `a` dà le facce segnate all'osso, PgSu e PgGiù cambiano osso, Backspace o Canc cancella i segni, `v` torna alle ossa.
+In modalità pelle: le frecce scelgono una faccia, spazio la segna, `c` segna quelle collegate, `b` segna tutte le facce dell'osso, `a` dà le facce segnate all'osso, PgSu e PgGiù cambiano osso, Backspace o Canc cancella i segni, `v` torna alle ossa.
+
+### Parti e angolo di un'arma
+
+Una parte è un osso con le sue facce. **h** mostra una parte da sola: le facce dell'osso scelto, nel colore dell'osso. Premi **h** di nuovo per aggiungere le ossa sotto di lui, e una terza volta per vedere tutto. Serve a controllare quali facce segue un osso.
+
+**, e .** ruotano l'osso scelto e tutte le ossa sotto di lui attorno alla testa dell'osso. Le facce che seguono queste ossa ruotano con loro. Il passo è quello di **i** (5, 15, 45 o 90 gradi) e l'asse è quello di **o**. La pagina li mostra dopo `turn`, per esempio `turn z 15`. **u** chiede i gradi esatti. Un **Ctrl+Z** annulla una rotazione. La rotazione cambia la posa a riposo, quindi ogni animazione usa il nuovo angolo: giri un'arma una sola volta, non in ogni clip. I tasti **[** e **]** cambiano ancora il modello, per questo la rotazione usa la virgola e il punto.
+
+Esempio: il Cacciatore di `dnhunter.bmm` ha la sega su un osso a parte, `grip.R`, figlio di `hand.R`. Scegli `grip.R` con su e giù, premi **o** per l'asse e **.** per ruotare la sega a passi di 15 gradi. Salva con Ctrl+S.
 
 ## F3, animate
 
@@ -156,11 +181,26 @@ In modalità pelle: le frecce scelgono una faccia, spazio la segna, `c` segna qu
 | `m` | specchia la posa |
 | `o` | onion skin: le ossa dei keyframe precedente e successivo |
 | `l` | loop sì, no |
-| `i` | lineare, morbida, a scatti |
+| `i` | cambia la curva: lineare, morbida, a scatti, entrata lenta, uscita lenta |
+| `t` | maniglia IK accesa, spenta (vedi IK a due ossa) |
 | `<` `>` | più corta, più lunga di un fotogramma |
 | Invio | rinomina l'animazione (fino a 16 lettere) |
 | `Ctrl+D` | duplica l'animazione |
 | Backspace due volte | elimina l'animazione |
+| `Ctrl+Shift+I` | prendi le animazioni di un altro modello |
+
+La barra dei suggerimenti in fondo a F3 mostra solo i tasti principali. I tasti `,` `.` (keyframe prima e dopo), `m` (specchio) e `o` (onion skin) non sono sulla barra. Sono nell'aiuto: tieni premuto **F12**. La barra termina con il chip F12 keys. Fai clic su di esso, oppure tieni premuto F12, per vedere ogni tasto della pagina.
+
+### Animazioni da un altro modello (Ctrl+Shift+I)
+
+Puoi copiare le animazioni di un altro modello sullo scheletro che modifichi. Premi **Ctrl+Shift+I**, oppure apri il menu del tasto destro della pagina animate e scegli *Animations from another model...*. Prima serve uno scheletro (F2). Poi:
+
+1. Un elenco mostra i modelli di `/bmm` e `/glb`. Scegline uno e premi **Invio**.
+2. bm Animator abbina le ossa dei due scheletri per nome. Un osso si abbina quando i nomi sono uguali. Altrimenti si abbina quando i nomi sono uguali in minuscolo, senza i segni `.`, `_` e `-`.
+3. Ogni animazione dell'altro modello è aggiunta al tuo scheletro, con i suoi tempi, la lunghezza e il loop. Le rotazioni delle ossa abbinate sono copiate. Le traslazioni sono scalate con il rapporto delle due altezze (l'altezza del tuo scheletro divisa per quella dell'altro). Un osso senza abbinamento resta nella posa di riposo.
+4. La riga di stato dice, per esempio, `3 animations, 18 bones matched, missing: tail ear`. `missing` elenca le ossa del tuo scheletro che non hanno avuto un abbinamento.
+
+Le nuove animazioni prendono il nome della sorgente. Se il nome è già usato, bm Animator lo rende diverso. La prima nuova animazione è quella scelta. È un solo passo di annullamento. Uno scheletro può avere al massimo 255 animazioni. Se l'altro modello non ha scheletro, o non ha animazioni, o nessun osso con un nome che si abbina, un messaggio lo dice e non si aggiunge niente.
 
 ## F4, sprites
 
@@ -196,6 +236,7 @@ In modalità pelle: le frecce scelgono una faccia, spazio la segna, `c` segna qu
 ## Avvertenze
 
 - [DA COMPLETARE: il mouse. La guida della suite dice che Animator non lo usa ancora, ma il codice ha gestori del mouse (clic su un osso, trascinamento per spostare o ruotare, clic sulla timeline); da verificare sulla console]
+- In una riga di dialogo (per esempio il nome del file), un clic mette il cursore tra le lettere.
 
 # Ossa e rigging
 
@@ -213,6 +254,7 @@ Lo scheletro permette a un modello di avere tante animazioni a basso costo: il g
 - **n** su un modello vuoto crea un osso, `root`, dal fondo del modello fino a metà della sua altezza. Ogni **n** successivo aggiunge un figlio dell'osso scelto, lungo circa mezza unità nella stessa direzione.
 - Al massimo **64** ossa in uno scheletro.
 - Le giunture nello stesso punto si muovono insieme: una catena resta unita quando sposti una giuntura.
+- Una spalla o un'anca non è all'estremità del genitore. Crea l'osso con **n**, sposta la sua coda, poi scegli la sua testa con **Tab** e premi **j**. Ora **w a s d r f** spostano solo questa testa. Il genitore resta lo stesso, la coda resta ferma e le animazioni conservano le chiavi. Un osso non può essere più corto di 1/16. Premi **j** di nuovo per riunire le giunture. Ogni spostamento è un passo di **Ctrl+Z**.
 - **x** elimina un osso: i suoi figli passano al suo genitore e le sue facce seguono il genitore (o il primo osso). Eliminando l'unico osso si toglie lo scheletro.
 - **m** copia l'osso e i suoi figli sull'altro lato (x specchiato). I nomi finiscono in `.L` e `.R`; un osso senza lato ancora riceve `.L` se sta sul lato x positivo. Anche le pose delle animazioni vengono specchiate. Le facce sull'altro lato non si muovono da sole: rifai la pelle con **k** o assegnale con **a**.
 - Il genitore di un osso si sceglie tra le ossa che lo precedono nell'elenco.
@@ -222,8 +264,10 @@ Lo scheletro permette a un modello di avere tante animazioni a basso costo: il g
 - **k** dà ogni faccia al suo osso più vicino: parti rigide, adatto a robot e personaggi squadrati.
 - **K** dà ogni angolo al suo osso più vicino: il modello si allunga alle giunture.
 - In modalità pelle (**v**), se hai segnato delle facce, **k** e **K** lavorano solo su quelle.
+- **t** prova la pelle. Piega ogni osso a turno di 45 gradi (attorno a x e attorno a z) e segna in rosso le facce che si rompono: una faccia con un lato che cresce oltre 1,6 volte la sua lunghezza (si allunga), o un angolo condiviso con una faccia di un altro osso che si stacca di più del 2% dell'altezza del modello (la pelle si strappa). La riga di stato dice quante facce sono rosse e quale osso, piegato, ne segna di più, oppure che la pelle regge. Premi **t** di nuovo per spegnere la prova. Poi scegli le facce rosse con **v** e dalle a un osso con **a**.
+- La pelle automatica (**k**, **K**) spegne la prova.
 
-![La pagina rig (F2): le ossa di un modello e i loro nomi nell'elenco](shots/editor-animator-rig.png)
+!La pagina rig (F2): le ossa di un modello e i loro nomi nell'elenco
 
 ## Provalo, passo per passo
 
@@ -255,18 +299,32 @@ Un ciclo di camminata sono poche pose. Tu fai le pose, bm Animator fa il movimen
 - **Ogni rotazione di un osso è un keyframe** all'istante corrente: ruota l'osso e il keyframe c'è.
 - **g** fa passare gli stessi tasti da ruotare a spostare l'osso (un piccolo passo; nient'altro cambia).
 - **Loop** attivo: dopo l'ultimo keyframe l'animazione prosegue verso il primo, sul resto della durata. Un'animazione in loop non ha bisogno di un keyframe all'ultimo fotogramma.
-- **i** sceglie come va il movimento tra due keyframe: lineare, morbido (lento a entrambe le estremità) o a scatti (la posa salta).
+- **i** sceglie come va il movimento tra due keyframe. Ogni pressione passa al successivo di cinque modi: lineare, morbido (lento a entrambe le estremità), a scatti (la posa salta), entrata lenta (ease-in: parte piano) e uscita lenta (ease-out: arriva piano).
+- **Attenzione:** un kernel precedente a ease-in ed ease-out rifiuta una cartuccia che ha un'animazione con uno di questi due modi. Mostra il messaggio `bad skeletons (ANIM)` e la cartuccia non si carica. Aggiorna il kernel, oppure resta su lineare, morbido e a scatti.
 - **<** e **>** accorciano e allungano l'animazione di un fotogramma. Non può diventare più corta del suo ultimo keyframe.
 - `,` e `.` saltano tra i keyframe. `(` e `)` spostano di un fotogramma il keyframe su cui sei.
 - L'unico keyframe rimasto di un'animazione non si può togliere (`the last keyframe stays`).
 - Premere **Backspace** una volta chiede conferma; la seconda pressione elimina l'animazione.
 - Al massimo **255** animazioni per modello.
 
+## IK a due ossa
+
+Con la maniglia IK non giri gli ossi uno per uno. Sposti la mano o il piede, e bm Animator gira gli ossi sopra di essa.
+
+- Scegli un osso che ha un genitore e un nonno (una mano, un piede) e premi **t**. La maniglia sta sulla testa dell'osso scelto. Una croce mostra il bersaglio. La voce di menu è `IK handle`; con la maniglia accesa diventa `IK off`.
+- Se l'osso non ha genitore e nonno, un messaggio lo dice e la maniglia resta spenta.
+- **w s a d q e** ora spostano il bersaglio, non l'osso. I tasti maiuscoli fanno un passo di un terzo. Anche il gamepad e il trascinamento del mouse spostano il bersaglio allo stesso modo.
+- Dopo ogni spostamento, bm Animator mette i keyframe sul genitore e sul nonno al tempo corrente. L'osso scelto mantiene la sua rotazione nel mondo. Il ginocchio o il gomito si piega verso la piega che ha la posa di riposo.
+- Se il bersaglio è troppo lontano, l'arto va dritto verso di esso e non si allunga. Lo schermo mostra `OUT OF REACH`.
+- Ogni spostamento è un passo di annullamento. Il risultato sono normali keyframe di rotazione, quindi l'animazione gira uguale ovunque.
+- Il bersaglio non viene salvato. Premi di nuovo **t** per spegnere la maniglia.
+- Il tasto **i** resta il tasto della curva. La maniglia IK sta su **t**.
+
 ## Onion skin
 
 **o** mostra le ossa del keyframe precedente e di quello successivo accanto alla posa corrente, in due colori. Usala per vedere da dove viene il movimento e dove va.
 
-![La pagina animate (F3): la timeline con i keyframe e l'elenco delle animazioni](shots/editor-animator-animate.png)
+!La pagina animate (F3): la timeline con i keyframe e l'elenco delle animazioni
 
 ## Provalo, passo per passo
 
@@ -288,7 +346,7 @@ Premi **o** e avanza con `,` e `.`: le ossa colorate mostrano le pose prima e do
 
 Per i giochi 2D, la pagina **sprites** disegna un'animazione con il motore 3D della console e mette i fotogrammi nello **sprite sheet**, pronti per `zspr()`. Può anche creare i **box** di ogni fotogramma dalle ossa.
 
-![La pagina sprites (F4): le impostazioni e l'anteprima con i suoi box](shots/editor-animator-sprites.png)
+!La pagina sprites (F4): le impostazioni e l'anteprima con i suoi box
 
 ## Le impostazioni
 
@@ -328,7 +386,7 @@ Premi **Invio**. Lo schermo dice `drawing the sprites...` mentre lavora, a tappe
 
 - Gli sprite vanno **sotto ciò che lo sheet ha già**, allargando lo sheet se serve (mai oltre 4096 pixel).
 - Una riga di fotogrammi per direzione: il fotogramma `f` della direzione `d` sta a `x0 + f * size`, `y0 + d * size`.
-- La pagina aggiunge allo sheet una **zona**, col nome del modello e dell'animazione in minuscolo (`model_animation`, fino a 16 caratteri), con il numero di fotogrammi e la velocità (fotogrammi divisi per la durata dell'animazione). Una zona con lo stesso nome viene sostituita.
+- La pagina aggiunge allo sheet una **zona**, col nome del modello e dell'animazione in minuscolo (`model_animation`, fino a 16 caratteri), con il numero di fotogrammi e la velocità (fotogrammi divisi per la durata dell'animazione). Una zona con lo stesso nome viene sostituita. Se era una zona stack, conserva le sue fette quando la nuova zona sta ancora nello sheet.
 - I box sono creati nella sessione dell'editor (sezione BOXES della cartuccia), per la zona, fotogramma per fotogramma (dal fotogramma 1), presi dalla prima direzione. Non è confermato che Ctrl+S li scriva nel file.
 - Una riga in basso mostra la zona e la chiamata `sspr()` per disegnare i fotogrammi.
 
@@ -360,8 +418,8 @@ Rinomina un osso in `sword` in F2, rifai il bake e guarda l'anteprima: il suo bo
 ## Da sapere
 
 - Un file aperto e salvato senza modifiche resta identico.
-- **Salva con nome** (`Ctrl+Shift+S`) chiede un nome 8.3; il file va in `/carts` con l'estensione `.BME`.
-- Un gioco (`.bm`, `.b16`) non viene mai sovrascritto: il primo salvataggio crea una copia `.BME`.
+- **Salva con nome** (`Ctrl+Shift+S`) chiede un nome 8.3; il file va in `/bme` con l'estensione `.BME`.
+- Un gioco (`.bm`) non viene mai sovrascritto: il primo salvataggio crea una copia `.BME`.
 - **F5** salva prima e avvia il progetto. Start + Select (o Ctrl+Esc) esce dal gioco e ti riporta alla stessa pagina.
 - Per creare il gioco finito usa **bm SDK** (Build, `Ctrl+B`): scrive il `.bm`. Il menu di bm Animator non ha una voce di build.
 - Quando l'animazione è per un gioco tenuto nel repository, modelli e scheletri vengono salvati dalla console e messi in `carts/<game>/` come `models.bm`; `make` li porta nella cartuccia.
@@ -371,6 +429,20 @@ Rinomina un osso in `sword` in F2, rifai il bake e guarda l'anteprima: il suo bo
 1. Premi **Esc**. Il menu elenca Continue, Open, Save, Save as, Try the game, Open in bm Studio ed Exit.
 2. Scegli **Save as...** e scrivi un nome come `HERO`.
 3. La riga di stato dice `saved` e il percorso. Il titolo del menu mostra il file senza `*modified*`.
+
+## Importare un .glb
+
+La scheda SD ha due cartelle per i modelli. `/glb` contiene i file `.glb` che copi lì; bm Animator li legge soltanto. `/bmm` contiene i modelli convertiti (`.bmm`); bm Animator li scrive lì. Tutti i nomi sono in minuscolo.
+
+1. Premi **Ctrl+I**, oppure scegli **Import a model...** nel menu (Esc). Sul pad, premi Y + B per il menu.
+2. L'elenco mostra `/bmm` e `/glb`. Un nome segnato `.glb: converted to /bmm` non ha ancora un `.bmm`.
+3. Scegli un `.bmm` per leggerlo. Scegli un `.glb` per convertirlo: bm Animator scrive `/bmm/NAME.bmm` e aggiunge il modello al progetto.
+4. Se il nome ha più di 8 caratteri, o `/bmm` ha già quel nome, bm Animator chiede un nuovo nome (da 1 a 8 tra a-z, 0-9, `_` e `-`).
+5. La riga di stato mostra i vertici e i triangoli. Se il file non va bene, mostra il messaggio della console, per esempio il limite del formato di 65535 vertici o triangoli.
+
+Un `.glb` dà colori piatti e nessuno scheletro: creane uno nella pagina rig (F2). Un `.bmm` con uno scheletro lo conserva, e le sue ossa compaiono nella riga di stato. La texture di un `.bmm` va sullo sheet del progetto solo quando lo sheet è vuoto; altrimenti le facce che la usavano diventano grigie. Un `.bmm` con più modelli dà il primo.
+
+**Ctrl+E**, o **Export to /bmm...** nel menu, scrive il modello corrente in `/bmm/NAME.bmm` con scheletro e animazioni; se il file c'è già, bm Animator chiede prima di sostituirlo.
 
 # Usare l'animazione in un gioco
 
@@ -397,7 +469,7 @@ Tutte queste chiamate sono nell'API 3D (`docs/api/light3d.md`). L'animazione fa 
 | Chiamata | Cosa fa |
 |---|---|
 | `zspr(name, x, y, [frame, flip_x, flip_y, zoom])` | disegna la zona creata da F4; senza `frame` va da sola alla velocità della zona |
-| `zone(name)` | `x, y, w, h, frames, fps` della zona |
+| `zone(name)` | `x, y, w, h, frames, fps, slices` della zona; `slices` è 0 se non è una zona stack |
 | `zboxes(name, [frame, kind])` | i box della zona: `{x, y, w, h, kind, frame}`, con `kind` `"hurt"`, `"hit"` o `"body"` |
 
 `zspr` disegna la prima direzione. Per le altre direzioni usa `sspr()` con i numeri della riga in basso in F4.
@@ -423,7 +495,7 @@ function _draw()
 end
 :::
 
-È lo schema di `carts/village` del repository. Per gli sprite 2D:
+È lo schema di a file that is not in this repository del repository. Per gli sprite 2D:
 
 ::: copy
 zspr("hero_walk", 100, 80)

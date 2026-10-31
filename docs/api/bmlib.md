@@ -158,10 +158,155 @@ end)
 | `P:burst(x, y, n, [opt])` | `n` particles from `x, y`: `speed` (2), `angle` and `spread` (in radians; all round if missing), `life` (0.5 s), `color` or `colors`, and the options of `:add` |
 | `P:update()` / `P:draw()` | in `_update` / in `_draw` |
 | `P:count()` / `P:clear()` | how many there are / all away |
+| `lib.particles3d([max])` | 3D sibling of `lib.particles` that wraps the 3D particle functions; pool of at most `max` particles (default 1024) |
+| `P3:add(x, y, z, vx, vy, vz, life, color)` | adds one 3D particle |
+| `P3:burst(x, y, z, n, o)` | `n` particles from `x, y, z`: `o.speed` (2), `o.life` (30 updates), `o.color` (0xFFFFFF), `o.up` (0) |
+| `P3:update([gravity])` | steps the 3D particles with `gravity` (0.02) |
+| `P3:draw([radius])` | draws the 3D particles with `radius` (0.1) |
+| `P3:count()` | how many live 3D particles |
+
+`lib.particles3d` is the 3D sibling of `lib.particles` and wraps the 3D particle functions (`particles`, `particles_add`, `particles_step`, `particles_draw`, `particles_count`).
 
 ```lua
 local fx = lib.particles(300)
 fx:burst(x, y, 20, { speed = 3, colors = { 0xFFFFFF, 0xFFD050, 0xFF6020 }, gravity = 0.1 })
+
+local p3 = lib.particles3d(500)
+p3:burst(x, y, z, 20, { speed = 2, life = 30, color = 0xFFA020 })
+p3:update()
+p3:draw()
+```
+
+### Entities
+
+`lib.world(kinds)`: the list of the things in a game (the player, foes, bullets, pickups) with
+the loop that every game wrote again. `kinds = { name = { ... } }` says what each kind is. An
+entity reads the fields it does not hold from its kind, so a spawn makes one table and copies
+nothing. The fields of a kind: `w`, `h` (the box, `x`, `y` the top left), `hp`, `team`, `dmg`
+(damage on contact), `pierce`, `ttl` (frames), `layer` (draw order, 0 first), and the functions
+`update(e, world)`, `draw(e, world)`, `hurt(e, by, n)` and `die(e, world)`. Every entity has
+`kind`, `age` (frames), `x`, `y`, `vx`, `vy` (pixels per frame); `e.dead` marks the end.
+
+| Function | Description |
+|---|---|
+| `W:spawn(name, [props])` | a new entity of kind `name` with the fields in `props`; it updates from the next frame; returns it. An unknown kind is an error |
+| `W:load(rows)` | spawns from data: rows `{kind, x, y, [props]}` or `{kind = , x = , y = , ...}` (a wave, a level) |
+| `W:update()` | in `_update`: each entity ages, moves by `vx`, `vy`, loses `ttl` and `invuln`, runs its `update`; then the dead leave, `die` runs once for each (a spawn made in `die` starts next frame) |
+| `W:fight()` | in `_update`, after `W:update()`: each entity with `dmg` hurts each entity of another `team` with `hp` and a box that touches it, once a frame; the attacker dies unless `pierce`. Returns the number of hits. It makes no table |
+| `W:hurt(e, n, [by])` | `n` damage: runs `e:hurt(by, n)`, and at `hp` 0 the entity dies. Nothing happens while `e.invuln` (frames) is above 0. Returns `true` if it hurt |
+| `W:kill(e)` / `W:clear()` | `e` leaves at the end of the update / all leave (no `die`) |
+| `W:find(name)` / `W:count(name)` | the first live entity of kind `name` / how many |
+| `W:draw()` | in `_draw`: the `draw` of each entity, the lower `layer` first |
+
+### Sound events
+
+`lib.sounds(events)`: the sounds of a game by name. The rules say `snd:play("hit")`; the voices,
+notes and tunes stay in one table. Each event has one of these fields:
+
+| Field | Plays |
+|---|---|
+| `note = { voice, hz, ms, wave, vol }` | a `note()` |
+| `sfx = n`, `semis`, `vol` | effect `n` of the sound bank (`sfx`) |
+| `play = sound`, `pnote`, `ms`, `vol` | an instrument or a sound of the bank (`play`) |
+| `tune = { {hz, frames}, ... }`, `voice` (3), `wave` (`TRIANGLE`), `vol` (120), `ms` (14 per frame) | a short tune, one note after the other; `hz` 0 is a rest |
+
+Any event can have `gap` (frames before it can sound again) and, for a tune, `prio` (0 by
+default).
+
+| Function | Description |
+|---|---|
+| `snd:play(name)` | plays the event. Returns `false` if the name is unknown, the `gap` is not over, or a tune of a higher `prio` is running. A new tune replaces a tune of the same or a lower `prio`; its first note sounds in the next `snd:update()` |
+| `snd:update()` | once a frame, first in `_update`: counts the frames and plays the next note of the tune |
+| `snd:stop()` | stops the tune |
+
+`lib.sounds(events, api)` takes `api = { note =, sfx =, play = }` to replace the sound functions
+(tests). `snd:play` and `snd:update` make no table.
+
+### Save slots
+
+Slot 1 of the cartridge is for `lib.store` (settings and records). `lib.slots()` gives the
+slots 2 to 8 as the game's slots 1 to 7 (games in progress).
+
+| Function | Description |
+|---|---|
+| `S:get(i)` | the table saved in slot `i`, or `nil` |
+| `S:put(i, t)` | saves table `t` in slot `i` (at the end of a match, not in every frame): `true`, or `false` and the reason |
+| `S:used(i)` | `true` if slot `i` holds a save |
+| `S:del(i)` | empties slot `i` |
+| `S:list()` | the slots in use as `{ {slot = i, bytes = n}, ... }` for a "load game" page; it makes a table, so call it when the page opens |
+
+A slot out of 1 to 7 is an error. `lib.slots(api)` takes `api = { save =, saved =, saves =, delsave = }` (tests).
+
+`W.list` is the plain list (read it in your loops; do not remove from it). For fighters with
+frame data (startup, active, recovery) use `lib.hits` (above): `W:fight()` is for contact damage.
+`tests/gamekit/cart.lua` is a whole small game on the kit (states, input, tween, timer, record).
+
+### Elastic layout
+
+`lib.layout` (2026-10-23) cuts the screen into regions on the text grid (the cell of `font()`:
+8 x 16 pixels). Each call reads `SCREEN_W` and `SCREEN_H`, so an app that calls it again lays
+itself out again when `screen()` changes the size. A region is a table `{x, y, w, h}`. The
+SDK uses it (1280x720 where the GPU draws, 640x360 otherwise).
+
+| Function | Description |
+|---|---|
+| `lib.layout.rect(x, y, w, h)` / `lib.layout.screen()` | a region / the whole screen now |
+| `lib.layout.split(r, "v", sizes)` | `r` cut top to bottom (`"h"`: left to right). A size is pixels (`16`), rows or columns of text (`"3r"`, `"20c"`) or a share of what is left (`"*"`, `"2*"`). Shares fall on whole cells, the last one takes the rest. More than fits is an error |
+| `lib.layout.side_by_side(r, [cols])` | `r` cut into a panel and the work region. The panel has `cols` columns (16 on a screen narrower than 480 pixels, 30 otherwise) |
+| `lib.layout.cols(r)`, `lib.layout.rows(r)`, `lib.layout.row(r, i)` | whole columns and rows of text in `r`; `x, y` of the text row `i` |
+| `lib.layout.snap(x)`, `lib.layout.fit(s, cols)`, `lib.layout.wrap(s, cols, [n])` | `x` on the next column; `s` cut to `cols` characters; `s` in lines of at most `cols` characters, cut between words |
+| `lib.layout.inside(a, b)`, `lib.layout.overlap(a, b)` | with regions (`lib.inside` and `lib.overlap` take numbers) |
+| `lib.layout.narrow([w])` | the screen is too narrow for panels side by side |
+| `lib.layout.on_resize(fn, [now])` / `lib.layout.poll()` | `fn(w, h)` runs when the size changed. Call `lib.layout.poll()` first in `_update` and `_draw`: it runs the functions when `screen()` took effect (the next frame). With `now` the function runs once at once |
+| `lib.layout.auto()` / `lib.layout.switch()` / `lib.layout.label()` / `lib.layout.is_big()` | the suite's screen choice, the key `bm_screen` of `bm/config.txt` (`1280x720`, `640x360`, none = 1280x720 where the GPU draws). `auto()` once when the cart loads; `switch()` toggles and saves it (a menu row, `label()` is its text); `is_big()` is 1280x720 now. Every tool is `bm ...`, so `cart_config` lets them share the key |
+| `lib.layout.big_ok()` / `lib.layout.want(w, h)` | whether the GPU draws; `screen(w, h)`, but a size over 640x360 only where the GPU draws. `true` if the screen is that size now or from the next frame |
+
+```lua
+local L = require("bmlib").layout
+local W, H, body
+local function relayout(w, h)
+  W, H = w, h
+  local bars
+  body, bars = table.unpack(L.split(L.rect(0, 0, w, h), "v", { "*", "3r" }))
+end
+L.on_resize(relayout, true)
+L.want(1280, 720)               -- 720p with the GPU, else it stays
+function _update() L.poll() end -- relayout runs at the frame the size changes
+```
+
+Variables that hold `W`, `H` or a size cut from them (`local W = SCREEN_W` at the top of a
+file) stay at the old size. Keep them in `relayout`. `bm3d.resize(w, h)` does it for the
+suite's frame (`HINT_Y`, `STATUS_Y`, `FOCAL`).
+
+### View: one game, many screens
+
+`lib.view`, `lib.anchor`, `lib.safe_clip` and `lib.fit` (2026-10-25) place the HUD in the
+safe area (`safe_area()`: the part of the screen with the aspect of the cartridge's header
+size, in the middle). Call them in `_draw`, or in `_screen(w, h)`. Do not call them once at
+load: `screen()` can change the size.
+
+| Function | Description |
+|---|---|
+| `lib.view()` | a table `{x, y, w, h, scale, wide, square, tall}`. `x, y, w, h` are the safe area. `scale` is how many screen pixels one pixel of the design gets (the header size): `1.0` on the design size, `2.0` for a 640×360 game on 1280×720. `wide`, `square` and `tall` say the shape of the **screen** (`aspect()`): one of them is `true` |
+| `lib.anchor(where, w, h, [mx, my])` | `x, y` for an element of size `w` by `h` in a place of the safe area. `where` is `"tl"` `"t"` `"tr"` `"l"` `"c"` `"r"` `"bl"` `"b"` `"br"` (top, middle, bottom by left, middle, right). The margins `mx, my` (0) are the distance from the edges the element touches; a centred axis has no margin. Another `where`, or a `w` or `h` that is no number, is an error |
+| `lib.safe_clip()` | `clip()` to the safe area. It returns `x, y, w, h`. Call `clip()` after the drawing to get the whole screen back |
+| `lib.fit(dw, dh)` | `scale, x, y`: a layer made for `dw` by `dh` pixels (a menu, a picture) fits whole in the safe area, in the middle. Draw it with `scale` and put its corner at `x, y`. `scale` is the smaller of the two ratios; it is not a whole number (use `math.floor(scale)` for pixel art). A size of 0 or less is an error |
+
+```lua
+local lib = require "bmlib"
+local hud_x, hud_y
+
+function _screen(w, h)                    -- the size changed: lay out again
+  hud_x, hud_y = lib.anchor("tr", 64, 16, 4, 4)
+end
+
+function _draw()
+  cls(0)
+  lib.safe_clip()                         -- the game stays in its own aspect
+  -- ... the game
+  clip()
+  print("SCORE", hud_x, hud_y, 0xFFFFFF)
+end
 ```
 
 ### Camera
@@ -203,6 +348,7 @@ function _draw() S:draw() end
 
 | Function | Description |
 |---|---|
+| `lib.input([over])` | the games' input standard (games-input-standard): puts `confirm`, `cancel`, `pause` and the actions of the game's scheme on the keymap and returns the table. `over.scheme` picks the scheme: `"scroller"` (default: `act1` jump = B, `act2` attack = Y, `act3` = the A/B button that is not ok, `act4` = X, shoulders L1/R1), `"topdown"` (`act1` = B, `act2` = the other A/B button, `act3` = Y, `act4` = X) or `"stick"` (`act1` R2, `act2` L2, `act3` L1, `act4` R1, `act5`..`act8` = B, A, Y, X); `lib.input_scheme` tells which runs. The other keys of `over` (`{ act3 = "x" }`) change single actions and are listed in `lib.input_exceptions` (declare them in the game's the development notes<game>.md`). `lib.INPUT_STD` is the common part (`confirm`, `cancel`, `pause`) |
 | `lib.textw(text, [scale])` | width and height in pixels with the font of `print` now (the longest line) |
 | `lib.printc(text, y, [c, scale, x, w, grid])` | in the middle of the screen (or of `x..x + w`); `grid`: on the font's columns (text that stays still, as the menus). Returns the x |
 | `lib.printr(text, x, y, [c, scale])` | ending at `x` (numbers aligned to the right) |

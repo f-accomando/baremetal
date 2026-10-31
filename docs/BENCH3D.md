@@ -1,6 +1,8 @@
 # 3D Bench
 
-bm's single benchmark of its 3D capabilities: *Dev > 3D Bench*, or the `j` key of the
+
+
+bm's single benchmark of its 3D capabilities: *Settings > System > Utilities* on the Pi (the Dev tab on the RGB30), or the `j` key of the
 monitor. Code: `src/bm/b3d.c` (portable), `src/kernel/b3dpi.c` (the Pi),
 `tests/bm/b3d_host.c` (the PC, `make test-b3d`).
 
@@ -15,12 +17,12 @@ reproduce (`docs/DRIVERS.md`):
 - **GPU+AA**: the same with 4× MSAA;
 - **GPU+VS1**: bm3d 3.0, the vertex shader for the scenery;
 - **GPU+VS**: bm3d 3.4, the vertex shader for everything;
-- **GPU+VS+Q**: bm3d 4.1, the same with the queued frame (M35; only in the `queue` test);
+- **GPU+VS+Q**: bm3d 4.1, the same with the queued frame (bm3D 4.1; only in the `queue` test);
 - **GPU+FS2**: the textured pixel shaders with two threads (bm3d 5.3, all the 3D ones from
   6.3), in the tests with textures; from 6.4 they are the default, and the GPU row reproduces them with one thread.
   The colour ones stay single-threaded (with two threads the Pi measured them 4–5% slower).
 - **GPU+VS+FS2**: the driver as games have it from 6.6 (vertex shader for all models and
-  textured shaders with two threads); it runs in every GPU test (not in `bilinear`, which tests
+  textured shaders with two threads); it runs in every 3D Bench test (not in `bilinear`, which tests
   an option) and the score uses it.
 - **GPU+VS+A8**: GPU+VS+FS2 with compact attributes (bm3d 7.1, `gpu3d_attr`: colour and light
   bytes packed in the corners); in `spheres`, `heroes`, `match`, `big`, `big_logic`.
@@ -41,9 +43,9 @@ by something else, like the network printing during a monitor line, does not mov
 starts from the **last** step under the limit: a slow step before a heavier one that fits
 had been slowed down by something else (on the Pi, on 2026-10-05, `quad_flat` with the GPU: 25 quads yes,
 33 no, 44 yes, and the report said 28.7). The time of a frame includes the copy to the
-screen, as in the stress test.
+screen, as in the old stress test (removed on 24 Oct 2026).
 
-The spheres and the quads are the scenes of the stress test, at the same resolution (640×360): this way
+The spheres and the quads are the scenes of the old stress test, at the same resolution (640×360): this way
 the Pi's numbers with the earlier drivers are the historical bars.
 
 ## The tests
@@ -68,17 +70,18 @@ the Pi's numbers with the earlier drivers are the historical bars.
   z preserved);
 - `match`: a synthetic match, map of 100 pieces, heroes with shadows, a
   first-person model and a HUD;
-- `mix`: everything together, like a game (M41, for the score): n slices of a road, each one a piece
+- `mix`: everything together, like a game (for the score): n slices of a road, each one a piece
   of map with baked light under a hero (in turn Gouraud with highlights, with the texture, with the
   skin on two bones) with its shadow, a fence of texels with holes, a screen-door glass and a
   crate; the ground under the camera across the near plane, sky, rim, 4 lamps and fog, a
   first-person model at the bottom right and a HUD of sprites and text over the 3D;
 - `queue`: Gouraud spheres plus a fixed ARM workload after the 3D (4 million instructions,
   a game's logic), with GPU+VS and GPU+VS+Q: in the queue the ARM works while the GPU draws;
-- `gpu2d`: sprites and text over the 3D (M37; with GPU+2D in the GPU job, otherwise the ARM);
-  `bilinear`: quads with filtered textures (M37, an option off by default);
-- `big`, `big_logic`: models of 10 080 triangles on a map of 14 112 (M39), the second with the
-  logic of `queue`.
+- `gpu2d`: sprites and text over the 3D (bm3D 4.8; with GPU+2D in the GPU job, otherwise the ARM);
+  `bilinear`: quads with filtered textures (bm3D 4.9, an option off by default);
+- `big`, `big_logic`: models of 10 080 triangles on a map of 14 112 (larger indexed meshes, bm3D 5.0), the second with the
+  logic of `queue`;
+- the 2D scenes `map8`, `sprites`, `stack`, `fade`, `light` (see *The 2D scenes*), `herotris`, `cel` (see *herotris*), `stress` (see *stress*) and `ht_p100`, `ht_p100m`, `ht_p10`, `ht_p10m`, `ht_p1` (group `htmap`, see *herotris with the map in pieces*): they run only when `tests=` names them.
 
 The maximum loads are far beyond what the drivers do today (up to 8000 spheres, 512
 heroes, 40 000 calls): they leave headroom for the drivers to come.
@@ -91,6 +94,14 @@ fps, triangles drawn, vertices set up by the ARM, pixels (of the ARM), GPU ms
 spent waiting for the GPU (and those separately), instructions per triangle and per element,
 data **cache misses**. The instructions and the misses come from the ARM1176 counters
 (`src/kernel/pmu.c`), only on the real Pi (QEMU does not have them).
+
+## The pixel check (RGB30)
+
+For each GPU row, the 3D Bench draws the first frame on the GPU, redraws it on the ARM and compares the two.
+Report line `K`: pixels of the scene, pixels that differ, pixels that differ by more than 2 steps, largest step.
+Line `KD` gives the box of the differences and sample pixels. Lines `KG` give a grid of 16 by 8 pixels, GPU and ARM.
+Line `KC` gives the pixels that are not the corner colour, GPU and ARM: with `KC` 0 0 the frame is blank and the check tries four times the load.
+Light rounding makes small differences. Do not trust a GPU score without its `K` line.
 
 ## The score
 
@@ -146,25 +157,29 @@ trial, off by default).
   white tick at the value of the previous report; in grey the numbers measured on the Pi with the
   earlier drivers (0.1, 0.2, 1.0: `docs/GPU-BENCHMARK-REPORT.md`); in red the hardware
   limit where there is one (the V3D: 1 Gpixel/s and 1.5 Gtexel/s according to Raspberry Pi; 3.0
-  million triangles per second measured by the `g` test); below, the table of
+  million triangles per second measured by the GPU test, removed on 24 Oct 2026); below, the table of
   statistics.
 
 Left/right change page, B (or Esc) exits.
 
 ## The reports
 
-Each run saves `bm/bench/3D0001.TXT`, `3D0002.TXT`… on the SD: a header (kernel,
+Each run saves `bm/bench/3d0001.txt`, `3d0002.txt`… on the SD: a header (kernel,
 driver, date if there is a network, machine, GPU status) and one CSV line per test and profile
 (`R,test,profile,version,n60,n30,…`; the columns are in the `columns` line). The next
 run reads the last report and compares against it (white ticks, "x last" column). To
 keep their history in the repository, copy them to `docs/bench/`.
 
-The last five columns are measurements only (they change nothing): `clean_kcyc` and
+The columns `bin_us` and `rnd_us` (last two) are the binner's and the renderer's time of the GPU jobs, in
+microseconds a frame (the jobs' `bin_us` and `render_us` of `gpu3d_stats_t`, the same counters as `gpu_ms`). They are 0 on the ARM
+and small on the PC. With the queue, jobs that had ended before the ARM looked are not timed (see below): read both columns on the profiles without `Q`.
+
+Five columns before them are measurements only (they change nothing): `clean_kcyc` and
 `inval_kcyc` are the ARM cycles (thousands, a frame; 0 without the PMU) of the whole data
 cache clean + invalidate before each job and after it; `pool_kb` and `ovf_kb` the most of
-the binner's tile-list pool (4096 KiB) and of its overflow area (2048 KiB) one job used,
+the binner's tile-list pool (4096 KB) and of its overflow area (2048 KB) one job used,
 from `BPCA` after the job; `ovf_jobs` the jobs whose binner went into the overflow. The
-GPU test (`g`) and the session report print the binner's figures too.
+session report prints the binner's figures too.
 
 **The cost of a pixel.** The fill tests (`quad_*`, `bilinear`) and `gpu2d` count the pixels a
 frame asks to fill (`fill_px`: 320x180 a quad; for `gpu2d` the area of its sprites and text) and
@@ -193,7 +208,7 @@ So runs can be compared, every report says the 3D options in force on one `optio
 sort=0 attr=0 etc1=0` (`gpu3d=off` without the V3D), plus `3d= later= 2d= impostor= fast=` in the session
 report (second line, as the run ended) and on top of a game's `report()` (the Overbit
 bench's `overbit-bench`). The 3D Bench takes it at its start (each profile then sets its
-own), the GPU test (`g`) prints it at its end.
+own).
 
 ## A part, from the monitor
 
@@ -201,7 +216,7 @@ The monitor's command line (`:`) runs only some tests and profiles, without wait
 on the pages, and can queue other commands:
 
 ```
-:gpu; b3d tests=match,quad_tex profiles=GPU,FS2; send
+:b3d tests=match,quad_tex profiles=GPU,FS2; send
 ```
 
 `tests=` takes the test ids (`spheres`, `match`, `quad_tex`…), `profiles=` the profile
@@ -210,10 +225,251 @@ names (`GPU+FS2`) or the short ones of the summary (`FS2`); without them, everyt
 reboot (to try a game), `save` keeps it.
 
 The line can also be typed in the menu: the `:` takes it to the monitor. From the PC: `./easy_install.sh line
-"gpu; b3d; send"` (or `tools/bm_net.py IP --line "..."`) sends it and shows what the console
-writes until it says `the line is done`; in the easy_install monitor (6) paste `:gpu;
-b3d; send` and Enter. The console tells the PC where the keys go (the menu, which does not repeat them, or the
+"b3d; send"` (or `tools/bm_net.py IP --line "..."`) sends it and shows what the console
+writes until it says `the line is done`; in the easy_install monitor (6) paste `:b3d;
+send` and Enter. The console tells the PC where the keys go (the menu, which does not repeat them, or the
 monitor).
+
+## The 2D scenes
+
+Five tests measure 2D work, so a 2D change can be compared on the Pi Zero W. They are **opt-in**:
+the default run does not run them, and they are not in the score. Run them by name:
+
+```
+./easy_install.sh line "b3d tests=map8,sprites,stack,fade,light; send"
+```
+
+Each scene is fixed. The positions come from a hash of the item number and the frame number: no
+time, no random seed. The report has the usual fields (`ms`, `worst`, `instr`, `gpu_ms`,
+`clean_kcyc`, `inval_kcyc`) and a `P` line with `ns_px_frame`, the cost of one pixel of the
+frame. Compare the same test before and after a change, on the same console, ARM at 1000 MHz.
+
+| Test | Load `n` | Scene | Profiles |
+|---|---|---|---|
+| `map8` | layers, 1 to 8 | 8 layers of `map()` at 640x360, parallax scroll. Layers 0-2: every cell, opaque tiles. Layers 3-7: half the cells, tiles with holes (alpha). | ARM |
+| `sprites` | sprites, from 16 | 16x16 `sspr` with flip, half opaque and half with alpha. | ARM, GPU+2D |
+| `stack` | stacks, from 1 | `g16_stack`: stacks of 8 slices, three sizes, turning. A fixed pile. | ARM |
+| `fade` | lamps, from 1 | `g16_fade_glow` lamps and `g16_fade_apply` over the whole screen (the ARM path of `dark_end`). The `QPU` profile does the same fade through the QPU path (see *The fade on the QPU*). | ARM, QPU |
+| `light` | lamps, from 1 | `g16_light_add` lamps and `g16_light_apply` over the whole screen. | ARM |
+
+Every frame starts with `cls` of the 640x360 page. `fade` and `light` also draw 12 blocks of
+colour first, so the pass over the whole screen has a picture to work on. The cost of the `cls` is
+in every row, so compare rows of the same test only.
+
+## The fade on the QPU
+
+The profile `QPU` is a column of the `fade` test only. It draws the same frame as `ARM`, but the full-screen fade goes through the hook of `dark_end()` (`qpu_fade_hook`, `src/gpu/qpu.h`). The hook runs the fade on the QPUs in blocks of 32 pixels and falls back to the ARM version when a QPU run fails. The profile is **opt-in**: it runs only with `tests=fade`, and it is not in the score.
+
+The QPU path is on only with the config key `gpu3d_qpu=1` (default off). Without the key, the `QPU` profile runs the ARM fade and says so. The report has one extra line after the `qpu row` line:
+
+```
+qpufade key=1 path=qpu frames_qpu=<n> frames_arm=<n> n60_qpu=<n> ms_qpu=<ms> n60_arm=<n> ms_arm=<ms> (n60: lamps at 60 fps; ms: 1 lamp)
+```
+
+| Field | Meaning |
+|---|---|
+| `key` | 1 if `gpu3d_qpu=1` was set when the bench started, else 0. |
+| `path` | `qpu` if every frame of the `QPU` profile ran on the QPUs, `arm` if none did, `mixed` if both happened (a 3D job was running, or a run failed and the ARM took over). |
+| `frames_qpu`, `frames_arm` | the frames of the `QPU` profile on each path. |
+| `n60_*`, `ms_*` | the load at 60 fps (lamps) and the median frame time at 1 lamp, for `QPU` and for `ARM`. `ms` at 1 lamp is the figure to compare: it is the full-screen fade plus the fixed part of the frame (`cls` and the 12 blocks). The gain of the QPU is `ms_arm - ms_qpu`. |
+
+Measured on the Pi Zero W (22 Oct, one run, report `20261022-184933_bench3d_pi-zero-w_dev.txt` on the `reports` branch): `qpufade key=1 path=qpu frames_qpu=98 frames_arm=0 n60_qpu=14.3 ms_qpu=9.3 n60_arm=-1 ms_arm=20.4`. The full-screen fade with 1 lamp takes 20.4 ms on ARM (misses 60 fps) and 9.3 ms on the QPU (2.2 times faster). The QPU path reaches 14.3 lamps at 60 fps. Every frame ran on the QPU. Not verified on hardware beyond this one run.
+
+The names are the usual ones: `profiles=ARM,QPU` (letters and digits, comma only). The `R,fade,QPU` line is the same format as every `R` line.
+
+Run it on the Pi (monitor line; `set` changes the key until a restart, so put it first):
+
+```
+./easy_install.sh line "set gpu3d_qpu=1; b3d tests=fade profiles=ARM,QPU; send"
+```
+
+The PC test (`make test-b3d`) runs the profile with a stand-in hook and checks the line (`path=qpu`); the QEMU test `test_monitor_line` runs it without the key (`path=arm`). Neither measures a QPU time.
+
+## herotris
+
+`herotris` is stage 0 of the development notes. It is **opt-in** like the 2D scenes: the default run, the score and
+the old numbers do not change. It answers: how many triangles at 60 fps does a hero and a map hold, with a game's 2D and logic?
+
+```
+./easy_install.sh line "b3d tests=herotris; send"
+```
+
+Load `n` = sets (1 to 64). A set is a hero (1536 triangles, 16 bones, a 64x32 texture, lit, with its shadow) and a map of
+100 pieces of 50 triangles (baked light, two 64x32 sheets), so a step adds 6500 triangles (8036 with the shadow). The sets share
+the map's place and the camera sees them all. Each of the 16 parts of the hero is on one bone, so every face is on one bone: the
+mesh path of the vertex shader takes the mesh (it refuses a face on two bones unless the face is textured and lit).
+
+After the 3D job: 4M instructions of logic (`work`, as `queue`), then the 2D (two parallax bands, top opaque and bottom with holes,
+20 sprites and 3 lines of text). The 2D runs after the job and not inside the scene, as the 2D records of a game play after the job. With
+the queue profiles the ARM then does the logic while the GPU draws. The bands are drawn over the 3D, not behind it: a page cleared by
+the GPU job would lose the ARM's layer. Resolution 640x360 (the report says it on the `size` line; the bench has no 720x405 and no
+1080p mode). The bench steps the load up until the frame misses 60 fps.
+
+Profiles: `ARM`, `GPU`, `GPU+VS` (no FS2), `GPU+VS+FS2` (the driver as games get it), `GPU+VS+Q`, `GPU+VS+Q2`, `GPU+VS+A8` and
+`GPU+VS+A8+Q` (compact attributes with the queue; short name `VSAQ`). Run each three times. The ARM row can miss 60 fps at one set:
+its numbers then scale the first step (`tris60` of the `R` line).
+
+### The hero triangles at 60 fps (Q1)
+
+After the `P` lines the report has the `H` lines, one for each profile of `herotris`:
+
+```
+columns H,test,profile,sets60,hero_tris60,hero_shadow_tris60,submitted60,drawn60,ms,gpu_ms,arm_ms,mesh,probe_gltris,probe_meshes,vs_probe,later_submitted60,later_drawn60
+```
+
+| Column | Meaning |
+|---|---|
+| `sets60` | Sets a frame of 60 fps holds. |
+| `hero_tris60` | Hero triangles in them (1536 a set). `hero_shadow_tris60`: with the shadow, which is the hero drawn again. |
+| `submitted60` | Triangles given to r3d (hero, shadow, map). It is `tris60` of the `R` line. |
+| `drawn60` | Triangles r3d keeps after its clip and cull. The GPU throws back faces away later. |
+| `ms`, `gpu_ms`, `arm_ms` | At the last step of 60 fps. `arm_ms` is `ms` less the time the ARM waits inside `gpu3d_sync`. |
+| `mesh` | What the vertex shader did with one hero drawn alone before the ramp. `ACCEPTED`: the mesh path placed all 1536 triangles. `FALLBACK`: it placed 0, the triangles went one by one through the ARM. `PARTIAL`: some. `NA`: the profile has no vertex shader. |
+| `probe_gltris`, `probe_meshes` | The counters behind `mesh` (`gltris` and `glmeshes` of `gpu3d_stats_t`). |
+| `vs_probe` | `gpu3d_vshader()` of the start-up probe: 0 none, 1 scenery only, 2 heroes too. A profile that needs level 2 has no row if it is 1. The header line `vsprobe` shows it too. |
+| `later_*` | `GPU+VS+Q2` only. See below. |
+
+**Frame shown a frame later.** The bench has one page, so it cannot show a frame a frame later (`gpu3d_later`). The `later_` columns are a
+model of it: the frame costs the larger of the ARM side (`ms` less the wait in `gpu3d_sync`) and the GPU time (`gpu_ms`). The ramp
+is read again at 60 fps with these times. The model gives the best case. With the queue the job times are not exact (a job that ended before the ARM looked
+counts at the mean). Check the model with a cart that sets `gpu3d_later=1`.
+
+The four rows asked for: ARM, GPU, GPU+VS (level 2), and GPU+VS+Q2 (queue 2) with its `later_` columns.
+
+A note on the old numbers: before this change the 2D ran inside the scene, so the 3D job was flushed before the 2D, and the queue profiles
+had nothing to overlap. The `Q`, `Q2` and `VSAQ` rows of `herotris` are now different from the first runs. Do not compare them.
+
+### The cel shader (Q2)
+
+`cel` is an opt-in group of five tests, the same scene: `n` heroes (the textured hero, 1536 triangles, 16 bones, lit by the sun) in
+rows of 8. Profiles: `ARM` and `GPU+VS` (and `GPU+VS+FS2`, the driver as games get it).
+
+| Test | Light | Dither of the ARM raster |
+|---|---|---|
+| `cel_lit` | the sun, no cel | on |
+| `cel` | cel, 4 bands (`r3d_cel`, floor 0.35), flag `R3D_CEL` | on |
+| `cel_lit_nd` | the sun, no cel | off (`r3d_dither(0)`) |
+| `cel_nd` | cel, 4 bands | off |
+| `cel_outline` | the sun, no cel, outline: flag `R3D_OUTLINE`, colour 0x2030A0, width 0.03 (the inverted hull) | on |
+| `cel_flat_lit`, `cel_flat` | the flat hero (no texture, no smooth), the shine lights: lit, or 4 bands | on |
+
+```
+./easy_install.sh line "b3d tests=cel; send"
+```
+
+`tests=cel` runs the five. Since bm3d 7.5 the vertex programs of `GPU+VS` cut the light, so the cel hero keeps the mesh path there.
+`cel_flat_lit` and `cel_flat` (bm3d 7.24) have rows ARM, GPU and GPU+VS on the Pi and the RGB30 (heroes at 60 fps, 28 Oct 2026; Pi Zero W: ARM 5.3 and 5.3, GPU 8.5 and 8.4, GPU+VS 43.2 and 42.9, report `reports/dev-remove-render-bench/20261028-181729_bench3d_pi-zero-w_v0.2.5-1889-ga9b7ef79-dirty.txt`; RGB30: ARM 21.6, GPU 2.7, GPU+VS 6.8 for both): the Mali's vertex shader lights the flat hero, with or without bands. `cel_outline` draws the mesh again as a hull: its ms against `cel_lit` is the cost of the outline. The `ARM` rows are the ARM raster.
+After the `H` lines the report has the `C` lines, one for each profile and n from 1 to 4 (the same steps in the five tests):
+
+```
+columns C,profile,n,tris,lit,cel,lit_nd,cel_nd,outline,cel_over_lit,cel_nd_over_lit_nd,outline_over_lit
+```
+
+`lit`, `cel`, `lit_nd`, `cel_nd`, `outline` are the ms a frame of the five tests. `-1.00` is a step that did not run. The ratios are
+`cel / lit`, `cel_nd / lit_nd` and `outline / lit`. The `R` lines of the tests have the usual fields (`n60` is the heroes at 60 fps).
+
+### Both together
+
+```
+./easy_install.sh line "b3d tests=herotris,cel; send"
+```
+
+Not developed here: `stackv` and the 3D particles. Their scenes wait for their code in `bm-core`.
+The hook is the comment at the top of the block "the 2D scenes" in `src/bm/b3d.c`.
+The test of the triangle count is a different work (the development notes).
+
+On the PC, `make test-b3d` runs them (`herotris`, `cel` and `stress`) for a few frames and checks that the fields, the `H` lines, the `C` lines and the `T` lines exist.
+
+## herotris with the map in pieces
+
+Stage 3 of the development notes (draw merging, bm3d 7.6). It is **opt-in**, group `htmap`. It answers: what does a draw call cost
+the ARM, and how much of it does `gpu3d_merge` take back?
+
+```
+./easy_install.sh line "b3d tests=htmap; send"
+```
+
+It is the `herotris` set (a hero of 1536 triangles with its shadow, the 2D, 4M instructions of logic), but the 5000 triangles of the map are in 100 pieces
+of 50 (`ht_p100`), 10 pieces of 500 (`ht_p10`) or 1 piece of 5000 (`ht_p1`). Same area, same triangles, same baked light and sheets; only the number of
+`draw3d` calls of the map changes: 100, 10 or 1 a set. The pieces are drawn in two runs by sheet (all of the first sheet, then all of the second), as a
+game that sorts its static map by texture. (`herotris` itself alternates the two sheets in a chequer and has no run to merge.) `ht_p100m` and `ht_p10m` are
+`ht_p100` and `ht_p10` with `r3d_t.merge` on, the same as a game with `gpu3d_merge` on (the bench profiles leave `gpu3d_merge` off, so every other test
+keeps its numbers).
+
+Profiles: `ARM`, `GPU`, `GPU+VS`, `GPU+VS+Q` (the path of the games). Read the `R` lines of `GPU+VS+Q` (the line format is the same as every test):
+
+| Question | Where |
+|---|---|
+| Cost of a call on the ARM | `ms - gpu_ms` of `ht_p100` less that of `ht_p1`, divided by 99 and by the sets at 60 fps. With the queue the report has `ms` only; use `GPU+VS` (no queue) for this. |
+| What merging takes back | `ht_p100m` against `ht_p100`, and `ht_p10m` against `ht_p10`: `tris60`/`drawn60` at 60 fps (more is better), `ms` at the same step. The best case is `ht_p1`. |
+| Calls a frame | The progress log line of each step ends `N meshes` (meshes placed by the vertex shader a frame): about 90 for `ht_p100` at one set, 3 for `ht_p100m`, 11 for `ht_p10`, 2 for `ht_p1` (the PC counted those). |
+
+Draw merging holds the draws, so at the first frame of a run (and after any change of the run) the frame is as without merging; from the second frame
+on the run is one draw. A step of the bench has several frames, so the median of a step is the merged one. Run each profile three times.
+
+A run merges only when it pays: at least 32 pieces and at most 150 faces a piece on average (`MG_MIN_PIECES`, `MG_MEAN_FACES` in `r3d.c`). So `ht_p100m` merges (100 pieces of 50) and `ht_p10m` draws the pieces as `ht_p10` does (10 pieces of 500). Expect `ht_p10m` equal to `ht_p10`.
+
+Pi Zero W, 23 Oct, two full runs (very stable), triangles at 60 fps (`tris60`), before the threshold:
+
+| Test | GPU+VS+Q | GPU+VS |
+|---|---|---|
+| `ht_p100` | 54 600 | 32 000 |
+| `ht_p100m` | 67 600 (+24%) | 32 500 (+2% to +4%) |
+| `ht_p10` | 96 300 | 44 200 |
+| `ht_p10m` | 71 600 (-26%) | 34 500 (-20%) |
+| `ht_p1` | 87 400 | not measured |
+
+A call costs the ARM: 100 pieces are 6.8 sets, 10 pieces are 11.9 sets. Merging 10 big pieces costs more than the calls it saves, hence the threshold. Compact attributes: `herotris` 54 056 (plain) and 54 013 (A8) with the queue, ARM 12.0 ms and GPU 7.0 ms in both: the frame is ARM-bound, no gain, so `gpu3d_attr` is off by default. The Pi re-measure of `ht_p10m` with the threshold is pending (`b3d tests=htmap profiles=VSQ`, and `VS`).
+
+On the PC `make test-b3d` runs the five (`check_b3d.py`: the same triangles given to r3d in all five, every profile of the list has a row) and `make test-gpu3d`
+checks the pixels of merged against drawn one by one (`draw merging` line).
+
+## stress
+
+`stress` answers: does the frame stay stable at twice the load that holds 60 fps? It is **opt-in** like `herotris`: the default run, the score and the old numbers do not change.
+
+```
+./easy_install.sh line "b3d tests=stress; send"
+```
+
+The test runs on one profile only: `GPU+VS+Q` (the GPU, the vertex shader and the queue: the default path of the games on the Pi). It has two stages.
+
+1. The ramp. It is the ramp of `herotris` in finer steps: the load `n` is a number of quarter sets. A quarter set is 25 map pieces of 50 triangles. A hero with its shadow (3072 triangles) is added for every 4 quarters, or part of them. So 4 quarters are one `herotris` set (8036 triangles). The 2D (parallax, HUD, text) and the 4M instructions of logic are the ones of `herotris`. The ramp gives `n60`, the load at 60 fps.
+2. The two loads. The frame runs for 3 s at 1x (`n60` rounded down to whole quarters, at least 1) and then for 3 s at 2x (twice that `n`). If the driver gives up at 1x (`v3d_failed=1`), the 2x load does not run (`T,GPU+VS+Q,2x,not_run`).
+
+The report has the usual `R` row of the ramp and, after the `C` lines, these lines:
+
+```
+stress path=GPU+VS+Q n60=<quarter sets> (quarter sets: 4 are one herotris set of 8036 triangles) secs=3 each
+columns T,profile,load,n,tris_in,frames,secs,ms,worst,drops,arm_ms,gpu_ms,jobs,pool_kb,ovf_kb,ovf_jobs,v3d_failed
+T,GPU+VS+Q,1x,...
+T,GPU+VS+Q,2x,...
+```
+
+| Column | Meaning |
+|---|---|
+| `load` | `1x` or `2x` |
+| `n`, `tris_in` | quarter sets, and the triangles given to r3d in a frame |
+| `frames`, `secs` | frames run and seconds of the load |
+| `ms`, `worst` | mean ms of a frame (with the copy to the screen) and the slowest frame |
+| `drops` | frames over 16.7 ms (they missed 60 fps) |
+| `arm_ms` | ms less the ARM's wait for the GPU in `gpu3d_sync` |
+| `gpu_ms`, `jobs` | the V3D's busy time and the jobs, a frame |
+| `pool_kb`, `ovf_kb`, `ovf_jobs` | the binner's memory: the most a job used, the overflow memory, the jobs in the overflow |
+| `v3d_failed` | 1 if the driver gave up (V3D hang or timeout) during the load |
+
+How to read it. The 2x load is stable if `v3d_failed` is 0, the bench finished (no freeze), and `pool_kb` and `ovf_kb` stay inside the pool the driver has. At 2x the frame is expected to miss 60 fps: `ms` is then about the double of 1x and `drops` is near `frames`. What is looked for is a clean slow-down (`worst` near `ms`) and no `v3d_failed`. The test has no pass or fail mark of its own: the SPV reads the columns. Without the V3D (QEMU) the profile does not run and the report has no `stress` line.
+
+On the PC, `make test-b3d` runs the test for 6 frames a load and checks the `T` lines (the PC's ms do not count).
+
+Measured on the Pi Zero W, 22 Oct 2026, one run (report `20261022-191158_bench3d_pi-zero-w_dev.txt`, id `b3d-191158`): `n60` = 24.8 quarter sets.
+
+| Load | `n` | `tris_in` | `ms` | `worst` | `drops` | `arm_ms` | `gpu_ms` | `pool_kb` | `ovf_kb` | `v3d_failed` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1x | 24 | 48 432 | 13.3 | 13.5 | 0 | 13.1 | 6.8 | 122 | 0 | 0 |
+| 2x | 48 | 96 864 | 25.2 | 25.3 | 116 of 116 | 25.2 | 16.1 | 142 | 0 | 0 |
+
+At 2x the frame runs at about 40 fps, with 2 jobs a frame. The slow-down is clean (`worst` is near `ms`). The ARM sets the pace (`arm_ms` equals `ms`), not the GPU. The Pi did not hang. Only one run exists.
 
 ## On the PC
 
@@ -222,3 +478,56 @@ each: the PC's ms do not count) and checks report, profiles, score, comparison a
 (`build/b3d/page-NN.ppm`). `build/host/b3d_host DIR --full -v` does the full run;
 `--tests=mix --profiles=GPU,ARM` a part, `--frames` saves every frame
 (`DIR/frame-NNNN.ppm`) to look at the scenes.
+
+## Lua edition
+
+The Lua edition is the cartridge a file that is not in this repository (title "3D Bench", a `.bm` app for the Market). The C bench in the kernel stays as it is. The Lua edition has its own numbers: they are not comparable with `docs/PERF-BUDGET.md` or with the C bench's reports (decision of 25 Oct 2026). It measures bm3D 7.7 only, and it is light: the default run is short (decision of 25 Oct 2026, second part).
+
+The cartridge ports the ramp of `src/bm/b3d.c` as a state machine over `_draw` frames. Each test runs on each profile with a load `n` of 1, 2, 3, 4, then +50% a step. A step is one warm frame and 3 measured frames. The ramp ends when the median frame is over 40 ms, after 10 s or at the test's maximum. The loads at 60 and 30 frames a second come from the median ms of the steps (`b3d_load_at`). The cost of a pixel comes from the slope over the steps (`b3d_slope`).
+
+- **Frame time**: `stat(1)` of the next frame (`_update` + `_draw` with the GPU's 3D). The C bench also adds the copy to the screen. The overlay line is inside the measured frame.
+- **Profiles** (set with `gpu3d()` and `gpu3d_opt()`; short name in brackets):
+  - `ARM`: the baseline. The ARM draws the 3D.
+  - `GPU+VS+Q` (VSQ): what a game gets today. Vertex shader 2, one job in flight, two-thread pixel shaders, the 2D in the GPU's job and draw merging are on. The other switches are off.
+  - `GPU+VS+Q2` (VSQ2): `GPU+VS+Q` with two jobs in flight and each frame shown a frame later (`gpu3d(..., 2, ..., true)`). It is the candidate default. It runs only when `3d_profiles` names it.
+  - A profile the console cannot run gives no row (a line `b3d-skip` in the log).
+  - Dropped (they show old driver stages or switches that are off by default and give no gain, the development notes): `GPU`, `VS`, `Q`, `AA`, `WC`, `2D`, `T16`, `ETC1`, `FS2`, `A8`, the sorted and compact-attribute rows and the QPU rows. `gpu3d_opt()` stays in the runtime for other cartridges.
+- **Not in it**: the PMU counters, the machine line and the Mali. The columns `instr`, `wait_instr`, `dmiss`, `cycles`, `core_mhz` and `gpu_mhz` are 0 in the R lines. The line `counters none` says so.
+- **Keys** of `bm/config.txt` (the prefix `3d_` comes from the title): `3d_tests` (ids, or the group `cel` or `htmap`, or `all`), `3d_profiles` (names or short names, or `all`; default `ARM` and `VSQ`), `3d_nowait` (`1`: the summary stays 3 s, then the cartridge ends). A value has no comma, so a list uses `/`: `3d_tests=spheres/herotris`. Without `3d_tests` the cartridge runs every test.
+- **Log**: one line a step, as `b3d.c`: `b3d spheres ARM n=8 0.35 ms worst 0.45, 289 tri, 448 vtx, 0 instr, GPU 0.00 ms, 0 jobs, 0 meshes, core 0 GPU 0 MHz`.
+- **Report**: the C bench's text (header lines, `columns R,...`, the R lines, the P lines of the pixel cost, the H lines of `herotris`, the C lines of the cel tests, the T lines of `stress`, `total`) sent with `report("bench3d", text)`. The `options` line at the start comes from `gpu3d_stats().options`. There is no score line.
+- **Summary page** (640x360): the load at 60 frames a second for each test and profile. Esc or B leaves.
+- **Models and sheet**: a file that is not in this repository makes, at build time (`make`; no binary in the repository), a `models.bm` with the hero (16 bones, 1536 faces, the clip `walk` is the `pose()` of `b3d.c`), its textured and skin variants, the map pieces with baked light and the sprite sheet (384 x 160: the three 128 x 128 sheets of `b3d.c` side by side and the three 64 x 32 sheets of `herotris` below), and the 8 map layers of `map8`. The cartridge uses `model()`, `animate()`, `mesh()`, `mesh_sphere()`, `mesh_cube()`, `map()`, `sspr()`, `stack()`, `fades()`, `dark_begin()`, `light_begin()`.
+
+### Tests
+
+Criterion: a test stays if it exercises a feature of bm3D 7.7 that a game uses today. A test goes if it only compares old driver stages or a path that games rarely use.
+
+| Test | In the Lua edition | Profiles | Note |
+|---|---|---|---|
+| `spheres` | kept | ARM, VSQ | 96-face spheres, flat; `mesh_sphere(6, 8)` |
+| `heroes`, `heroes_skin` | kept | ARM, VSQ | 16 bones; the skin has faces on two bones |
+| `heroes_shadow` | kept | ARM, VSQ | shadows on a floor of 16 map pieces |
+| `tiny`, `draws` | kept | ARM, VSQ | small faces; one draw call each |
+| `quad_flat`, `quad_tex`, `quad_alpha` | kept | ARM, VSQ | fill cost; P lines |
+| `cel_lit`, `cel`, `cel_outline` | kept | ARM, VSQ | group `cel`; C lines; the dither is not switched (`cel_nd` columns are -1) |
+| `map8`, `sprites`, `stack`, `fade`, `light` | kept | `map8`, `stack`, `fade`, `light`: ARM; `sprites`: ARM, VSQ | the 2D scenes. `fade` and `light` run last: `dark_begin()` and `light_begin()` keep the drawing in RAM for the rest of the run, where the GPU cannot draw. `fade` is the ARM fade (no QPU) |
+| `herotris` | kept | ARM, VSQ, VSQ2 | H lines; the probe counts the triangles the vertex shader placed (`probe_meshes` is -1) |
+| `ht_p100`, `ht_p100m`, `ht_p10m` | kept | ARM, VSQ, VSQ2 | group `htmap`. `ht_p100` has merging off (the baseline), `ht_p100m` and `ht_p10m` have it on. One pair is enough for the gain of merging (+24% for 100 small pieces, -26% for 10 big ones, the development notes); `ht_p10m` shows that the threshold keeps the big pieces apart |
+| `stress` | kept | VSQ | the ramp of `herotris` in quarter sets, then 24 frames at 1x and at 2x of the load at 60 fps (T lines) |
+| `match` | dropped | | `herotris` and `heroes_shadow` cover the game scene with real bones |
+| `spheres_smooth`, `spheres_unlit`, `spheres_baked`, `spheres_shine`, `spheres_tex`, `quad_smooth`, `quad_screen`, `quad_texscreen`, `heroes_tex`, `clip`, `big`, `big_logic`, `bilinear`, `gpu2d`, `ht_p1`, `ht_p10` | dropped | | variants of a kept test, or a path that games rarely use |
+| `split`, `queue`, `mix`, `texswap` | dropped | | they exist to compare old driver stages (frame queue, 2D in the job); `texswap` also needs three sprite sheets and a cartridge has one |
+| `cel_lit_nd`, `cel_nd` | dropped | | the dither switch (`r3d_dither`) has no Lua function |
+
+Differences from `b3d.c` (the numbers are not those of the C bench):
+
+- The sprite sheet is one sheet. `b3d.c` has six sheets of their own.
+- The light baked in the map pieces is one colour for each face of a textured piece (the model format). `b3d.c` has one light for each corner.
+- The logic of `herotris` and `stress` is a Lua loop of 15 steps for each thousand steps of `b3d.c` (`work = 1300`: about 4M ARM instructions). It runs in `_update`, so with the queue it runs while the GPU draws. The match to 4M instructions is an estimate, not measured on the Pi.
+- The texture inset of the models is 0, as `mesh()` has.
+- The profile sets merging on for every test (it is on in bm3D 7.7). `ht_p100` turns it off for its own run.
+
+The run: the default run has 39 rows (the tests above on ARM and VSQ, `stress` on VSQ). It is about 400 ramp steps of 4 frames, 2000 to 2500 frames with the two stress loads, 40 to 60 s on the Pi (an estimate from the Pi's loads of `b3d.c`, not measured). The host emulator run takes 20 s.
+
+The Lua API for it: `gpu3d_opt(name [, on])` and `gpu3d_stats()` ([light3d](api/light3d.md)). `make test-gpu3d-opt` tests both on the V3D emulator. `make test-bench3d` runs the cartridge in `bmhost-gpu` with 8 tests (`spheres`, `heroes`, `quad_flat`, `cel_lit`, `cel`, `map8`, `sprites`, `herotris`) on ARM and GPU+VS+Q and a file that is not in this repository checks the log: about 10 s. `make test-bench3d-all` runs every test on every profile (ARM, GPU+VS+Q, GPU+VS+Q2): about 20 s. It is not in `HOST_TESTS`. The PC's ms do not count. Not verified on the Pi or the RGB30.

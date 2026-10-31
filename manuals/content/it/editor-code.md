@@ -26,6 +26,7 @@ bm Code è l'editor di codice della suite bm. Apre una cartuccia, mostra il suo 
 - Un assistente su F6 che risponde alle domande e scrive codice per te.
 - Breakpoint su F8 e debugger, con F5 per eseguire.
 - Ctrl+Enter suona il codice come musica (riff).
+- Ctrl+Q (sul pad Y+X) mostra tutte le firme del nome API sotto il cursore, ciascuna con il suo testo; al salvataggio i nomi che non sono nell'API vengono segnalati e i loro numeri di riga diventano rossi.
 
 ## Perché è importante
 
@@ -43,15 +44,15 @@ Puoi scrivere, provare e correggere un gioco senza un computer: il ciclo è modi
 
 bm Code modifica solo i **progetti**, i file che finiscono in `.bme`. Un gioco (`.bm`) è in sola lettura: lo puoi aprire e leggere, ma mai cambiare.
 
-Quando salvi un gioco, bm Code non lo tocca. Scrive una copia modificabile accanto a lui, `NAME.BME`, e da quel momento la scheda lavora sulla copia. Il nome della scheda cambia nel nuovo file.
+Quando salvi un gioco, bm Code non lo tocca. Scrive una copia modificabile in `/bme`, `name.bme`, e da quel momento la scheda lavora sulla copia. Il nome della scheda cambia nel nuovo file.
 
 ## Aprire una cartuccia
 
-Premi **Ctrl+O**. L'elenco mostra `+ New project...` e poi i file `.bm` e `.bme` di `/carts` e della radice della scheda. Muoviti con le frecce su e giù, premi **Enter** per aprire. Una cartuccia già aperta mostra semplicemente la sua scheda.
+Premi **Ctrl+O**. L'elenco mostra `+ New project...` e poi i progetti `.bme` di `/bme` e i file `.bm` e `.bme` di `/carts` e della radice della scheda. Muoviti con le frecce su e giù, premi **Enter** per aprire. Una cartuccia già aperta mostra semplicemente la sua scheda.
 
 ## Un nuovo progetto
 
-Premi **Ctrl+N**. Una riga chiede `New project, file name (8.3 in /carts):` e suggerisce `GAME1.BME`. Il nome deve essere 8.3: fino a otto lettere, cifre, `_` o `-`, e l'estensione `.BME`. Se il file esiste già, bm Code lo dice e suggerisce Ctrl+O. La nuova scheda ha un piccolo programma di partenza; premi **Ctrl+S** per scrivere il file.
+Premi **Ctrl+N**. Un elenco mostra i modelli: Empty, Platform 2D, Top-down 2D, Shooter 2D, Versus 2D e 3D scene. Muoviti con le frecce su e giù, premi **Enter** per scegliere, **Esc** per uscire. Ogni modello tranne Empty è diviso in moduli (schede sulla seconda riga), e l'ultimo modulo, `loop`, contiene `_update` e `_draw`. Poi una riga chiede `New project, file name (8.3 in /bme):` e suggerisce `game1.bme`. Il nome deve essere 8.3: fino a otto lettere, cifre, `_` o `-`, e l'estensione `.BME`. Se il file esiste già, bm Code lo dice e suggerisce Ctrl+O. La nuova scheda ha il programma di partenza del modello; premi **Ctrl+S** per scrivere il file.
 
 **Ctrl+T** apre una nuova scheda vuota senza file: il primo salvataggio chiede un nome.
 
@@ -73,9 +74,9 @@ Le schede, i cursori, il font e i breakpoint tornano la prossima volta che apri 
 
 # Lo schermo
 
-![bm Code con due schede aperte: il codice, i numeri di riga e la riga di stato](shots/editor-code-screen.png)
+!bm Code con due schede aperte: il codice, i numeri di riga e la riga di stato
 
-- **Barra in alto**: una scheda per ogni cartuccia, con il nome del file. Un `*` indica modifiche non salvate. A destra, `held: keys` ricorda che F12 tenuto premuto mostra tutti i tasti.
+- **Barra in alto**: il nome `bm Code` è il primo elemento a sinistra. Poi una scheda per ogni cartuccia, con il nome del file. Un `*` indica modifiche non salvate. A destra, `held: keys` ricorda che F12 tenuto premuto mostra tutti i tasti.
 - **Il codice**: i numeri di riga a sinistra, la riga corrente illuminata. Un breakpoint è un numero di riga rosso scuro. La riga di un errore ha lo sfondo rossiccio.
 - **Riga di stato** (l'ultima riga): il file, un `*` se modificato, poi `ln` (riga) sul totale, `col` e il font. Durante la musica aggiunge `MUSIC` e il numero di pattern che suonano. I messaggi compaiono accanto al nome del file.
 
@@ -86,6 +87,23 @@ Le schede, i cursori, il font e i breakpoint tornano la prossima volta che apri 
 ## Due pagine
 
 **F4** mostra due pagine affiancate. Ogni pagina ha la sua scheda. **F7** passa da una pagina all'altra; **F2** e **F3** cambiano la scheda della pagina in cui sei. Nella barra in alto una scheda mostra `1` o `2` per la pagina che la mostra. F4 di nuovo torna a una pagina.
+
+## Moduli in un progetto
+
+Un programma grande si può tagliare in **moduli**. Un modulo è una parte del codice che inizia a una riga `--@module nome`. La riga è un commento Lua, quindi il gioco non cambia: un progetto ha ancora UNA sola sezione di codice e il gioco costruito ha gli stessi byte di prima. Le schede servono solo a leggere meglio.
+
+Quando un progetto ha moduli, sotto la barra in alto compare una seconda riga. Mostra la parola `modules` e una scheda per ogni modulo. Il testo prima del primo marcatore è il modulo `main`.
+
+| Tasto o clic | Cosa fa |
+|---|---|
+| Ctrl+P / Ctrl+Maiusc+P | modulo successivo / precedente |
+| clic su una scheda modulo | mostra quel modulo |
+| clic destro su una scheda modulo | il menu dei moduli |
+| Esc, Modules... | lo stesso menu |
+
+Il menu dei moduli ha **New module...** (chiede un nome e lo aggiunge dopo quello in cui sei), **Rename module...** e **Merge into the one before** (le righe vanno in fondo al modulo precedente e la riga del marcatore sparisce; nessun codice si perde).
+
+Un nome ha lettere, cifre, `_`, `.` o `-`, fino a 24 caratteri. Ogni modulo ha il suo cursore, il suo annulla e i suoi breakpoint. Ctrl+S, F5 e Ctrl+W lavorano su tutto il progetto, non su un modulo. Il clic centrale su una scheda modulo non fa nulla; il clic centrale su una scheda file chiude il file. Quando il gioco si ferma con un errore, bm Code mostra il modulo e la riga al suo interno.
 
 ## Il menu
 
@@ -102,9 +120,12 @@ Le schede, i cursori, il font e i breakpoint tornano la prossima volta che apri 
 | Breakpoint | F8 |
 | Debug from the start | |
 | Clear breakpoints | |
+| Modules... | Ctrl+P |
 | Split screen | F4 |
 | Font size | F10 |
 | Find | Ctrl+F |
+| Find in the project... | Ctrl+Shift+F |
+| Rename a word... | Ctrl+Shift+H |
 | Replace | Ctrl+H |
 | Go to line | Ctrl+L |
 | Assistant | F6 |
@@ -121,7 +142,7 @@ Quando è stato l'SDK ad aprire il file, il menu ha anche **Back to bm SDK**: sa
 
 # Tasti di modifica
 
-Questi sono i tasti che esistono in bm Code. **F11** e **F12** appartengono al sistema e non arrivano mai all'editor. Un elenco dei tasti è sullo schermo mentre tieni premuto **F12**.
+Questi sono i tasti che esistono in bm Code. **F11** e **F12** appartengono al sistema e non arrivano mai all'editor. Un elenco dei tasti è sullo schermo mentre tieni premuto **F12**. bm Code mantiene il proprio chip F12 nella barra in alto.
 
 ## Muoversi
 
@@ -134,7 +155,21 @@ Questi sono i tasti che esistono in bm Code. **F11** e **F12** appartengono al s
 | Ctrl+L | vai alla riga: scrivi il numero |
 | Ctrl+F | cerca: scrivi il testo (la parola sotto il cursore è suggerita) |
 | Ctrl+G | cerca il successivo |
+| Ctrl+Shift+F | cerca un testo in ogni scheda e modulo del progetto |
+| Ctrl+Shift+H | rinomina la parola sotto il cursore in ogni scheda e modulo |
 | Ctrl+H | sostituisci tutto: chiede il testo, poi il nuovo testo |
+
+## Cercare e rinominare nel progetto
+
+**Ctrl+Shift+F** (menu: *Find in the project...*) cerca un testo in ogni scheda aperta e in ogni modulo di un progetto. Scrivi il testo. La parola sotto il cursore è suggerita. La ricerca non distingue maiuscole e minuscole. Si apre un elenco con una riga per ogni risultato: `modulo:riga testo`. Se hai più di una scheda aperta, il nome comincia con il nome della scheda. L'elenco mostra al massimo 200 risultati; il titolo dice quando ce ne sono di più. Muoviti con le frecce su e giù. Premi **Enter** per andare al risultato: bm Code apre la scheda e il modulo e mette il cursore sul testo. Se il testo non è nel progetto, la riga di stato dice `not found in the project`.
+
+**Ctrl+Shift+H** (menu: *Rename a word...*) rinomina la parola sotto il cursore. Cambia solo la parola intera, in tutti i moduli e in tutte le schede aperte. Il testo dentro stringhe e commenti resta com'è. Restano anche i numeri. Se il cursore non è su una parola, bm Code chiede quale parola rinominare. Poi scrivi il nuovo nome. Deve essere un nome Lua valido: lettere, cifre e `_`, non un numero all'inizio, non una parola chiave. La riga di stato dice quante parole sono cambiate e in quanti moduli.
+
+::: warn
+Rinomina non controlla lo scope. Se due variabili diverse hanno lo stesso nome, cambiano tutte e due. Guarda il risultato prima di salvare.
+:::
+
+Ogni modulo che cambia ha un passo di annullamento. Premi **Ctrl+Z** in ogni modulo per tornare indietro.
 
 ## Modificare
 
@@ -160,6 +195,7 @@ Scrivere `end`, `else`, `elseif`, `until` o `}` da soli su una riga li riporta a
 | Ctrl+T | nuova scheda vuota |
 | Ctrl+W | chiude la scheda |
 | F2 / F3 | scheda precedente / successiva |
+| Ctrl+P | modulo successivo del progetto (Ctrl+Maiusc+P: precedente) |
 | F4 | una pagina / due pagine |
 | F7 | passa all'altra pagina |
 | F10 | font 6x12 / 8x14 / 8x16 |
@@ -172,6 +208,7 @@ Scrivere `end`, `else`, `elseif`, `until` o `}` da soli su una riga li riporta a
 | F8 | breakpoint sulla riga |
 | F6 | l'assistente |
 | F9 | spiega l'errore del gioco |
+| Ctrl+Q | aiuto sulla funzione API sotto il cursore |
 | Ctrl+Enter | suona il codice come musica (riff) |
 | Ctrl+. | ferma la musica |
 | Esc | lascia la selezione, oppure apre il menu |
@@ -186,6 +223,7 @@ Scrivere `end`, `else`, `elseif`, `until` o `}` da soli su una riga li riporta a
 | Y + sinistra / destra | scheda precedente / successiva |
 | Y + su / giù | pagina su / pagina giù |
 | X | l'assistente |
+| Y + X | aiuto sulla funzione API sotto il cursore |
 | Start | il menu |
 
 Nel menu e negli elenchi il D-pad muove, A sceglie e B torna indietro. Il pad può anche scrivere testo: attiva **Pad typing** nel menu. Select la attiva e la disattiva; la voce di menu chiama Share lo stesso pulsante.
@@ -208,7 +246,7 @@ Nel menu, **Word completion** lo attiva e lo disattiva, e **Words in comments** 
 
 **F6** apre il pannello dell'assistente in modalità codice, con la parola sotto il cursore come contesto. Risponde mentre scrivi la domanda. **Enter** inserisce il codice che propone nel punto del cursore, **Esc** lo chiude. Niente gira mentre è chiuso. L'inserimento è un solo passo di annullamento con Ctrl+Z.
 
-[DA COMPLETARE: cosa conosce l'assistente e a cosa può rispondere in modalità codice; le fonti dicono solo: l'API, come si fa, gli errori]
+In modalità codice l'assistente risponde con quattro tipi di voci della sua base di conoscenza: funzioni **API**, esempi **how-to** con codice, messaggi di **errore** di Lua e **consigli**. Le sue risposte su sprite, modelli 3D e musica sono negli altri strumenti.
 
 ### Una riga `#entry:`
 
@@ -223,6 +261,27 @@ L'assistente lo fa sul posto e la riga di stato dice cosa ha fatto, con `(Ctrl+Z
 ### Spiegare un errore
 
 **F9** apre l'assistente sull'errore dell'ultima esecuzione. Se non c'è errore, la riga di stato dice `no error: F5 runs the game, F9 explains its error`.
+
+## Aiuto su una funzione API (Ctrl+Q)
+
+Porta il cursore sul nome di una funzione di bm e premi **Ctrl+Q** (sul pad, tieni premuto **Y** e premi **X**). Si apre una finestra con ogni firma del nome, ciascuna seguita dal suo testo (un nome può avere più firme). In fondo la finestra elenca i file del manuale dell'API che descrivono il nome (a file that is not in this repository), una riga per file. Qualsiasi tasto chiude la finestra.
+
+- Su un nome che non è nell'API, la riga di stato dice `no API help for 'NAME'`.
+- Senza nessun nome sotto il cursore, dice `no name under the cursor`.
+- Con il mouse, il tasto destro apre un menu che contiene *API help*.
+
+## Il controllo dei nomi API al salvataggio
+
+Quando salvi una scheda il cui file finisce in `.bm`, `.bme` o `.lua`, bm Code cerca i nomi che sembrano chiamate all'API di bm ma non ci sono, come fa `scripts/api_lint.py`.
+
+- La riga di stato dice `API: N unknown name(s), line L: NAME` per il primo, e il numero di ogni riga con un nome sconosciuto diventa **rosso**.
+- Un nome che definisci tu, in questa scheda o in un'altra scheda aperta, vale come noto.
+- I numeri rossi spariscono appena cambi il testo (anche con annulla o ripeti). Salva di nuovo per controllare di nuovo.
+- Una riga con breakpoint mantiene il suo numero rosso scuro.
+
+::: try
+Premi **Ctrl+T** per una scheda vuota e scrivi `cls(1)`. Porta il cursore su `cls` e premi **Ctrl+Q**: vedi `cls([c])` e cosa fa. Premi un tasto qualsiasi. Ora scrivi `sprt(1)` su una riga e premi **Ctrl+Q**: la riga di stato dice `no API help for 'sprt'`.
+:::
 
 # Breakpoint (F8)
 
@@ -292,13 +351,13 @@ Parti da bm Code. Sulla console è la voce **bm Code** del menu di bm. Puoi anch
 ## Scrivi ed esegui la tua prima riga
 
 1. Avvia bm Code. Al primo avvio mostra un piccolo programma di partenza in una scheda vuota.
-2. Premi **Ctrl+N**. Una riga chiede il nome del file e suggerisce `GAME1.BME`. Premi **Enter**. La riga di stato dice `new: Ctrl+S writes /carts/GAME1.BME`.
-3. Premi **Ctrl+S**. La riga di stato dice `saved /carts/GAME1.BME`.
+2. Premi **Ctrl+N**. Una riga chiede il nome del file e suggerisce `game1.bme`. Premi **Enter**. La riga di stato dice `new: Ctrl+S writes /bme/game1.bme`.
+3. Premi **Ctrl+S**. La riga di stato dice `saved /bme/game1.bme`.
 4. Porta il cursore con le frecce sulla riga `print("hello!", 296, 40, 0xFFFFFF)`. Cambia `hello!` con le tue parole. Il `*` compare dopo il nome del file.
 5. Premi **F5**. Il gioco parte: un cerchio giallo, le tue parole sullo schermo, e il D-pad muove il cerchio.
 6. Premi **Start + Select** (o **Ctrl+Esc**) per uscire. bm Code torna con `back from the game`.
 
-![Il programma di partenza in esecuzione: il cerchio e le tue parole](shots/editor-code-first-run.png)
+!Il programma di partenza in esecuzione: il cerchio e le tue parole
 
 ::: try
 Aggiungi una riga sotto il `print`: `print("score 0", 296, 60, 0xFFFFFF)`. Premi F5 e cercala sullo schermo.
@@ -313,7 +372,7 @@ Aggiungi una riga sotto il `print`: `print("score 0", 296, 60, 0xFFFFFF)`. Premi
 5. Premi **F9**. L'assistente spiega l'errore. **Esc** lo chiude.
 6. Rimetti la lettera: `circfill`. Premi **F5**. Il cerchio è tornato e il segno è sparito.
 
-![La riga dell'errore con sfondo rossiccio, con il messaggio nella riga di stato](shots/editor-code-error-line.png)
+!La riga dell'errore con sfondo rossiccio, con il messaggio nella riga di stato
 
 ::: warn
 Se non hai cambiato il programma di partenza, la riga rotta è la riga 16.
@@ -329,7 +388,7 @@ Se non hai cambiato il programma di partenza, la riga rotta è la riga 16.
 6. Premi **Esc** per fermare il gioco. bm Code torna con il cursore su quella riga e dice `stopped in the debugger at line N`.
 7. Premi **F8** sulla riga per togliere il breakpoint.
 
-![Il debugger fermo su una riga: il codice, le variabili, lo stack](shots/editor-code-debugger.png)
+!Il debugger fermo su una riga: il codice, le variabili, lo stack
 
 ::: try
 Metti un breakpoint dentro `_draw`, premi F5 e premi F10 riga per riga. Quale variabile cambia?
@@ -337,15 +396,16 @@ Metti un breakpoint dentro `_draw`, premi F5 e premi F10 riga per riga. Quale va
 
 # Consigli e limiti
 
-- **Salva con un nome corto.** Il nome del file di un progetto è 8.3: `MYGAME.BME`.
-- **Lavora sulla copia.** Se apri un gioco (`.bm`), il primo salvataggio crea `NAME.BME`; continua a modificare quello.
+- **Salva con un nome corto.** Il nome del file di un progetto è 8.3: `mygame.bme`.
+- **Lavora sulla copia.** Se apri un gioco (`.bm`), il primo salvataggio crea `name.bme`; continua a modificare quello.
 - **Token.** I token di un programma sono contati come li conta il dev kit; `code_tokens(text)` dà il numero per un pezzo di Lua. Sono un'informazione, non un limite: bm non mette nessun tetto ai token. bm Code non li mostra: li mostra il bm SDK, nella pagina F1 e nella riga di stato del suo editor rapido.
 - **Il testo non salvato è conservato in uno spazio limitato.** Quando esci o esegui il gioco, bm Code conserva per la volta dopo il testo delle schede con modifiche (e delle schede senza file), fino a 16000 caratteri in tutto; il testo oltre non viene conservato. Salva spesso.
-- **Annulla** ricorda gli ultimi 100 passi di ogni scheda.
+- **Annulla** ricorda gli ultimi 100 passi di ogni scheda (ogni modulo ha il suo).
+- **I moduli sono un solo file.** I moduli sono righe `--@module nome` nell'unica sezione di codice; non sono file separati sulla scheda SD. Una riga di quella forma esatta dentro una lunga stringa Lua inizia un modulo per bm Code. L'SDK mostra tutto il codice senza schede modulo.
 - **Schede.** La barra in alto mostra tante schede quante ne stanno; le altre sono indicate da `...`. Usa F2 e F3 per raggiungerle.
 - **Debug solo da bm Code.** `breakpoint()` ferma solo in un gioco eseguito da uno strumento come bm Code.
-- [DA COMPLETARE: il numero di righe di codice visibili con i font 8x14 e 8x16]
-- [DA COMPLETARE: il file più grande che bm Code può aprire]
+- **Righe sullo schermo.** Con una pagina sullo schermo 640x360, il codice mostra 28 righe con il font 6x12, 23 con l'8x14 e 20 con l'8x16 (le righe dello schermo, meno la barra in alto e la riga di stato). Le colonne sono 106, 80 e 80. Questi numeri vengono dall'impaginazione nel codice, non da un conteggio sullo schermo. La casella di scrittura con il pad occupa alcune righe.
+- [DA COMPLETARE: il file più grande che bm Code può aprire; il codice non pone un limite proprio e nessuno è stato misurato]
 
 ::: copy
 F5          -- esegue il gioco

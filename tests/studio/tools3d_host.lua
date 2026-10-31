@@ -8,9 +8,10 @@
 --
 --   luahost tests/studio/tools3d_host.lua ROOT SDDIR     (make test-studio)
 --
--- SDDIR/carts/village.bm must be there (a copy of build/carts/village.bm).
+-- SDDIR/carts/testkit.bm must be there (a copy of build/carts/testkit.bm).
 
 local ROOT, SD = arg[1] or ".", arg[2] or "build/studio3d-sd"
+local MF = dofile(ROOT .. "/tests/studio/model_card.lua")      -- /bmm and /glb (APP-9)
 local checks, fails = 0, 0
 local function check(ok, msg)
   checks = checks + 1
@@ -121,7 +122,7 @@ local function mesh_models(bin)
       assert(a < nv and b < nv and c < nv, "MESH: a vertex out of range")
       cols[i] = col
     end
-    out[#out + 1] = { name = name, nv = nv, nf = nf, verts = verts, cols = cols }
+    out[#out + 1] = { name = name, nv = nv, nf = nf, verts = verts, cols = cols, flags = string.unpack("<I4", bin, pos + 20) }
     pos = pos + 24 + nv * 12 + nf * 24
   end
   assert(pos == #bin + 1, "MESH: the size does not add up")
@@ -147,16 +148,23 @@ local function anim_rigs(bin)
     local p = pos + 24 + nb * 44 + ((nv + 3) & ~3)
     for c = 1, nc do
       local nk, mode, flags, length = string.unpack("<I2BBf", bin, p + 16)
-      assert(nk >= 1 and mode <= 2 and length > 0, "ANIM: a bad clip")
-      local prev, keys = 0, {}
+      assert(nk >= 1 and mode <= 4 and length > 0, "ANIM: a bad clip")
+      local prev, keys, poses = 0, {}, {}
       for k = 0, nk - 1 do
-        local t = string.unpack("<f", bin, p + 24 + k * (4 + nb * 28))
+        local kp = p + 24 + k * (4 + nb * 28)
+        local t = string.unpack("<f", bin, kp)
         assert(t >= prev and t <= length + 1e-4, "ANIM: keys out of order")
         prev = t
         keys[k + 1] = t
+        local pose = {}
+        for i = 1, nb do
+          local qx, qy, qz, qw, tx, ty, tz = string.unpack("<fffffff", bin, kp + 4 + (i - 1) * 28)
+          pose[i] = { q = { qx, qy, qz, qw }, t = { tx, ty, tz } }
+        end
+        poses[k + 1] = pose
       end
       r.clips[c] = { name = bin:sub(p, p + 15):match("^[^\0]*"), length = length, loop = flags & 1 == 1, keys = nk,
-                     times = keys, mode = mode }
+                     times = keys, mode = mode, poses = poses }
       p = p + 24 + nk * (4 + nb * 28)
     end
     out[name] = r
@@ -168,7 +176,7 @@ end
 
 ----------------------------------------------------------------- the SD card and the project (shared by the two programs)
 
-local on_sd = { ["/carts"] = { "village.bm" }, ["/pics"] = { "hero.png", "notes.txt" } }
+local on_sd = { ["/carts"] = { "testkit.bm" }, ["/pics"] = { "hero.png", "notes.txt" } }
 local function host(path) return SD .. path:lower() end
 local sec = {}                -- the project's MESH (8) and ANIM (9)
 local sheet = { w = 256, h = 256, px = {} }
@@ -192,6 +200,7 @@ local clipbox, drawn_box = nil, nil
 
 local MESH_MT = {}
 local function chip_w(n) return #n == 1 and 16 or math.max(16, #n * 6 + 10) end
+local showkeys_n = 0
 
 local MS
 local function new_env(arg_path)
@@ -236,6 +245,7 @@ local function new_env(arg_path)
   E.keyp = function() return table.remove(keyq, 1) end
   E.keyheld = function() return false end
   E.keyhelp = function(list, title) keyhelp_list, keyhelp_title = list, title; return 0 end
+  E.showkeys = function() showkeys_n = showkeys_n + 1; return true end
   -- the mouse (bmui): MS as a USB mouse would give it
   MS = { x = 0, y = 0, b = 0, w = 0, p = 0 }
   E.mouse = function(on) if on ~= nil then return true end; return MS.x, MS.y, MS.b, MS.w, true end
@@ -435,6 +445,7 @@ local function new_env(arg_path)
     for _, n in ipairs(on_sd[dir] or {}) do out[#out + 1] = { name = n, size = 0, dir = false } end
     return out
   end
+  MF.install(E)
   E.cart_load = function(path)
     local data = read_file(host(path))
     if not data then return nil, "no such file" end
@@ -538,15 +549,20 @@ local function new_env(arg_path)
                                     { t = 0.5, pose = { { q = { 0, 0, 0, 1 }, t = { 0, 0.1, 0 } } } } } } } }
     end,
   }
-  local bmui
+  local bmui, bmlib
   E.require = function(name)
+  if name == "bmlib" then                -- the layout (lib.layout): once
+    bmlib = bmlib or assert(loadfile(ROOT .. "/src/script/bmlib.lua", "t", E))()
+    return bmlib
+  end
     if name == "assist" then return assert(loadfile(ROOT .. "/src/ai/assist.lua", "t", E))() end
     if name == "bmui" then                 -- the mouse: once (it takes keyp over)
       bmui = bmui or assert(loadfile(ROOT .. "/src/script/bmui.lua", "t", E))()
       return bmui
     end
-    assert(name == "bm3d", "require: only bm3d, bmui and assist here")
-    return assert(loadfile(ROOT .. "/src/script/bm3d.lua", "t", E))()
+    assert(name == "bm3d", "require: only bm3d, bmui, bmlib and assist here")
+    BM3D = assert(loadfile(ROOT .. "/src/script/bm3d.lua", "t", E))()
+    return BM3D
   end
 end
 
@@ -599,7 +615,7 @@ end
 
 local function menu_pick(label, exit_label)
   if not sees(exit_label) then key("esc") end
-  for _ = 1, 16 do
+  for _ = 1, 32 do
     local c = chosen_item()
     if c and c:sub(1, #label) == label then key("\n"); return true end
     key("down")
@@ -614,11 +630,17 @@ local function type_text(t)
 end
 
 local function open_file(name)
-  local list = {}
-  for _, f in ipairs(E.ls("/carts")) do list[#list + 1] = f.name end
+  local list = {}                        -- the picker's order: /bme, /carts, the root; sorted by path
+  for _, dir in ipairs({ "/bme", "/bmm", "/carts", "/" }) do
+    for _, f in ipairs(E.ls(dir)) do
+      if f.name:match("%.bm$") or f.name:match("%.bme$") or (dir == "/bmm" and f.name:match("%.bmm$")) then
+        list[#list + 1] = (dir == "/" and "" or dir) .. "/" .. f.name
+      end
+    end
+  end
   table.sort(list)
   key("pgup")                            -- the top of the list (the list goes round)
-  for i, n in ipairs(list) do if n == name then for _ = 2, i do key("down") end end end
+  for i, n in ipairs(list) do if n:match("([^/]+)$") == name then for _ = 2, i do key("down") end end end
   key("\n")
 end
 
@@ -643,20 +665,20 @@ run_cart(STUDIO)
 E._init()
 frames(2)
 check(sees("open a cartridge"), "at the start: the list of the files")
-check(sees("/carts/village.bm"), "the village is in the list")
+check(sees("/carts/testkit.bm"), "the test kit is in the list")
 
--- open the village: 8 models; the models page lists them
-open_file("village.bm")
-check(#cur_models() == 8, "the village: 8 models, " .. #cur_models())
+-- open the test kit: 8 models; the models page lists them
+open_file("testkit.bm")
+check(#cur_models() == 8, "the test kit: 8 models, " .. #cur_models())
 check(sees("[f1]") and sees("build") and sees("TOOLS") and sees("MODEL"), "the build page: " .. status())
 local orig8, orig9 = sec[8], sec[9]
 key("f2")
-check(sees("MODELS 8") and sees("ground") and sees("villager"), "F2: the models")
+check(sees("MODELS 8") and sees("ground") and sees("walker"), "F2: the models")
 key("down")
 check(sees("faces") and sees("tri"), "a model's faces and triangles")
 
 -- the reducer: "-" asks the triangles (half of them by default); the
--- skeleton of the villager follows its vertices; Ctrl+Z undoes
+-- skeleton of the walker follows its vertices; Ctrl+Z undoes
 local before = cur_models()[2].nf
 key("-")
 check(sees("triangles (now " .. before), "-: asks the triangles: " .. status())
@@ -669,20 +691,20 @@ check(sees("10 tri"), "the counts show 10 triangles")
 key("^z")
 check(cur_models()[2].nf == before, "undo: " .. before .. " triangles again (" .. cur_models()[2].nf .. ")")
 for _ = 1, 6 do key("down") end
-check(sees("villager") and cur_models()[8].name == "villager" and rig1 and anim_rigs(sec[9])["villager"], "the villager, rigged")
+check(sees("walker") and cur_models()[8].name == "walker" and rig1 and anim_rigs(sec[9])["walker"], "the walker, rigged")
 local vnf = cur_models()[8].nf
 key("-")
 type_text("20")
-local vr = anim_rigs(sec[9])["villager"]
-check(cur_models()[8].nf == 20 and vr and vr.nv == cur_models()[8].nv, "the villager reduced to 20: its skeleton fits " ..
+local vr = anim_rigs(sec[9])["walker"]
+check(cur_models()[8].nf == 20 and vr and vr.nv == cur_models()[8].nv, "the walker reduced to 20: its skeleton fits " ..
       tostring(vr and vr.nv) .. " vertices")
 key("^z")
-check(cur_models()[8].nf == vnf and anim_rigs(sec[9])["villager"].nv == cur_models()[8].nv, "undo: the villager whole again")
+check(cur_models()[8].nf == vnf and anim_rigs(sec[9])["walker"].nv == cur_models()[8].nv, "undo: the walker whole again")
 for _ = 1, 7 do key("up") end
 
 -- a model from a picture: the ways (cutout and lathe here, the service);
 -- the service without a key, then the job followed to the model (the
--- village's sheet is in use: flat colours); a service that fails
+-- the kit's sheet is in use: flat colours); a service that fails
 key("m")
 check(sees("cutout: the picture's outline") and sees("lathe:") and sees("meshy.ai:"), "m: the ways")
 key("down", "down", "\n")
@@ -707,7 +729,7 @@ end
 check(announced, "done: the download is announced first")
 frames(2)
 check(#cur_models() == 9 and cur_models()[9].name == "hero" and cur_models()[9].nf == 12, "the model hero, 12 triangles")
-check(status():find("flat colours (the sheet is in use)", 1, true), "the village's sheet is in use: " .. status())
+check(status():find("flat colours (the sheet is in use)", 1, true), "the test kit's sheet is in use: " .. status())
 check(PIC.taken and PIC.taken.faces == 1200 and PIC.taken.height == 2, "asked for 1200 triangles, 2 tall")
 check(sees("MODELS 9") and sees("hero"), "listed")
 key("esc")                                          -- the menu
@@ -744,13 +766,27 @@ check(#cur_models() == 8, "deleted again")
 -- save as a copy: the sections come back the same, byte for byte (cart_write)
 menu_pick("Save as", EXIT_S)
 check(sees("file name"), "Save as asks a name")
+-- a click on the line of the dialog puts the caret there (M48): "ac", a click between, "b"
+for _ = 1, 40 do key("\b") end
+key("a", "c")
+for _, b in ipairs({ 0, 1, 0 }) do
+  local was = MS.b
+  MS.x, MS.y, MS.b, MS.w = 96 + 8, 184, b, 0
+  MS.p = MS.b & ~was
+  frames(1)
+  MS.p = 0
+end
+frames(1)
+key("b")
+check(sees("abc"), "mouse: a click on the line of the dialog puts the caret between the letters")
+key("end")
 type_text("COPY3D")
-check(status():find("saved /carts/COPY3D.BME", 1, true), "saved: " .. status())
-local copy = read_file(SD .. "/carts/copy3d.bme")
+check(status():find("saved /bme/copy3d.bme", 1, true), "saved: " .. status())
+local copy = read_file(SD .. "/bme/copy3d.bme")
 local got = {}
 for _, s in ipairs(sections_of(copy)) do got[s[1]] = s[2] end
 local vil = {}
-for _, s in ipairs(sections_of(read_file(SD .. "/carts/village.bm"))) do vil[s[1]] = s[2] end
+for _, s in ipairs(sections_of(read_file(SD .. "/carts/testkit.bm"))) do vil[s[1]] = s[2] end
 check(got[8] == orig8 and got[9] == orig9, "a copy with no edits keeps MESH and ANIM as they were")
 check(got[5] == vil[5] and got[1] == vil[1] and got[4] == vil[4], "and the sheet, the code and the cover (cart_write)")
 
@@ -773,6 +809,57 @@ key("^y", "^y")
 check(sec[8] == nil, "redo twice: nothing again")
 key("^z")
 check(m1().nf == 12, "undo: one block")
+
+-- APP-12: ramp, corner and rounded blocks (k): the next cell, then back with undo
+key("right")
+key("k")
+check(status():find("block: ramp", 1, true), "k: the ramp block (" .. status() .. ")")
+key(" ")
+check(m1().nf == 20, "a ramp: 3 quads and 2 triangles, 8 triangles (" .. m1().nf .. ")")
+check(sees("ramp"), "the panel names the block kind")
+key("\b")
+check(m1().nf == 12, "the ramp removed: the first block whole (" .. m1().nf .. ")")
+key("^z")
+check(m1().nf == 20, "undo: the ramp is back")
+key("k")
+check(status():find("block: corner", 1, true), "k again: the corner block")
+key("right", " ")
+check(m1().nf == 26, "a corner: 1 quad and 4 triangles, 6 triangles (" .. m1().nf .. ")")
+key("k")
+check(status():find("block: rounded", 1, true), "k again: the rounded block")
+key("right", " ")
+check(m1().nf == 54, "a rounded block: 14 quads, 28 triangles (" .. m1().nf .. ")")
+-- soft shapes: cylinder, cone, sphere, dome, tube, arch (8 sides): the triangles each adds
+local soft = { { "cylinder", 32 }, { "cone", 16 }, { "sphere", 48 }, { "dome", 32 }, { "tube", 64 }, { "arch", 68 } }
+local before = m1().nf
+for _, e in ipairs(soft) do
+  key("k")
+  check(status():find("block: " .. e[1], 1, true), "k: the " .. e[1] .. " (" .. status() .. ")")
+  key("right", " ")
+  check(m1().nf == before + e[2], e[1] .. ": " .. e[2] .. " triangles (" .. m1().nf - before .. ")")
+  before = m1().nf
+end
+key("\b")
+check(m1().nf == before - 68, "backspace removes the arch whole (" .. m1().nf - before .. ")")
+key("^z")
+check(m1().nf == before, "undo: the arch is back")
+-- size and sides: the sides 8 to 10 and the size 2 along x change the cursor box and the shape
+key(".")
+check(status():find("10 sides", 1, true), "., : more sides (" .. status() .. ")")
+key("u")
+check(status():find("size 2x1x1", 1, true), "u : two cells along x (" .. status() .. ")")
+key("n", "u")
+check(status():find("size 2x2x1", 1, true), "n u : two cells along y (" .. status() .. ")")
+key("j", "n", "j", ",")
+check(status():find("size 2x1x1", 1, true) and status():find("8 sides", 1, true), "j n j , : back to 2x1x1 and 8 sides (" .. status() .. ")")
+key("n", "n")                                         -- x again
+key("j")
+key("k")
+check(status():find("block: cube", 1, true), "k again: the cube block")
+key("^z", "^z", "^z", "^z", "^z", "^z", "^z", "^z", "^z")
+check(m1().nf == 12, "undo: the shaped blocks go, one block stays (" .. m1().nf .. ")")
+key("left", "left", "left")
+key("left", "left", "left", "left", "left", "left")                  -- the six soft shapes went one cell each
 
 -- tiles: a red floor and a grass wall in the next cell (the colour first)
 key("right", "2", "\t")
@@ -820,10 +907,35 @@ key("a", "r")
 check(sees("turned: 8 faces"), "r: turned")
 key("^z", "n")
 check(sees("the other side: 8 faces"), "n: the other side")
+key("^z", "f")
+check(sees("diagonal flipped: 8 faces") and m1().nf == 16, "f: the diagonal of each quad flipped, same triangles (" .. m1().nf .. ")")
+key("^z", "f", "f", "f", "f")
+check(m1().nf == 16, "f four times: the quads as they were")
 key("^z", "del")
 check(sec[8] == nil, "Del: all deleted")
 key("^z")
 check(m1().nf == 16, "undo: all back")
+key("a")
+
+-- scale along one axis (p picks it) and the mirror copy (l)
+local function span(i) local lo, hi = 1e9, -1e9; for _, v in ipairs(m1().verts) do lo, hi = math.min(lo, v[i]), math.max(hi, v[i]) end; return hi - lo end
+local sy, sx = span(2), span(1)
+key("p", "p")
+check(status():find("only y", 1, true) or sees("only y"), "p p: scale only along y")
+key(".")
+check(math.abs(span(2) - 2 * sy) < 1e-6 and math.abs(span(1) - sx) < 1e-6, "., on y only: twice as tall, as wide as before (" .. span(2) .. ", " .. span(1) .. ")")
+key("^z")
+check(math.abs(span(2) - sy) < 1e-6, "undo: the height is back")
+key("p", "p")                                          -- z, then all axes
+check(sees("all axes"), "p wraps to all axes")
+key(".")
+check(math.abs(span(2) - 2 * sy) < 1e-6 and math.abs(span(1) - 2 * sx) < 1e-6, "., on all axes: twice as big")
+key("^z")
+local nf_before = m1().nf
+key("l")
+check(m1().nf == 2 * nf_before, "l: a mirror copy, the faces look out (" .. m1().nf .. ")")
+key("^z")
+check(m1().nf == nf_before, "undo: no mirror copy")
 key("a")
 
 -- vertex: the corner under the pointer one up
@@ -879,6 +991,19 @@ check(cur_models()[2].name == "tower", "renamed tower")
 key("del", "del")
 check(#cur_models() == 1, "deleted (asked twice)")
 
+-- the map class of a model (c): the u32 flags of its MESH header, kept when the model is copied and saved again
+key("c")
+check(cur_models()[1].flags == 2 and sees("map class: solid"), "c: solid, bit 1 of the model flags (" .. tostring(cur_models()[1].flags) .. ")")
+key("c")
+check(cur_models()[1].flags == 4, "c: floor, bit 2")
+key("c")
+check(cur_models()[1].flags == 8, "c: decor, bit 3")
+key("d")
+check(#cur_models() == 2 and cur_models()[2].flags == 8, "d: the copy keeps the class")
+key("del", "del")
+key("c")
+check(cur_models()[1].flags == 0, "c: back to not said")
+
 -- the assistant (F6): a 3D recipe becomes a new model, with its skeleton
 -- and animation; Esc leaves it as it was
 key("f6")
@@ -899,13 +1024,13 @@ check(#cur_models() == 1, "deleted again")
 -- save, then open it again
 menu_pick("Save as", EXIT_S)
 type_text("BLOCKS")
-check(status():find("saved /carts/BLOCKS.BME", 1, true), "saved: " .. status())
-local blocks = read_file(SD .. "/carts/blocks.bme")
+check(status():find("saved /bme/blocks.bme", 1, true), "saved: " .. status())
+local blocks = read_file(SD .. "/bme/blocks.bme")
 check(blocks and blocks:sub(25, 38) == "New 3D project", "the title of a new project")
 local b8 = sec[8]
 menu_pick("Open...", EXIT_S)
 open_file("blocks.bme")
-check(sees("opened /carts/blocks.bme"), "opened again: " .. status())
+check(sees("opened /bme/blocks.bme"), "opened again: " .. status())
 check(sec[8] == b8, "the same models as saved")
 check(E.sget(8, 8) == 0xE84A5A or true, "the painted pixel saved with the sheet")
 
@@ -927,12 +1052,12 @@ check(sees("MODELS 1"), "pad B: back where it was")
 
 -- bm Animator, on this file
 menu_pick("Open in bm Animator", EXIT_S)
-check(tooled and tooled[1] == "animator" and tooled[2]:lower() == "/carts/blocks.bme", "Open in bm Animator: cart_tool")
+check(tooled and tooled[1] == "animator" and tooled[2]:lower() == "/bme/blocks.bme", "Open in bm Animator: cart_tool")
 
 ----------------------------------------------------------------- bm Animator
 
 local ANIMATOR, EXIT_A = "/carts/animator/main.lua", "Exit bm Animator"
-run_cart(ANIMATOR, "/carts/blocks.bme")
+run_cart(ANIMATOR, "/bme/blocks.bme")
 E._init()
 frames(2)
 check(sees("MODELS") and sees("model") and sees("no skeleton yet"), "bm Animator on BLOCKS.BME: the player")
@@ -959,6 +1084,43 @@ type_text("arm")
 check(rig1().bones[2].name == "arm", "Enter: renamed arm")
 key("^z")
 check(rig1().bones[2].name == "bone2", "undo the name")
+-- j: a head alone leaves the tail of its parent (a shoulder, a hip); the rest stays
+do
+  local function snap() local r = rig1(); return { r.bones[1].head[2], r.bones[1].tail[2], r.bones[2].head[2], r.bones[2].tail[2], r.bones[2].parent } end
+  key("\t")
+  check(sees("head of bone2"), "tab: the head of bone2")
+  local s0 = snap()
+  key("w")
+  local s1 = snap()
+  check(math.abs(s1[2] - s0[2] - 0.125) < 1e-6 and math.abs(s1[3] - s0[3] - 0.125) < 1e-6, "w on a head: the joint moves, root tail and head together")
+  key("^z")
+  key("j")
+  check(sees("head alone (j)") and sees("head of bone2"), "j: the head alone")
+  local before = snap()
+  key("w")
+  local s2 = snap()
+  check(math.abs(s2[3] - before[3] - 0.125) < 1e-6 and s2[2] == before[2] and s2[4] == before[4] and s2[1] == before[1] and s2[5] == 1,
+        "w with the head alone: only the head of bone2 moves, the tail of root, the tail and the parent stay")
+  key("^z")
+  local s3 = snap()
+  check(s3[3] == before[3] and s3[2] == before[2], "one undo: the head is back")
+  local n = 0
+  local moved = true
+  while n < 20 and moved do
+    local h = snap()[3]
+    key("w")
+    moved = snap()[3] ~= h
+    n = n + 1
+  end
+  local r = rig1()
+  local dx, dy, dz = r.bones[2].head[1] - r.bones[2].tail[1], r.bones[2].head[2] - r.bones[2].tail[2], r.bones[2].head[3] - r.bones[2].tail[3]
+  check(not moved and sees("too short") and dx * dx + dy * dy + dz * dz >= (1 / 16) ^ 2 - 1e-9, "the head stops 1/16 short of the tail")
+  for _ = 1, n - 1 do key("^z") end
+  check(snap()[3] == before[3], "undone: the head where it was")
+  key("j")
+  check(sees("joints go together"), "j again: the joints go together")
+  key("\t")
+end
 key("p")
 check(sees("the parent of bone2") and sees("root"), "p: the parent to choose")
 key("esc")
@@ -1022,12 +1184,39 @@ type_text("walk")
 check(rig1().clips[2].name == "walk", "Enter: renamed walk")
 key("i")
 check(rig1().clips[2].mode == 2, "i: step")
+-- the five modes in a stable order: linear, smooth, step, ease-in, ease-out, then linear again
+key("i")
+check(rig1().clips[2].mode == 3 and sees("ease-in"), "i: ease-in (3), named on the page")
+key("i")
+check(rig1().clips[2].mode == 4 and sees("ease-out"), "i: ease-out (4), named on the page")
+key("i")
+check(rig1().clips[2].mode == 0 and sees("linear"), "i: linear again (0)")
+key("i")
+check(rig1().clips[2].mode == 1 and sees("smooth"), "i: smooth (1)")
+key("i")
+check(rig1().clips[2].mode == 2, "i: step again (2)")
+key("i", "i")
+check(rig1().clips[2].mode == 4, "mode 4 is saved in the clip bytes")
+do  -- the pure curves at u = 0, 0.25, 0.5, 1 and the names (the animate page and the kernel use the same formulas)
+  local want = { [0] = { 0, 0.25, 0.5, 1 }, { 0, 0.15625, 0.5, 1 }, { 0, 0, 0, 0 }, { 0, 0.0625, 0.25, 1 }, { 0, 0.4375, 0.75, 1 } }
+  local us, ok = { 0, 0.25, 0.5, 1 }, true
+  for mode = 0, 4 do
+    for i, u in ipairs(us) do
+      if math.abs(BM3D.ease(mode, u) - want[mode][i]) > 1e-9 then ok = false end
+    end
+  end
+  check(ok and BM3D.MODES[3] == "ease-in" and BM3D.MODES[4] == "ease-out", "ease: 5 modes, values at 0, 0.25, 0.5, 1")
+end
+key("i")                                 -- 0
+key("i", "i")                            -- 2
 key("m")
 check(sees("pose mirrored"), "m: the pose mirrored")
 key("\b")
 check(sees("Backspace again"), "Backspace asks first")
 key("\b")
 check(#rig1().clips == 1 and rig1().clips[1].name == "anim1", "Backspace twice: walk deleted")
+key("i", "i")
+check(rig1().clips[1].mode == 3, "i i: anim1 is ease-in (3), to be saved")
 
 -- the sprites of it, into the sheet
 key("f4")
@@ -1050,11 +1239,58 @@ for y = 0, sh - 1 do for x = 0, sw - 1 do if E.sget(x, y) then after = after + 1
 check(after < opaque, "undo: the sprites gone again (" .. after .. ")")
 key("^y")
 
+-- register_zone_boxes: a re-baked stack zone keeps its slices byte (byte 26 of
+-- the SPRITES entry) only if frames * width still fit the sheet width
+local function zone_slices()
+  local d, out = E.cart_data(11), {}
+  for i = 0, string.unpack("<I2", d, 1) - 1 do
+    local name = string.unpack("<c16", d, 5 + i * 28):match("^[^\0]*")
+    out[name] = d:byte(5 + i * 28 + 26)
+  end
+  return out
+end
+local function set_slices(zname, n)
+  local d, i = E.cart_data(11), 0
+  while string.unpack("<c16", d, 5 + i * 28):match("^[^\0]*") ~= zname do i = i + 1 end
+  local at = 5 + i * 28 + 26
+  E.cart_data(11, d:sub(1, at - 1) .. string.char(n) .. d:sub(at + 1))
+end
+local zs = zone_slices()
+local zname
+for n in pairs(zs) do zname = n end
+check(zname and zs[zname] == 0, "zone fit: a plain zone has slices 0")
+local fit_n = E.cart_sheet() // 32           -- slices that just fit (zone x = 0, 32 wide, 4 frames)
+check(fit_n > 4 and fit_n < 200, "zone fit: the sheet is wider than 4 frames (" .. fit_n .. " fit)")
+-- an unrelated zone is never touched by a re-bake
+local d11 = E.cart_data(11)
+E.cart_data(11, string.pack("<I2I2", 2, 0) .. d11:sub(5) ..
+  string.pack("<c16I2I2I2I2BBBx", "other", 0, 0, 16, 16, 1, 1, 9))
+set_slices(zname, fit_n)                      -- 32 * fit_n = the sheet width: fits
+key("\n"); frames(8)
+zs = zone_slices()
+check(zs[zname] == fit_n, "zone fit: a zone that still fits keeps its slices (" .. tostring(zs[zname]) .. ")")
+check(zs.other == 9, "zone fit: another zone keeps its own slices")
+set_slices(zname, fit_n + 1)                  -- one slice more than the sheet holds: no
+key("\n"); frames(8)
+zs = zone_slices()
+check(zs[zname] == 0, "zone fit: a zone that no longer fits drops its slices (" .. tostring(zs[zname]) .. ")")
+check(zs.other == 9, "zone fit: another zone keeps its own slices after the drop")
+key("\n"); frames(8)
+check(zone_slices()[zname] == 0, "zone fit: a plain zone stays plain after a re-bake")
+
 -- save; the player shows the animation
 key("^s")
-check(status():find("saved /carts/blocks.bme", 1, true), "Ctrl+S: " .. status())
+check(status():find("saved /bme/blocks.bme", 1, true), "Ctrl+S: " .. status())
 key("f1")
 check(sees("anim1"), "the player: the new animation")
+-- the model saved with mode 3 reloads as 3
+key("f3")
+menu_pick("Open...", EXIT_A)
+open_file("blocks.bme")
+check(rig1().clips[1].mode == 3, "reopened: the saved clip is mode " .. tostring(rig1().clips[1].mode) .. ", 3 wanted")
+key("f3")
+check(sees("ease-in"), "reopened: the animate page names the mode, ease-in")
+key("f1")                             -- the player, as before
 
 -- the pad: Y + B the menu, B back
 pad[7] = true; frames(2); pad[5] = true; frames(2); pad = {}; frames(3)
@@ -1062,21 +1298,191 @@ check(sees(EXIT_A) and sees("Open in bm Studio"), "pad Y + B: the menu")
 buttons(5)
 check(sees("MODELS"), "pad B: back")
 
--- the village: the villager's animations, mixed
+-- the test kit: the walker's animations, mixed
 menu_pick("Open...", EXIT_A)
-open_file("village.bm")
+open_file("testkit.bm")
 local names = {}
 for i, m in ipairs(cur_models()) do names[i] = m.name end
 local vi = 0
-for i, n in ipairs(names) do if n == "villager" then vi = i end end
+for i, n in ipairs(names) do if n == "walker" then vi = i end end
 for _ = 2, vi do key("down") end
-check(sees("villager") and sees("ANIMATIONS") and sees("idle"), "the villager and its animations")
+check(sees("walker") and sees("ANIMATIONS") and sees("idle"), "the walker and its animations")
 key("right", "k", "b")
 check(sees("mixed with wave: 25%"), "b: mixed with the next one")
 key("f3")
-check(sees("ANIMATIONS") and sees("BONES") and sees("idle  1/3"), "animate: the villager's animations")
+check(sees("ANIMATIONS") and sees("BONES") and sees("idle  1/3"), "animate: the walker's animations")
 menu_pick("Open in bm Studio", EXIT_A)
-check(tooled and tooled[1] == "studio" and tooled[2] == "/carts/village.bm", "Open in bm Studio: cart_tool")
+check(tooled and tooled[1] == "studio" and tooled[2] == "/carts/testkit.bm", "Open in bm Studio: cart_tool")
+
+-- (a fresh bm Animator: the first one leaves the page when it opens bm Studio)
+run_cart(ANIMATOR, "/carts/testkit.bm")
+E._init()
+frames(3)
+for _ = 2, vi do key("down") end
+key("f3")
+
+-- two-bone IK on the walker (APP-29): t on a bone with a parent and a grandparent (a foot, a hand), w s a d q e
+-- move the target, the keys of the clip reach it (the heads are found again here with matrices, apart from the
+-- cart's own T.fk), one undo per move, out of reach is said on the screen
+do
+  local function qmat(q)
+    local x, y, z, w = q[1], q[2], q[3], q[4]
+    local l = math.sqrt(x * x + y * y + z * z + w * w)
+    x, y, z, w = x / l, y / l, z / l, w / l
+    return { { 1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w) },
+             { 2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w) },
+             { 2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y) } }
+  end
+  local function heads(rg, pose)
+    local Mx, out = {}, {}
+    for i, b in ipairs(rg.bones) do
+      local R, h, t = qmat(pose[i].q), b.head, pose[i].t
+      local loc = {}
+      for r = 1, 3 do
+        loc[r] = { R[r][1], R[r][2], R[r][3], h[r] + t[r] - (R[r][1] * h[1] + R[r][2] * h[2] + R[r][3] * h[3]) }
+      end
+      local m = {}
+      local a = b.parent > 0 and Mx[b.parent]
+      for r = 1, 3 do
+        m[r] = {}
+        for c = 1, 4 do
+          if a then
+            m[r][c] = a[r][1] * loc[1][c] + a[r][2] * loc[2][c] + a[r][3] * loc[3][c] + (c == 4 and a[r][4] or 0)
+          else
+            m[r][c] = loc[r][c]
+          end
+        end
+      end
+      Mx[i] = m
+      out[i] = { m[1][1] * h[1] + m[1][2] * h[2] + m[1][3] * h[3] + m[1][4],
+                 m[2][1] * h[1] + m[2][2] * h[2] + m[2][3] * h[3] + m[2][4],
+                 m[3][1] * h[1] + m[3][2] * h[2] + m[3][3] * h[3] + m[3][4] }
+    end
+    return out
+  end
+  local function dist(a, b) return math.sqrt((a[1] - b[1]) ^ 2 + (a[2] - b[2]) ^ 2 + (a[3] - b[3]) ^ 2) end
+  local function the_rig() return anim_rigs(sec[9]).walker end
+  local function pose_of(rg) return rg.clips[1].poses[1] end
+  local function same_pose(a, b)
+    for i = 1, #a do
+      for k = 1, 4 do if math.abs(a[i].q[k] - b[i].q[k]) > 1e-6 then return false end end
+      for k = 1, 3 do if math.abs(a[i].t[k] - b[i].t[k]) > 1e-6 then return false end end
+    end
+    return true
+  end
+  local function bone_now()                              -- the bone the page shows: "TURN name   0.00 s ..."
+    for _, t in ipairs(texts) do
+      local n = t[1]:match("^%u+ (%S+)   ")
+      if n then return n end
+    end
+  end
+  local rg0 = the_rig()
+  local function select_bone(i)
+    for _ = 1, #rg0.bones do
+      if bone_now() == rg0.bones[i].name then return true end
+      key("down")
+    end
+    return bone_now() == rg0.bones[i].name
+  end
+  local function chain_ok(rg, b)
+    local p = rg.bones[b].parent
+    local g = p > 0 and rg.bones[p].parent or 0
+    return p > 0 and g > 0, g, p
+  end
+
+  key("home")
+  local walk0 = pose_of(rg0)
+  local nkeys0 = rg0.clips[1].keys
+  -- a bone with no chain
+  check(select_bone(1) and rg0.bones[1].parent == 0, "IK: bone 1 is the root")
+  key("t")
+  check(status():find("IK needs a bone with a parent and a grandparent", 1, true) and not sees("IK on:"),
+        "IK: the root has no chain: " .. status())
+  -- the limbs: the bones with a grandparent, hands and feet first
+  local cases = {}
+  for _, pat in ipairs({ "foot", "hand", "leg", "arm" }) do
+    for i, b in ipairs(rg0.bones) do
+      if #cases < 2 and chain_ok(rg0, i) and b.name:lower():find(pat, 1, true) then
+        local dup = false
+        for _, c in ipairs(cases) do if c == i then dup = true end end
+        if not dup then cases[#cases + 1] = i end
+      end
+    end
+  end
+  for i = 1, #rg0.bones do
+    if #cases < 2 and chain_ok(rg0, i) then
+      local dup = false
+      for _, c in ipairs(cases) do if c == i then dup = true end end
+      if not dup then cases[#cases + 1] = i end
+    end
+  end
+  check(#cases == 2, "IK: the walker has two chains of three bones (" .. #cases .. ")")
+  local KEYS = { { "w", 1, 1 }, { "s", 1, -1 }, { "a", 2, 1 }, { "d", 2, -1 }, { "q", 3, 1 }, { "e", 3, -1 } }
+  local function shifted(p0, kk, n)
+    local o = { p0[1], p0[2], p0[3] }
+    o[kk[2]] = o[kk[2]] + kk[3] * n / 16
+    return o
+  end
+  for _, b in ipairs(cases) do
+    local _, g, p = chain_ok(rg0, b)
+    local label = rg0.bones[g].name .. " > " .. rg0.bones[p].name .. " > " .. rg0.bones[b].name
+    local used = 0                                       -- the moves of this case (each one undo step)
+    check(select_bone(b), "IK: the bone " .. rg0.bones[b].name .. " is chosen")
+    key("t")
+    check(sees("IK on: " .. label) and not sees("OUT OF REACH"), "IK: on for " .. label)
+    check(sees("target") and sees("IK off"), "IK: the hint bar names the target keys and the way off")
+    local base = pose_of(the_rig())
+    local h0 = heads(rg0, base)
+    local len1, len2 = dist(h0[g], h0[p]), dist(h0[p], h0[b])
+    -- a key that keeps the target in reach for 2 steps, and the one that goes farthest
+    local near_k, far_k, best, worst = nil, nil, 1e9, -1
+    for _, kk in ipairs(KEYS) do
+      local d2 = dist(h0[g], shifted(h0[b], kk, 2))
+      if d2 < best and d2 < len1 + len2 - 2e-3 and d2 > math.abs(len1 - len2) + 2e-3 then near_k, best = kk, d2 end
+      if d2 > worst then far_k, worst = kk, d2 end
+    end
+    check(near_k ~= nil, "IK " .. label .. ": a direction in reach exists")
+    local opp = near_k
+    for _, kk in ipairs(KEYS) do if kk[2] == near_k[2] and kk[3] == -near_k[3] then opp = kk end end
+    key(near_k[1], near_k[1]); used = used + 2
+    local rg = the_rig()
+    local now = pose_of(rg)
+    local h1 = heads(rg, now)
+    local want = shifted(h0[b], near_k, 2)
+    check(dist(h1[b], want) < 2e-3,
+          string.format("IK %s: the keyed rotations bring the head to the target (off by %.5f)", label, dist(h1[b], want)))
+    check(math.abs(dist(h1[g], h1[p]) - len1) < 1e-3 and math.abs(dist(h1[p], h1[b]) - len2) < 1e-3, "IK " .. label .. ": the bone lengths stay")
+    check(dist(h1[g], h0[g]) < 1e-4, "IK " .. label .. ": the root of the chain stays")
+    check(rg.clips[1].keys == nkeys0 and rg.clips[1].times[1] == 0, "IK " .. label .. ": a key at the current time, no other")
+    -- one undo step per move
+    key(opp[1]); used = used + 1
+    check(not same_pose(pose_of(the_rig()), now), "IK " .. label .. ": a move of the target changes the keys")
+    key("^z"); used = used - 1
+    check(same_pose(pose_of(the_rig()), now), "IK " .. label .. ": one undo takes back one move of the target")
+    -- the target is read again from the pose: after the undo the next move starts from it
+    key(opp[1]); used = used + 1
+    local h2 = heads(rg0, pose_of(the_rig()))
+    check(dist(h2[b], shifted(h0[b], near_k, 1)) < 2e-3, "IK " .. label .. ": after an undo the target starts from the pose")
+    -- out of reach: straight to the target, the lengths kept, said on the screen
+    for _ = 1, 24 do key(far_k[1]) end; used = used + 24
+    check(sees("OUT OF REACH") and status():find("out of reach", 1, true), "IK " .. label .. ": out of reach is on the screen")
+    local rg3 = the_rig()
+    local h3 = heads(rg3, pose_of(rg3))
+    check(math.abs(dist(h3[g], h3[p]) - len1) < 1e-3 and math.abs(dist(h3[p], h3[b]) - len2) < 1e-3, "IK " .. label .. ": out of reach, no stretch")
+    local u1 = { (h3[p][1] - h3[g][1]) / len1, (h3[p][2] - h3[g][2]) / len1, (h3[p][3] - h3[g][3]) / len1 }
+    local u2 = { (h3[b][1] - h3[p][1]) / len2, (h3[b][2] - h3[p][2]) / len2, (h3[b][3] - h3[p][3]) / len2 }
+    check(u1[1] * u2[1] + u1[2] * u2[2] + u1[3] * u2[3] > 0.9999, "IK " .. label .. ": out of reach the limb is straight")
+    -- t again: off, and the keys turn the bone again
+    key("t")
+    check(not sees("IK on:") and status() == "IK off", "IK: t again turns it off")
+    key("a"); used = used + 1
+    check(not same_pose(pose_of(the_rig()), pose_of(rg3)), "IK off: w s a d q e turn the bone again")
+    for _ = 1, used do key("^z") end
+    check(same_pose(pose_of(the_rig()), walk0), "IK " .. label .. ": undo takes every move back: the pose as it was")
+  end
+  check(in_help("t", "animate"), "IK: the key is in the F12 help of the animate page")
+  key("home")
+end
 
 -- the mouse (bmui, 2026-10-06): the same things by clicking
 local function at(str, x, y)
@@ -1100,7 +1506,7 @@ local function click(x, y, b)
   mouse(x, y, 0); mouse(x, y, b or 1); mouse(x, y, 0); frames(1)
 end
 
-run_cart("/carts/studio/main.lua", "/carts/village.bm")
+run_cart("/carts/studio/main.lua", "/carts/testkit.bm")
 E._init()
 frames(3)
 local mx, my = at("models", nil, 0)
@@ -1142,16 +1548,25 @@ mx, my = at("Continue", 32)
 click(mx, my)
 check(not sees("Exit bm Studio"), "mouse: a click on Continue")
 
-run_cart("/carts/animator/main.lua", "/carts/village.bm")
+-- the fixed chip "F12 keys" on the hint bar of the pages of bm Studio
+dofile(ROOT .. "/tests/studio/hintchip.lua"){
+  name = "bm Studio", check = check, texts = function() return texts end, hy = 320, w = 640, chip_w = chip_w,
+  click = click, shown = function() return showkeys_n end,
+  pages = {
+    { name = "build", go = function() key("f1") end },
+    { name = "models", go = function() key("f2") end },
+  } }
+
+run_cart("/carts/animator/main.lua", "/carts/testkit.bm")
 E._init()
 frames(3)
-mx, my = at("villager", 16)
-check(mx, "mouse: the villager in the list")
+mx, my = at("walker", 16)
+check(mx, "mouse: the walker in the list")
 click(mx, my)
-check(chosen_at(16) == "villager", "mouse: a click chooses the villager")
+check(chosen_at(16) == "walker", "mouse: a click chooses the walker")
 mx, my = at("animate", nil, 0)
 click(mx, my)
-check(sees("BONES") and sees("ANIMATIONS"), "mouse: the animate tab, the villager's bones")
+check(sees("BONES") and sees("ANIMATIONS"), "mouse: the animate tab, the walker's bones")
 mx, my = at("wave", 16)
 if mx then click(mx, my) end
 check(chosen_at(16) == "wave" or not mx, "mouse: a click on an animation")
@@ -1172,6 +1587,328 @@ mx, my = at("sprites", nil, 0)
 click(mx, my)
 mouse(100, 80, 0, 1)
 check(sees("SPRITES"), "mouse: the sprites page, the wheel on a row")
+
+-- the fixed chip "F12 keys" on the hint bar of the pages of bm Animator
+dofile(ROOT .. "/tests/studio/hintchip.lua"){
+  name = "bm Animator", check = check, texts = function() return texts end, hy = 320, w = 640, chip_w = chip_w,
+  click = click, shown = function() return showkeys_n end,
+  pages = {
+    { name = "play", go = function() key("f1") end },
+    { name = "rig", go = function() key("f2") end },
+    { name = "animate", go = function() key("f3") end },
+    { name = "sprites", go = function() key("f4") end },
+  } }
+
+-- models from /bmm and /glb (APP-9): the list, a .bmm read, a .glb converted to /bmm (a name asked when
+-- its own is over 8 characters or taken), the errors, the texture, the skeleton, the export to /bmm
+do
+  local card = MF.card
+  for _, d in pairs(card) do for k in pairs(d) do d[k] = nil end end
+  MF.calls, MF.writes = {}, {}
+  local SHEET = string.pack("<I2I2", 8, 8) .. string.rep("\10\20\30\255", 64)
+  MF.put_bmm("kite.bmm", "Kite", "kite", 2)
+  MF.put_bmm("tex.bmm", "Tex", "tex", 2, { textured = true, sheet = SHEET })
+  MF.put_bmm("rigged.bmm", "Rigged", "rigged", 3, { rig = true })
+  card["/glb"]["kite.glb"] = "glTF"
+  card["/glb"]["robot.glb"] = "glTF"
+  card["/glb"]["longmodelname.glb"] = "glTF"
+  card["/glb"]["bad.glb"] = "glTF"
+  card["/glb"]["huge.glb"] = "glTF"
+  card["/glb"]["notes.txt"] = "text"
+  -- the row of a name in the list: sorted, one entry for a .bmm and a .glb of the same name
+  local function row_of(name)
+    local seen, list = {}, {}
+    for _, d in ipairs({ "/bmm", "/glb" }) do
+      for f in pairs(MF.card[d]) do
+        local stem = f:lower():match("^(.+)%.[bg][ml][mb]$")
+        if stem and not seen[stem] then seen[stem] = true; list[#list + 1] = stem end
+      end
+    end
+    table.sort(list)
+    for i, n in ipairs(list) do if n == name then return i end end
+  end
+  local function import_row(name, via)
+    if via == "menu" then menu_pick("Import a model", EXIT_S) else key("^i") end
+    key("pgup")
+    for _ = 2, row_of(name) do key("down") end
+    key("\n")
+  end
+  local function bmm_has(name) return MF.card["/bmm"][name .. ".bmm"] ~= nil end
+
+  run_cart("/carts/studio/main.lua", "/carts/testkit.bm")
+  E._init()
+  frames(3)
+  local n0 = #cur_models()
+  key("^i")
+  check(sees("import a model (/bmm, /glb)") and sees("robot   .glb: converted to /bmm") and sees("kite   .bmm (and .glb)")
+        and sees("tex   .bmm") and not sees("notes"), "import: the list of /bmm and /glb, the .glb only ones marked")
+  key("esc")
+  check(not sees("import a model"), "import: Esc closes the list")
+  check(in_help("ctrl i") and in_help("ctrl e") and in_help("Y B"), "keyhelp: import and export")
+
+  import_row("bad")
+  check(status():find("not a .glb file", 1, true) and #cur_models() == n0 and not bmm_has("bad"),
+        "import: a bad .glb gives the message of glb3d: " .. status())
+  import_row("huge")
+  check(status():find("the format holds 65535", 1, true) and #cur_models() == n0,
+        "import: the format limit message of glb3d: " .. status())
+  import_row("kite")
+  check(#cur_models() == n0 + 1 and cur_models()[n0 + 1].name == "kite" and cur_models()[n0 + 1].nf == 2, "import: kite.bmm is a new model")
+  check(status():find("kite.bmm: 4 vertices, 2 triangles", 1, true) and sees("TOOLS"), "import: the counters, the build page: " .. status())
+  check(#MF.calls == 2 and not bmm_has("huge"), "import: a .bmm does not read a .glb")
+
+  -- a name over 8 characters: asked; a taken one: asked again
+  import_row("longmodelname")
+  check(sees("new name in /bmm") and status():find("1 to 8", 1, true), "import: a long .glb name asks a new name: " .. status())
+  type_text("kite")
+  check(sees("new name in /bmm") and status():find("/bmm/kite.bmm is there already", 1, true) and not bmm_has("longmod"),
+        "import: a taken name asks again: " .. status())
+  type_text("Bad Name")
+  check(sees("new name in /bmm") and status():find("a name is 1 to 8", 1, true), "import: a name with spaces asks again")
+  type_text("longmod")
+  check(bmm_has("longmod") and #cur_models() == n0 + 2, "import: the .glb is converted to /bmm/longmod.bmm and opened")
+  check(status():find("longmodelname.glb to /bmm/longmod.bmm: 4 vertices, 3 triangles", 1, true), "import: the counters: " .. status())
+  check(cur_models()[n0 + 2].name == "longmodelname" and cur_models()[n0 + 2].nf == 3, "import: the model keeps the name of the .glb")
+  check(MF.card["/glb"]["longmodelname.glb"] == "glTF", "import: /glb is read only")
+
+  import_row("robot", "menu")
+  check(bmm_has("robot") and #cur_models() == n0 + 3 and status():find("robot.glb to /bmm/robot.bmm", 1, true),
+        "import: robot.glb converted at once (menu: Import a model): " .. status())
+
+  -- the texture: the sheet is in use, the faces turn flat grey; with a clean sheet it comes along
+  import_row("tex")
+  check(status():find("flat grey", 1, true) and #cur_models() == n0 + 4, "import: a textured .bmm on a sheet in use: flat grey: " .. status())
+  local w, h = E.cart_sheet()
+  local keep = {}
+  for y = 0, h - 1 do for x = 0, w - 1 do keep[y * w + x] = E.sget(x, y); E.sset(x, y, nil) end end
+  import_row("tex")
+  check(status():find("its texture on the sheet", 1, true) and E.sget(0, 0) == 0x0A141E, "import: a clean sheet takes the texture: " .. status())
+  for y = 0, h - 1 do for x = 0, w - 1 do E.sset(x, y, keep[y * w + x]) end end
+  key("f2", "del", "del")
+
+  -- the skeleton comes with the model
+  import_row("rigged")
+  local rigged = anim_rigs(sec[9])["rigged"]
+  check(status():find("1 bones", 1, true) and rigged and #rigged.bones == 1, "import: a .bmm with a skeleton keeps it: " .. status())
+
+  -- the export: the name asked, a file that is there replaced only when chosen
+  key("^e")
+  check(sees("export to /bmm: name"), "export: Ctrl+E asks the name")
+  type_text("kite")
+  check(sees("/bmm/kite.bmm is there already") and sees("Replace it"), "export: a name that is taken: the choice")
+  key("\n")                              -- (the cursor is on Another name...)
+  check(sees("export to /bmm: name"), "export: Another name... asks again")
+  type_text("mine")
+  local out = MF.card["/bmm"]["mine.bmm"]
+  check(out and out.sections[9] and out.sections[8]:byte(1) == 1, "export: /bmm/mine.bmm has the model and its skeleton")
+  check(status():find("exported to /bmm/mine.bmm: 4 vertices, 3 triangles", 1, true), "export: the counters: " .. status())
+  local before = MF.card["/bmm"]["kite.bmm"].sections[8]
+  key("^e")
+  type_text("kite")
+  key("up", "\n")
+  check(MF.card["/bmm"]["kite.bmm"].sections[8] ~= before and status():find("exported to /bmm/kite.bmm", 1, true), "export: Replace it changes the file")
+  menu_pick("Export to /bmm", EXIT_S)
+  check(sees("export to /bmm: name"), "export: the menu item asks the name")
+  key("esc")
+  local nw = #MF.writes
+  click(420, 200, 2)
+  check(sees("Import a model") and sees("Export to /bmm"), "import, export: in the context menu")
+  key("esc")
+  check(#MF.writes == nw, "export: Esc writes nothing")
+
+  -- an empty model has nothing to export
+  key("f2", "n", "^e")
+  check(status():find("nothing to export", 1, true), "export: an empty model: " .. status())
+  key("f2", "del", "del")
+
+  -- bm Animator: the same list, a model with a skeleton opens on its page
+  run_cart("/carts/animator/main.lua", "/carts/testkit.bm")
+  E._init()
+  frames(3)
+  local a0 = #cur_models()
+  key("^i")
+  check(sees("import a model (/bmm, /glb)") and sees("rigged   .bmm"), "bm Animator: Ctrl+I lists /bmm and /glb")
+  key("pgup")
+  for _ = 2, row_of("rigged") do key("down") end
+  key("\n")
+  check(#cur_models() == a0 + 1 and anim_rigs(sec[9])["rigged"] and status():find("1 bones", 1, true),
+        "bm Animator: a model with a skeleton imported: " .. status())
+  check(in_help("ctrl i") and in_help("ctrl e"), "bm Animator keyhelp: import and export")
+  key("^e")
+  type_text("fromanim")
+  check(MF.card["/bmm"]["fromanim.bmm"] and MF.card["/bmm"]["fromanim.bmm"].sections[9], "bm Animator: export keeps the skeleton")
+  menu_pick("Import a model", EXIT_A)
+  check(sees("import a model (/bmm, /glb)"), "bm Animator: menu, Import a model")
+  key("esc")
+
+  do -- Animator, rig page: parts. h shows only a bone's faces; comma and point turn a bone and the bones below it (rest pose)
+    key("f2", "n", "up")                         -- a child bone, then the root again
+    local nexp = 0
+    local function snap()                       -- the bones as the model is exported (the file holds the rest pose)
+      nexp = nexp + 1
+      local nm = "turn" .. nexp
+      key("^e")
+      type_text(nm)
+      local f = MF.card["/bmm"][nm .. ".bmm"]
+      local rg = anim_rigs(f and f.sections[9])["rigged"]
+      assert(rg, "parts: the exported skeleton")
+      local o = {}
+      for i, b in ipairs(rg.bones) do o[i] = { b.head[1], b.head[2], b.head[3], b.tail[1], b.tail[2], b.tail[3] } end
+      return o, #rg.bones
+    end
+    local r = { bones = {} }
+    local _, nb = snap()
+    for i = 1, nb do r.bones[i] = true end
+    check(nb >= 2, "parts: the rig page has the skeleton")
+    local before = snap()
+    key("o")                                    -- the axis z (the child bone lies on y)
+    key(".")
+    local turned_say = status()
+    local after = snap()
+    local moved = 0
+    for i = 2, #r.bones do for k = 1, 6 do if math.abs(after[i][k] - before[i][k]) > 1e-4 then moved = moved + 1 end end end
+    local h1 = { after[1][1] - before[1][1], after[1][2] - before[1][2], after[1][3] - before[1][3] }
+    check(moved > 0, "parts: the child bone turns with its parent (" .. moved .. " numbers moved)")
+    check(math.abs(h1[1]) < 1e-6 and math.abs(h1[2]) < 1e-6 and math.abs(h1[3]) < 1e-6, "parts: the head of the turned bone stays")
+    check(turned_say:find("turned 15 degrees round z", 1, true) ~= nil, "parts: . turns 15 degrees: " .. turned_say)
+    key(",")
+    local back = snap()
+    local err = 0
+    for i = 1, #r.bones do for k = 1, 6 do err = math.max(err, math.abs(back[i][k] - before[i][k])) end end
+    check(err < 1e-4, "parts: comma turns it back (" .. err .. ")")
+    key("i", ".")
+    check(status():find("turned 45 degrees round z", 1, true) ~= nil, "parts: i step 45: " .. status())
+    key(",")
+    key("h")
+    check(status():find("only the faces of", 1, true) ~= nil, "parts: h shows only the faces of the bone: " .. status())
+    key("h")
+    check(status():find("and the bones below", 1, true) ~= nil, "parts: h again: with the bones below")
+    key("h")
+    check(status():find("all the faces", 1, true) ~= nil, "parts: h a third time: all")
+  end
+
+
+  -- animations from another model (APP-27): Ctrl+Shift+I and the menu row; the clips go on by bone name
+  local function n16(x) return x .. string.rep("\0", 16 - #x) end
+  local function rig_ac(name, bones, clips)       -- a skeleton chunk for a model of four vertices on bone 0
+    local o = { n16(name), string.pack("<I2I2I2I2", #bones, #clips, 4, 0) }
+    for i, b in ipairs(bones) do
+      o[#o + 1] = n16(b[1]) .. string.pack("<i2I2ffffff", b[2], 0, b[3][1], b[3][2], b[3][3], b[4][1], b[4][2], b[4][3])
+    end
+    o[#o + 1] = string.rep("\0", 4)
+    for _, c in ipairs(clips) do
+      o[#o + 1] = n16(c[1]) .. string.pack("<I2BBf", #c[5], c[2], c[3], c[4])
+      for _, k in ipairs(c[5]) do
+        o[#o + 1] = string.pack("<f", k)
+        for i = 1, #bones do o[#o + 1] = string.pack("<fffffff", 0, 0, 0, 1, 0, 0, 0) end
+      end
+    end
+    return table.concat(o)
+  end
+  local function put_rig(file, name, ac)
+    MF.put_bmm(file, name, name, 2)
+    MF.card["/bmm"][file].sections[9] = string.pack("<I2I2I4", 1, 0, 0) .. ac
+  end
+  put_rig("dstrig.bmm", "dstrig", rig_ac("dstrig", { { "root", -1, { 0, 0, 0 }, { 0, 1, 0 } }, { "arm_l", 0, { 0, 1, 0 }, { 1, 1, 0 } },
+                                                      { "leg_l", 0, { 0, 0, 0 }, { 0, -1, 0 } } }, { { "walk", 1, 1, 1, { 0, 0.5 } } }))
+  put_rig("walker.bmm", "walker", rig_ac("walker", { { "Root", -1, { 0, 0, 0 }, { 0, 2, 0 } }, { "arm.L", 0, { 0, 2, 0 }, { 2, 2, 0 } },
+                                                      { "tail", 0, { 0, 0, 0 }, { 0, -2, 0 } } },
+                                         { { "walk", 2, 1, 1.5, { 0, 0.5, 1.5 } }, { "run", 0, 0, 1, { 0 } } }))
+  put_rig("empty.bmm", "empty", rig_ac("empty", { { "root", -1, { 0, 0, 0 }, { 0, 1, 0 } } }, {}))
+  local function pick_row(name)
+    key("pgup")
+    for _ = 2, row_of(name) do key("down") end
+    key("\n")
+  end
+  key("^i")
+  pick_row("dstrig")
+  key("f3")
+  local dst = anim_rigs(sec[9])["dstrig"]
+  check(dst and #dst.clips == 1 and sees("walk"), "retarget: the target model has one animation")
+  check(in_help("ctrl shift i", "animate"), "retarget: Ctrl+Shift+I is in the F12 help of the animate page")
+  check(in_help("ctrl c / ctrl v", "animate") and in_help("o", "animate"), "retarget: the onion key stays in the help")
+  check(sees("retarget"), "retarget: the hint bar has the new key")
+  key("^I")
+  check(sees("import a model (/bmm, /glb)"), "retarget: Ctrl+Shift+I opens the list of models")
+  key("esc")
+  key("^I")
+  pick_row("empty")
+  check(status():find("no animations", 1, true) and #anim_rigs(sec[9])["dstrig"].clips == 1, "retarget: a model with no animations: " .. status())
+  key("^I")
+  pick_row("kite")
+  check(status():find("no animations", 1, true) and #anim_rigs(sec[9])["dstrig"].clips == 1, "retarget: a model with no skeleton: " .. status())
+  key("^I")
+  pick_row("walker")
+  local after = anim_rigs(sec[9])["dstrig"]
+  check(#after.clips == 3 and after.clips[2].name == "walk2" and after.clips[3].name == "run", "retarget: two animations added, 'walk' is 'walk2': "
+        .. (after.clips[2] and after.clips[2].name or "?"))
+  check(after.clips[2].length == 1.5 and after.clips[2].mode == 2 and after.clips[2].loop and after.clips[2].keys == 3
+        and after.clips[2].times[3] == 1.5 and not after.clips[3].loop and after.clips[3].mode == 0,
+        "retarget: length, loop, mode and key times are kept")
+  check(status() == "2 animations, 2 bones matched, missing: leg_l", "retarget: the message: " .. status())
+  key("^z")
+  check(#anim_rigs(sec[9])["dstrig"].clips == 1, "retarget: one undo takes both animations out")
+  key("^y")
+  check(#anim_rigs(sec[9])["dstrig"].clips == 3, "retarget: redo puts them back")
+  key("^z")
+  click(420, 200, 2)
+  local rx, ry = at("Animations from another model...")
+  check(rx, "retarget: the context menu has the row")
+  if rx then click(rx, ry) end
+  check(sees("import a model (/bmm, /glb)"), "retarget: the context menu row opens the list")
+  pick_row("walker")
+  check(#anim_rigs(sec[9])["dstrig"].clips == 3 and status():find("2 animations", 1, true), "retarget: the context menu row adds them too")
+  key("^z")
+end
+
+-- the format limit: 65535 vertices and 65535 triangles (the u16 counts of the MESH record)
+do
+  local B = assert(loadfile(ROOT .. "/src/script/bm3d.lua", "t", E))()
+  check(B.LIMIT_V == 65535 and B.LIMIT_T == 65535, "limits: the u16 format limit")
+  local function quads(n)               -- n quads on their own corners: 4n vertices, 2n triangles
+    local faces = {}
+    for i = 1, n do
+      local x = i * 2
+      faces[i] = { p = { { x, 0, 0 }, { x + 1, 0, 0 }, { x + 1, 1, 0 }, { x, 1, 0 } }, c = 0xFF0000 }
+    end
+    return { name = "big", faces = faces }
+  end
+  local ok = B.encode_mesh(quads(1250))
+  check(ok == true, "encode_mesh: 5000 vertices are written")
+  local ok2, why = B.encode_mesh(quads(16384))
+  check(ok2 == false and why and why:find("format limit", 1, true) and why:find("65536", 1, true),
+        "encode_mesh: 65536 vertices are refused with the format limit (" .. tostring(why) .. ")")
+  local faces = {}                      -- a grid of 200 x 200 vertices, 79202 triangles
+  local function g(i, j) return { i, j, 0 } end
+  for i = 0, 198 do
+    for j = 0, 198 do
+      faces[#faces + 1] = { p = { g(i, j), g(i + 1, j), g(i + 1, j + 1) }, c = 0xFF0000 }
+      faces[#faces + 1] = { p = { g(i, j), g(i + 1, j + 1), g(i, j + 1) }, c = 0xFF0000 }
+    end
+  end
+  ok2, why = B.encode_mesh({ name = "grid", faces = faces })
+  check(ok2 == false and why and why:find("format limit", 1, true) and why:find("triangles", 1, true),
+        "encode_mesh: more than 65535 triangles are refused with the format limit (" .. tostring(why) .. ")")
+end
+
+-- a model file in the Open list: opened as a project of its models and skeletons; Save writes the .bmm
+-- again (res_write); Try the game says there is none
+do
+  MF.put_bmm("rigged.bmm", "Rigged", "rigged", 3, { rig = true })
+  key("esc", "^s", "^o")
+  if sees("unsaved") then key("^o") end
+  check(sees("/bmm/rigged.bmm"), "open: /bmm/rigged.bmm is in the Open list")
+  open_file("rigged.bmm")
+  check(status():find("opened /bmm/rigged.bmm", 1, true) and status():find("a model file", 1, true),
+        "open: a .bmm opens as a project of its models: " .. status())
+  check(m1().name == "rigged" and rig1() ~= nil, "open: the model and its skeleton")
+  local nw = #MF.writes
+  key("^s")
+  check(#MF.writes == nw + 1 and MF.writes[#MF.writes] == "/bmm/rigged.bmm" and MF.card["/bmm"]["rigged.bmm"].sections[9] ~= nil,
+        "open: Save writes the .bmm with its skeleton: " .. status())
+  key("f5")
+  check(status():find("a model file has no game", 1, true), "open: a .bmm has no game to try: " .. status())
+end
 
 io.write(string.format("bm Studio and bm Animator host: %d/%d checks passed\n", checks - fails, checks))
 os.exit(fails == 0 and 0 or 1)

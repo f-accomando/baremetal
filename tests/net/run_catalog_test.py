@@ -67,14 +67,14 @@ with tempfile.TemporaryDirectory() as tmp:
     games = os.path.join(tmp, "games")
     code = b"function _draw() cls(1) end"
     snake_cover, pong_cover = cover(10), cover(200)
-    game(games, "snake", "snake.bm", mkbm.pack(code, title="Snake", author="bm", cover=snake_cover),
+    game(games, "snake", "snake.bm", mkbm.mark_compat(mkbm.pack(code, title="Snake", author="bm", cover=snake_cover), 3),
          "version: 1.2\nlicense: MIT\nabout: Eat the apples, do not bite your tail. è la à!\n")
     game(games, "pong-2", "Pong_2.bm", mkbm.pack(code, title="Pong 2", cover=pong_cover),
          "# a comment\nversion: 0.9-beta\nlicense: CC-BY-4.0\n")
     game(games, "plain", "plain.bm", mkbm.pack(code, title="Plain", author="x"),
          "version: 3\nlicense: BM Community License 1.0\nabout: No cover.\n")
     # a .b16, the handhelds' cartridge: the same container (docs/B16.md §0)
-    game(games, "pocket", "pocket.b16", mkbm.pack(code, title="Pocket", author="x"),
+    game(games, "pocket", "pocket.b16", mkbm.mark_compat(mkbm.pack(code, title="Pocket", author="x"), 2),
          "version: 1\nlicense: MIT\nabout: For the RGB30.\n")
 
     r = mkmarket(games, "--check")
@@ -96,6 +96,11 @@ with tempfile.TemporaryDirectory() as tmp:
           "mkmarket: the files GitHub Pages serves")
     index = open(os.path.join(out, "index.txt"), encoding="cp437").read()
     check("file games/pocket/pocket.b16 " in index, "index.txt: the .b16's file, its extension kept")
+    recs = {r.split("\n", 1)[0]: r for r in index.split("game ")[1:]}
+    check("\ntargets 2\n" in recs["pocket"] and "\ntargets 3\n" in recs["snake"],
+          "index.txt: the targets line of a cartridge with the compatibility block")
+    check("targets" not in recs["plain"] and "targets" not in recs["pong-2"],
+          "index.txt: no targets line for an old file (the client uses the file name)")
     page = open(os.path.join(out, "index.html"), encoding="utf-8").read()
     check("Snake" in page and "games/snake/snake.bm" in page and "è la à" in page,
           "index.html: the games, with the accents of info.txt")
@@ -144,8 +149,15 @@ with tempfile.TemporaryDirectory() as tmp:
     refused("x", "x.bm", b"PNG...", ok_info, "not a .bm", "not a cartridge: refused")
     refused("x", "x y.bm", good, ok_info, "file names", "a space in the file name: refused")
     refused("x", "", None, None, "no cartridge", "a folder without a cartridge: refused")
-    refused("x", "x.b16", mkbm.pack(code + b"--" + os.urandom(9 << 20).hex().encode()[:9 << 20], title="Huge"),
-            ok_info, "more than a .b16's 8 MiB", "a .b16 over 8 MiB: refused")
+    refused("x", "x.b16", mkbm.pack(code + b"--" + b"x" * (100 << 20), title="Huge"),
+            ok_info, "more than GitHub takes", "a cartridge over the Market's 100 MB: refused")
+    # no 8 MB limit any more: a 9 MB .b16 passes the check (the Market ceiling is 100 MB)
+    big = os.path.join(tmp, "big")
+    shutil.copytree(games, big)
+    game(big, "big", "big.b16", mkbm.pack(code + b"--" + b"x" * (9 << 20), title="Big9", author="x"), ok_info)
+    r = mkmarket(big, "--check")
+    check(r.returncode == 0, "a 9 MB .b16 is listed: " + r.stderr[-200:])
+    shutil.rmtree(big)
     refused("x", "x.bm", mkbm.pack(code), ok_info, "no title", "no title: refused")
     refused("x", "x.bm", good, ok_info + "about: " + "a" * 121 + "\n", "about", "about too long: refused")
 
@@ -156,18 +168,18 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # --add: a new game, the same one again, then a changed one
     add = os.path.join(tmp, "add")
-    cart = os.path.join(tmp, "Hunt.bm")
+    cart = os.path.join(tmp, "Seek.bm")
     with open(cart, "wb") as f:
-        f.write(mkbm.pack(code, title="Hunt", author="bm"))
+        f.write(mkbm.pack(code, title="Seek", author="bm"))
     r = mkmarket(add, "--add", cart, "--version", "a1", "--license", "MIT", "--about", "Find them.")
-    info = os.path.join(add, "hunt", "info.txt")
-    check(r.returncode == 0 and os.path.exists(os.path.join(add, "hunt", "Hunt.bm")) and
+    info = os.path.join(add, "seek", "info.txt")
+    check(r.returncode == 0 and os.path.exists(os.path.join(add, "seek", "Seek.bm")) and
           open(info).read() == "version: a1\nlicense: MIT\nabout: Find them.\n", "--add: a new game")
     r = mkmarket(add, "--add", cart, "--version", "a2")
     check(r.returncode == 0 and "unchanged" in r.stdout and "version: a1" in open(info).read(),
           "--add: the same bytes keep the version")
     with open(cart, "wb") as f:
-        f.write(mkbm.pack(code + b" ", title="Hunt", author="bm"))
+        f.write(mkbm.pack(code + b" ", title="Seek", author="bm"))
     r = mkmarket(add, "--add", cart, "--version", "a3")
     check(r.returncode == 0 and "version: a3" in open(info).read() and "about: Find them." in open(info).read(),
           "--add: changed bytes take the new version, the rest stays")
@@ -178,6 +190,38 @@ with tempfile.TemporaryDirectory() as tmp:
     check(r.returncode == 0 and "kind: app\n" in open(os.path.join(add, "sdk", "info.txt")).read(),
           "--add --kind app: writes kind: app in info.txt")
     check(mkmarket(add, "--check").returncode == 0, "--add: the folder passes --check")
+
+    # games/ and apps/ (--apps): one catalog, the apps with "kind app"
+    sp_games, sp_apps = os.path.join(tmp, "sp", "games"), os.path.join(tmp, "sp", "apps")
+    lic_mit = "version: 1\nlicense: MIT\n"
+    game(sp_games, "snake", "snake.bm", mkbm.pack(code, title="Snake", author="bm"), lic_mit)
+    game(sp_games, "oldapp", "oldapp.bm", mkbm.pack(code, title="Old App", author="bm"), lic_mit + "kind: app\n")
+    game(sp_apps, "paint", "paint.bm", mkbm.pack(code, title="Paint", author="bm"), lic_mit)
+    r = mkmarket(sp_games, "--apps", sp_apps, "-o", os.path.join(tmp, "sp-out"), "--serial", "1")
+    idx = open(os.path.join(tmp, "sp-out", "index.txt"), "rb").read().decode("cp437") if r.returncode == 0 else ""
+    check(r.returncode == 0 and "game paint\nkind app\n" in idx and "game oldapp\nkind app\n" in idx
+          and "game snake\ntitle" in idx and "file apps/paint/paint.bm " in idx
+          and "file games/snake/snake.bm " in idx, "--apps: apps get kind app, games stay games")
+    check(os.path.exists(os.path.join(tmp, "sp-out", "apps", "paint", "paint.bm")),
+          "--apps: the app is served under apps/")
+    r = mkmarket(sp_games, "--check")
+    check(r.returncode == 0 and "2 games" in r.stdout, "old call (one folder): unchanged")
+    game(sp_apps, "snake", "snake.bm", mkbm.pack(code, title="Snake 2", author="bm"), lic_mit)
+    r = mkmarket(sp_games, "--apps", sp_apps, "--check")
+    check(r.returncode != 0 and "one folder only" in r.stderr, "--apps: an id in both folders is an error")
+    shutil.rmtree(os.path.join(sp_apps, "snake"))
+    r = mkmarket(sp_games, "--apps", os.path.join(tmp, "nothing"), "--check")
+    check(r.returncode == 0, "--apps: a missing apps/ folder is an empty one")
+    sp_cart = os.path.join(tmp, "Sound.bm")
+    with open(sp_cart, "wb") as f:
+        f.write(mkbm.pack(code, title="Sound", author="bm"))
+    r = mkmarket(sp_games, "--apps", sp_apps, "--add", sp_cart, "--id", "sound", "--kind", "app",
+                 "--version", "1", "--license", "MIT")
+    check(r.returncode == 0 and os.path.exists(os.path.join(sp_apps, "sound", "Sound.bm"))
+          and not os.path.exists(os.path.join(sp_games, "sound")), "--add --kind app --apps: goes in apps/")
+    r = mkmarket(sp_games, "--apps", sp_apps, "--add", sp_cart, "--id", "snake", "--kind", "app", "--version", "1")
+    check(r.returncode != 0 and "already in" in r.stderr, "--add --kind app: an id of games/ is refused")
+    check(mkmarket(sp_games, "--apps", sp_apps, "--check").returncode == 0, "--add --apps: --check passes on both")
 
     covers = []
     for gid, (_, _, rgba) in (("snake", snake_cover), ("pong-2", pong_cover)):

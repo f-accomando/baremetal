@@ -245,6 +245,8 @@ int fat_replace(const char *path, const void *data, size_t len)
     return write_host(hp, data, len);
 }
 
+int fat_writing(void) { return 0; }
+
 int fat_delete(const char *path)
 {
     char hp[512];
@@ -261,6 +263,7 @@ int config_find_file(const char *name, fat_entry_t *e)
 
 void config_save(void) { }
 void config_set(const char *key, const char *value) { (void)key; (void)value; }
+void config_unset(const char *key) { (void)key; }
 /* bm/config.txt: BMHOST_CONFIG="key=value,key=value" (gpu3d_vs=2, gpu3d_queue=1...) */
 const char *config_get(const char *key)
 {
@@ -431,6 +434,19 @@ static void arena_check(void)
 }
 #endif
 
+#ifdef BMHOST_GPU
+/* the RAM page of a game drawing via RAM (dark_begin) where the emulated V3D reaches it too; the arena gives nothing back */
+void *bm_ram_alloc(size_t bytes)
+{
+    return test_aligned_alloc(64, bytes);
+}
+
+void bm_ram_free(void *p)
+{
+    (void)p;
+}
+#endif
+
 int fb_init_depth(framebuffer_t *fb, uint32_t width, uint32_t height, uint32_t buffers, uint32_t depth)
 {
 #ifdef BMHOST_GPU
@@ -509,6 +525,7 @@ void irq_disable(unsigned irq) { (void)irq; }
 /* no V3D on the PC: the ARM's rasterizer draws the 3D, as in QEMU (make
  * bmhost-gpu links src/gpu/gpu3d.c with the V3D emulator instead) */
 const char *gpu3d_status(void) { return "no V3D (bmhost)"; }
+const char *gpu3d_probe_log(void) { return ""; }
 int gpu3d_init(void) { return -1; }
 int gpu3d_ready(void) { return 0; }
 int gpu3d_failed(void) { return 0; }
@@ -541,6 +558,7 @@ int gpu3d_inflight(void) { return 0; }
 int gpu3d_sync(void) { return 0; }
 int gpu3d_sync_page(const void *px) { (void)px; return 0; }
 int gpu3d_queue2(void) { return 0; }
+int gpu3d_pipelined(void) { return 0; }
 void gpu3d_set_queue(int on) { (void)on; }
 int gpu3d_queue(void) { return 0; }
 void gpu3d_set_wc(int on) { (void)on; }
@@ -555,6 +573,11 @@ void gpu3d_set_sort(int on) { (void)on; }
 int gpu3d_sort(void) { return 0; }
 void gpu3d_set_attr(int on) { (void)on; }
 int gpu3d_attr(void) { return 0; }
+int gpu3d_light2d(const g16_t *g, const float *amb, const gpu_lamp_t *lamp, int n)
+{
+    (void)g; (void)amb; (void)lamp; (void)n;
+    return -1;
+}
 int gpu3d_rect2d(const g16_t *g, int x0, int y0, int x1, int y1, uint16_t c)
 {
     (void)g; (void)x0; (void)y0; (void)x1; (void)y1; (void)c;
@@ -671,3 +694,147 @@ int reports_text(const char *kind, const char *text, size_t len)
     fclose(f);
     return 0;
 }
+
+/* the screen recorder (src/bm/rec.c) works on the console's card and fibers: off in bmhost */
+#include "bm/rec.h"
+int rec_config(rec_cfg_t *cfg) { (void)cfg; return 0; }
+int rec_start(const rec_cfg_t *cfg) { (void)cfg; return -1; }
+void rec_stop(void) {}
+int rec_active(void) { return 0; }
+int rec_due(void) { return 0; }
+void rec_frame(const uint16_t *px, uint32_t stride, int w, int h) { (void)px; (void)stride; (void)w; (void)h; }
+void rec_pump(uint32_t until) { (void)until; }
+void rec_note_game_io(void) {}
+void rec_overlay_text(char *buf, int n) { if (n > 0) buf[0] = 0; }
+
+/* web_get (src/bm/webget.c) needs fibers and TLS: bmhost has neither, the request fails. image_load
+ * and file_write are the real code (webimg.c, webpolicy.c, the host folder as the card). */
+#include "webget.h"
+int web_start(const char *url, size_t max, uint32_t timeout_ms, char *err, size_t en)
+{
+    (void)url; (void)max; (void)timeout_ms;
+    snprintf(err, en, "web_get does not run in bmhost");
+    return -1;
+}
+web_state_t web_poll(int id) { (void)id; return WEB_FREE; }
+const web_req_t *web_find(int id) { (void)id; return NULL; }
+void web_cancel(int id) { (void)id; }
+void web_reset(void) {}
+int web_start_resume(const char *url, size_t max, uint32_t timeout_ms, const char *stem, char *err, size_t en)
+{
+    (void)stem;
+    return web_start(url, max, timeout_ms, err, en);
+}
+int web_start_post(const char *url, const char *headers, const void *body, size_t body_len, size_t max,
+                   uint32_t timeout_ms, char *err, size_t en)
+{
+    (void)headers; (void)body; (void)body_len;
+    return web_start(url, max, timeout_ms, err, en);
+}
+
+int web_start_lan(const char *url, size_t max, uint32_t timeout_ms, char *err, size_t en)
+{
+    return web_start(url, max, timeout_ms, err, en);
+}
+
+/* bm/ai.txt (src/net/aiconf.c): bmhost reads BMHOST_CONFIG's ai_url, ai_model and ai_key instead */
+#include "net/aiconf.h"
+const char *ai_conf_get(const char *name)
+{
+    char k[16];
+    snprintf(k, sizeof k, "ai_%s", name);
+    return config_get(k);
+}
+int ai_conf_set(const char *url, const char *model, const char *key) { (void)url; (void)model; (void)key; return 0; }
+
+/* ai_pair (src/net/aipair.c) needs mbedTLS: bmhost has none, the code is refused before the network */
+#include "net/aipair.h"
+int ai_pair_code(const char *typed, char out[AI_PAIR_CODE_LEN + 1], char *err, size_t en)
+{
+    (void)typed;
+    out[0] = 0;
+    snprintf(err, en, "ai_pair does not run in bmhost");
+    return -1;
+}
+int ai_pair_check(const char *pem, size_t len, const char *code, char *err, size_t en)
+{
+    (void)pem; (void)len; (void)code;
+    snprintf(err, en, "ai_pair does not run in bmhost");
+    return -1;
+}
+int ai_pair_install(const char *pem, size_t len, char *err, size_t en)
+{
+    (void)pem; (void)len;
+    snprintf(err, en, "ai_pair does not run in bmhost");
+    return -1;
+}
+
+/* file_write (src/bm/webfile.c) queues in a fiber: bmhost writes at once, the host folder is the card */
+#include "webfile.h"
+#include "webpolicy.h"
+#include "fs/sdlock.h"
+static wf_state_t host_wf_state;
+static char host_wf_name[13], host_wf_err[96];
+int webfile_write(const char *name, const uint8_t *data, size_t len, size_t cap, char *err, size_t en)
+{
+    if (len > cap) {
+        snprintf(err, en, "the file is over the cap (file_write_max_kib in bm/config.txt)");
+        return -1;
+    }
+    char path[32];
+    snprintf(path, sizeof path, "%s/%s", WEB_FILES_DIR, name);
+    fat_entry_t e;
+    const int there = fat_find(path, &e) == 0;
+    if (there && e.is_dir) {
+        snprintf(err, en, "that name is a folder");
+        return -1;
+    }
+    if (!there) {
+        int files = 0;
+        fat_dir_t d;
+        if (fat_opendir(&d, WEB_FILES_DIR) == 0)
+            while (fat_readdir(&d, &e) > 0)
+                files++;
+        if (files >= FILE_MAX_FILES) {
+            snprintf(err, en, "the bm/web folder has 128 files already");
+            return -1;
+        }
+    }
+    const int ok = there ? fat_replace(path, data, len) == 0
+                         : fat_mkdirs(WEB_FILES_DIR) == 0 && fat_write_file(WEB_FILES_DIR, name, data, len) == 0;
+    if (!ok)
+        snprintf(err, en, "%s", fat_error());
+    return ok ? 0 : -1;
+}
+int webfile_queue(const char *name, const uint8_t *data, size_t len, size_t cap, char *err, size_t en)
+{
+    const int rc = webfile_write(name, data, len, cap, host_wf_err, sizeof host_wf_err);
+    snprintf(host_wf_name, sizeof host_wf_name, "%s", name);
+    host_wf_state = rc ? WF_ERROR : WF_DONE;
+    if (rc)
+        snprintf(err, en, "%s", host_wf_err);
+    return 0;
+}
+int webfile_pump(uint32_t budget_us) { (void)budget_us; return 0; }
+wf_state_t webfile_state(const char *name, char *err, size_t en, size_t *done)
+{
+    if (strcmp(name, host_wf_name) != 0)
+        return WF_NONE;
+    if (done)
+        *done = 0;
+    if (host_wf_state == WF_ERROR)
+        snprintf(err, en, "%s", host_wf_err);
+    return host_wf_state;
+}
+int sd_write_file(const char *who, const char *dir, const char *name, const void *data, size_t len)
+{
+    (void)who;
+    return fat_mkdirs(dir) == 0 && fat_write_file(dir, name, data, len) == 0 ? 0 : -1;
+}
+
+int crt_filter_is_active(void) { return 0; }
+void crt_apply_filter(void *pixels, int w, int h, int pitch_bytes)
+{
+    (void)pixels; (void)w; (void)h; (void)pitch_bytes;
+}
+

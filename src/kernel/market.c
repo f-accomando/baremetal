@@ -2,6 +2,8 @@
 #include "carts.h"
 #include "config.h"
 #include "fiber.h"
+#include "menu_ui.h"
+#include "notice.h"
 #include "bm/bm.h"
 #include "bm/png.h"
 #include "drivers/timer.h"
@@ -21,15 +23,15 @@
 #include <string.h>
 
 #define BASE_URL    "https://f-accomando.github.io/bm-market/"
+#define GAMES_DIR   "/bm"                       /* where both menus read their games */
 #ifdef BM_RGB30
-#define GAMES_DIR   "/bm"                       /* where the RGB30's menu reads its games */
+#define MY_KERNEL   BM_TARGET_RGB30             /* the kernel of the development notes */
 #else
-#define GAMES_DIR   "/carts"
+#define MY_KERNEL   BM_TARGET_PI
 #endif
 #define CACHE_DIR   "/bm/market"
 #define STACK_SIZE  (128 * 1024)                /* TLS, and the interrupts on top */
 #define REFRESH_US  (10u * 60 * 1000000)        /* the catalog again after 10 minutes */
-#define NOTE_US     (6u * 1000000)              /* how long a message stays in the footer */
 #define SKELETONS   8                           /* placeholders before the catalog */
 #define CHUNK       (16 * 1024)                 /* sd: sources: progress, then a pause */
 #define PATH_MAX_   (FAT_NAME_MAX + 10)
@@ -47,7 +49,7 @@ typedef struct {
     int failed;                 /* the last download failed */
 } slot_t;
 
-/* the games installed from the Market: /bm/market/GAMES.TXT, one line each,
+/* the games installed from the Market: /bm/market/games.txt, one line each,
  * "<id> <sha256 hex> <path>" */
 typedef struct {
     char id[24];
@@ -62,7 +64,7 @@ static int nowned;
 static char base[160];
 static int inited, active, sel, have, changed;
 static int fetched, net_failed;
-static uint32_t fetched_at, note_at;
+static uint32_t fetched_at, refresh_done_at;
 static char note[64], banner[72];
 static char want_id[24];        /* the game to download next */
 static int want_b16;            /* 1 if want_id is the .b16 edition */
@@ -70,6 +72,7 @@ static int cur_page;            /* MARKET_PAGE_GAMES or MARKET_PAGE_APPS */
 static int delay_ms;            /* market_delay in bm/config.txt: slows a source down (tests) */
 
 static fiber_job_t work = { .name = "market" };
+#define COVER_QUIET_US 250000           /* a cover job starts only after the selection rested this long (menu_ui_still) */
 enum { JOB_CACHE, JOB_INDEX, JOB_COVER, JOB_GET };
 static int job, job_game;
 static int finishing;           /* a game checked and being written: not stopped off the tab */
@@ -81,9 +84,21 @@ static void say(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(note, sizeof note, fmt, ap);
     va_end(ap);
-    note_at = timer_ticks();
     if (note[0])
         kprintf("market: %s\n", note);
+}
+
+/* say(), and the reason in the notice box: the user's action did not happen
+ * (the bottom bar of the menu shows the key chips only) */
+static void fail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void fail(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(note, sizeof note, fmt, ap);
+    va_end(ap);
+    kprintf("market: %s\n", note);
+    notice_fail(note);
 }
 
 static int from_sd(void)
@@ -206,7 +221,7 @@ static int fetch(const char *rel, size_t max, size_t expect, uint32_t *got,
     sink_t s = { NULL, 0, 0, max, got };
     if (expect && (s.buf = malloc(expect)) != NULL)
         s.cap = expect;
-    http_req_t req = { .timeout_ms = 15000 };
+    http_req_t req = { .timeout_ms = 15000, .keep_alive = 1 };
     static http_info_t info;
     int st = http_request(url, &req, sink, &s, &info);
     if (st == 200 && !info.error[0]) {
@@ -241,6 +256,19 @@ static const char *kind_of(const catalog_game_t *g)
     return is_b16(g->file.path) ? "b16" : "bm";
 }
 
+/* The policy for a catalog entry (compat-policy.toml, the Market list): a catalog line has no header yet, so the
+ * file name tells the edition. 1 if the entry is grey on this kernel; *why is its reason. */
+static int entry_grey(const catalog_game_t *g, const char **why)
+{
+    bm_compat_facts_t f;
+    bm_compat_facts_named(is_b16(g->file.path), g->file.size, &f);
+    if (g->targets) {                   /* the catalog line "targets N": the cartridge's own block */
+        f.declared = 1;
+        f.targets = g->targets;
+    }
+    return bm_compat_classify(&f, MY_KERNEL, 1, why, NULL) == BM_ACT_GREY;
+}
+
 static owned_t *owned_find(const char *id, int b16)
 {
     for (int i = 0; i < nowned; i++)
@@ -257,7 +285,7 @@ static void owned_load(void)
     fat_entry_t e;
     uint8_t *d;
     size_t len;
-    if (fat_find(CACHE_DIR "/GAMES.TXT", &e) != 0 || fat_load(&e, &d, &len) != 0)
+    if (fat_find(CACHE_DIR "/games.txt", &e) != 0 || fat_load(&e, &d, &len) != 0)
         return;
     char line[256];
     for (size_t pos = 0; pos < len && nowned < CATALOG_MAX; ) {
@@ -292,7 +320,7 @@ static int owned_save(void)
         hex(owned[i].sha, 32, h);
         p += ksnprintf(p, sizeof *owned + 70, "%s %s %s\n", owned[i].id, h, owned[i].path);
     }
-    int r = fat_mkdirs(CACHE_DIR) == 0 && fat_write_file(CACHE_DIR, "GAMES.TXT", text, (size_t)(p - text)) == 0;
+    int r = fat_mkdirs(CACHE_DIR) == 0 && fat_write_file(CACHE_DIR, "games.txt", text, (size_t)(p - text)) == 0;
     free(text);
     return r ? 0 : -1;
 }
@@ -348,39 +376,20 @@ static void refresh_slots(void)
  * are kept. */
 static void adopt(catalog_t *nc)
 {
-#ifdef BM_RGB30
-    /* the RGB30 plays only the .b16 games by default (the user's choice,
-     * 2026-10-05; market_bm=1 in bm/config.txt also lists .bm cartridges: the Games tab has its own key, show_bm) */
-    const char *mkt = config_get("market_bm"), *old = config_get("show_bm");
-    const int want_bm = mkt ? strcmp(mkt, "1") == 0 : (old && strcmp(old, "1") == 0);   /* show_bm=1: as it used to be */
-    if (!want_bm) {
-        int k = 0;
-        for (int i = 0; i < nc->n; i++)
-            if (is_b16(nc->games[i].file.path))
-                nc->games[k++] = nc->games[i];
-        nc->n = k;
-    }
-#else
-    /* the Pi runs both .bm and .b16 cartridges; when a game has both in the
-     * catalog (Overbit) and show_b16 is not enabled, keep its .bm so the Pi's
-     * edition is listed without duplicating the same game, while .b16-only
-     * titles (Yharnam, Titan Clash EX) or show_b16=1 are shown with their badge */
-    const char *show_b16 = config_get("show_b16");
-    if (!show_b16 || strcmp(show_b16, "1") != 0) {
-        int k = 0;
-        for (int i = 0; i < nc->n; i++) {
-            int dup_bm = 0;
-            if (is_b16(nc->games[i].file.path)) {
-                for (int j = 0; j < nc->n; j++)
-                    if (j != i && strcmp(nc->games[j].id, nc->games[i].id) == 0 && !is_b16(nc->games[j].file.path))
-                        dup_bm = 1;
-            }
-            if (!dup_bm)
-                nc->games[k++] = nc->games[i];
+    /* One entry per id on both kernels: when the catalog has a .bm and an old .b16 of the same game, the .bm is
+     * listed. A cartridge made for the other kernel stays in the list with a faded cover (compat-policy.toml). */
+    int k = 0;
+    for (int i = 0; i < nc->n; i++) {
+        int dup_bm = 0;
+        if (is_b16(nc->games[i].file.path)) {
+            for (int j = 0; j < nc->n; j++)
+                if (j != i && strcmp(nc->games[j].id, nc->games[i].id) == 0 && !is_b16(nc->games[j].file.path))
+                    dup_bm = 1;
         }
-        nc->n = k;
+        if (!dup_bm)
+            nc->games[k++] = nc->games[i];
     }
-#endif
+    nc->n = k;
     slot_t *ns = calloc(nc->n ? (size_t)nc->n : 1, sizeof *ns);
     if (!ns) {
         catalog_free(nc);
@@ -396,7 +405,7 @@ static void adopt(catalog_t *nc)
                 ns[i].cover_state = COVER_READY;
                 break;
             }
-        if (!g->cover.size && menu_make_cover(&ns[i].cover, g->title, kind_of(g)) == 0)
+        if (!g->cover.size && menu_make_cover(&ns[i].cover, g->title) == 0)
             ns[i].cover_state = COVER_READY;
     }
     for (int j = 0; j < cat.n; j++)
@@ -462,8 +471,8 @@ static void job_cache(void)
     fiber_slice();
     uint8_t *idx, *sig;
     size_t il, sl;
-    load_file(CACHE_DIR "/INDEX.TXT", &idx, &il);
-    load_file(CACHE_DIR "/INDEX.SIG", &sig, &sl);
+    load_file(CACHE_DIR "/index.txt", &idx, &il);
+    load_file(CACHE_DIR "/index.sig", &sig, &sl);
     fiber_slice();
     catalog_t c;
     char err[96];
@@ -476,6 +485,8 @@ static void job_cache(void)
     kprintf("market: %s, %s%s\n", base, have ? "catalog saved on the SD card" : "no catalog saved",
             catalog_has_key() ? "" : ", no key");
     inited = 1;
+    if (!online())
+        refresh_done_at = timer_ticks();
 }
 
 static void job_index(void)
@@ -489,6 +500,7 @@ static void job_index(void)
         read_catalog(idx, il, sig, sl, &c, err, sizeof err) != 0) {
         if (strcmp(err, "cancelled") != 0) {
             net_failed = 1;
+            refresh_done_at = timer_ticks();
             say("catalog: %s", err);
         }
         free(idx);
@@ -497,6 +509,7 @@ static void job_index(void)
     }
     fetched = 1;
     fetched_at = timer_ticks();
+    refresh_done_at = timer_ticks();
     if (have && !catalog_newer(c.serial, cat.serial)) {
         if (strcmp(c.serial, cat.serial) != 0)
             say("catalog %s is older than %s: kept", c.serial, cat.serial);
@@ -510,9 +523,9 @@ static void job_index(void)
         fiber_slice();
         int ok = fat_mkdirs(CACHE_DIR) == 0;
         fiber_slice();
-        ok = ok && fat_write_file(CACHE_DIR, "INDEX.TXT", idx, il) == 0;
+        ok = ok && fat_write_file(CACHE_DIR, "index.txt", idx, il) == 0;
         fiber_slice();
-        ok = ok && fat_write_file(CACHE_DIR, "INDEX.SIG", sig, sl) == 0;
+        ok = ok && fat_write_file(CACHE_DIR, "index.sig", sig, sl) == 0;
         if (!ok)
             kprintf("market: cannot save the catalog: %s\n", fat_error());
     }
@@ -526,9 +539,7 @@ static void cache_name(const catalog_file_t *f, char *name)
 {
     char h[9];
     hex(f->sha256, 4, h);
-    for (char *p = h; *p; p++)
-        if (*p >= 'a') *p = (char)(*p - 32);
-    ksnprintf(name, 13, "%s.PNG", h);
+    ksnprintf(name, 13, "%s.png", h);
 }
 
 static void job_cover(int i)
@@ -571,9 +582,11 @@ static void job_cover(int i)
     int w = 0, h = 0;
     if (d && png_rgba(d, len, &rgba, &w, &h) == 0 && menu_load_cover(&s->cover, rgba, w, h) == 0) {
         s->cover_state = COVER_READY;
+    } else if (fiber_cancelled()) {     /* stopped in the decode: the file is in the cache, decode it next time */
+        s->cover_state = COVER_WAIT;
     } else if (++s->cover_tries >= 2 || d) {
         /* broken or unreachable: the title on a label, as for games without one */
-        if (menu_make_cover(&s->cover, g->title, kind_of(g)) == 0)
+        if (menu_make_cover(&s->cover, g->title) == 0)
             s->cover_state = COVER_READY;
     } else {
         s->cover_state = COVER_WAIT;
@@ -609,14 +622,14 @@ static int find(const char *id, int b16)
     return -1;
 }
 
-/* where a new game goes: /carts/SNAKE.BM from the id (a .b16 SNAKE.B16;
- * on the RGB30 in /bm), another name if that one is taken */
+/* where a new game goes: /bm/snake.bm from the id (a .b16 snake.b16),
+ * another name if that one is taken */
 static int new_path(const char *id, const char *ext, char *name, size_t n)
 {
     char stem[9];
     int k = 0;
     for (; id[k] && k < 8; k++)
-        stem[k] = id[k] >= 'a' && id[k] <= 'z' ? (char)(id[k] - 32) : id[k];
+        stem[k] = id[k] >= 'A' && id[k] <= 'Z' ? (char)(id[k] + 32) : id[k];
     stem[k] = 0;
     for (int t = 0; t < 10; t++) {
         char path[32];
@@ -653,7 +666,7 @@ static void job_get(int i)
             say("download of %s interrupted", g->title);
         } else {
             s->failed = 1;
-            say("download failed: %s", err);
+            fail("download failed: %s", err);
         }
         return;
     }
@@ -661,7 +674,7 @@ static void job_get(int i)
         free(d);
         s->busy = 0;
         s->failed = 1;
-        say("%s: not the file of the catalog", g->title);
+        fail("%s: not the file of the catalog", g->title);
         return;
     }
     /* checked: from here the job ends even if the tab is left (the write
@@ -673,7 +686,7 @@ static void job_get(int i)
     if (s->path[0]) {
         ksnprintf(path, sizeof path, "%s", s->path);
         ok = fat_replace(path, d, len) == 0;
-    } else if (new_path(g->id, is_b16(g->file.path) ? ".B16" : ".BM", name, sizeof name) == 0) {
+    } else if (new_path(g->id, is_b16(g->file.path) ? ".b16" : ".bm", name, sizeof name) == 0) {
         ksnprintf(path, sizeof path, GAMES_DIR "/%s", name);
         ok = fat_mkdirs(GAMES_DIR) == 0 && fat_write_file(GAMES_DIR, name, d, len) == 0;
     } else {
@@ -684,7 +697,7 @@ static void job_get(int i)
     if (!ok) {
         finishing = 0;
         s->failed = 1;
-        say("cannot write %s: %s", g->title, fat_error());
+        fail("cannot write %s: %s", g->title, fat_error());
         return;
     }
     owned_set(g->id, g->file.sha256, path);
@@ -713,6 +726,8 @@ static void job_main(void *arg)
 
 static int start_job(void)
 {
+    if (!active)
+        return 0;
     int i;
     if (!inited) {
         job = JOB_CACHE;
@@ -727,7 +742,7 @@ static int start_job(void)
         job_game = i;
     } else if (!fetched && !net_failed && online()) {
         job = JOB_INDEX;
-    } else if ((i = pick_cover()) >= 0) {
+    } else if (menu_ui_still(COVER_QUIET_US) && (i = pick_cover()) >= 0) {
         job = JOB_COVER;
         job_game = i;
     } else {
@@ -740,22 +755,47 @@ void market_set_active(int on)
 {
     if (on && !active) {
         active = 1;
-        if (fetched && timer_ticks() - fetched_at > REFRESH_US)
-            fetched = 0;
-        net_failed = 0;                 /* each visit tries the network again */
+        if (!fetched)
+            net_failed = 0;             /* retry on visit only if catalog not yet loaded */
     } else if (!on && active) {
         active = 0;
-        if (!finishing)
-            fiber_job_stop(&work);      /* stop it now: it ends at its next wait */
+        if (!finishing && job != JOB_GET)
+            fiber_job_stop(&work);      /* covers/index pause off the tab; game download goes on */
     }
+}
+
+int market_refresh_available(void)
+{
+    if (!inited || (work.busy && job == JOB_INDEX) || (!fetched && !net_failed && online()))
+        return 0;
+    if (!refresh_done_at)
+        return 0;
+    return (uint32_t)(timer_ticks() - refresh_done_at) >= 10u * 1000000u;
+}
+
+int market_refresh(void)
+{
+    if (!market_refresh_available())
+        return 0;
+    if (!online()) {
+        fail("No network: connect in Settings > WiFi");
+        refresh_done_at = timer_ticks();
+        return 0;
+    }
+    refresh_done_at = 0;
+    fetched = 0;
+    net_failed = 0;
+    if (work.busy && job == JOB_COVER)
+        fiber_job_stop(&work);
+    say("Checking for new games...");
+    return 1;
 }
 
 void market_tick(uint32_t until)
 {
     if (!active) {
-        /* off the tab only a game being written goes on, to its end: no
-         * network, no new job */
-        if (work.busy && finishing)
+        /* off the tab: a game being downloaded or written continues in background */
+        if (work.busy && (finishing || job == JOB_GET))
             fiber_job_run(&work, until);
         return;
     }
@@ -818,7 +858,7 @@ int market_items(menu_item_t *items, int max)
             return 0;
         int n = SKELETONS < max ? SKELETONS : max;
         for (int i = 0; i < n; i++)
-            items[i] = (menu_item_t){ .title = "", .author = "", .path = "", .kind = "market", .loading = 1 };
+            items[i] = (menu_item_t){ .title = "", .path = "", .kind = "market", .loading = 1 };
         return n;
     }
     int want_app = cur_page == MARKET_PAGE_APPS, n = 0;
@@ -829,14 +869,14 @@ int market_items(menu_item_t *items, int max)
         const slot_t *s = &slots[i];
         int ready = s->cover_state == COVER_READY && s->cover.px;
         int b16 = is_b16(g->file.path);
+        const char *why;
         items[n++] = (menu_item_t){
-            .title = g->title, .author = g->author, .path = s->path, .kind = "market",
-            .format = b16 ? "b16" : "bm",
-            .size = g->file.size, .cover = ready ? &s->cover : NULL, .loading = !ready,
+            .grey = entry_grey(g, &why),
+            .title = g->title, .path = s->path, .kind = "market",
+            .cover = ready ? &s->cover : NULL, .loading = !ready,
             .busy = s->busy || (strcmp(want_id, g->id) == 0 && want_b16 == b16),
             .percent = s->busy && g->file.size ? (int)((uint64_t)s->got * 100 / g->file.size) : 0,
-            .badge = s->busy ? NULL : s->path[0] ? (s->update ? "Update" : "Installed")
-                   : s->failed ? "Retry" : NULL,
+            .badge = s->busy || s->path[0] ? NULL : s->failed ? "Retry" : NULL,
         };
     }
     return n;
@@ -859,48 +899,6 @@ const char *market_banner(void)
         return "No network: connect in Settings > WiFi";
     ksnprintf(banner, sizeof banner, "Market: %s", note[0] ? note : "no catalog");
     return banner;
-}
-
-const char *market_status(void)
-{
-    static char line[48];
-    long rx = lan_receiving();
-    lan_offer_t o;
-    if (rx >= 0 && lan_offer(&o) == 0) {
-        ksnprintf(line, sizeof line, "receiving: %ld KiB", rx / 1024);
-        return line;
-    }
-    if (note[0] && timer_ticks() - note_at < NOTE_US)
-        return note;
-    if (!have)
-        return "";
-    if (!online())
-        return "Offline: the saved catalog";
-    if (work.busy && job == JOB_INDEX)
-        return "Checking for new games...";
-    const char *s = cat.serial;
-    int cnt = market_page_count(cur_page);
-    int n = ksnprintf(line, sizeof line, "%d %s", cnt, cur_page == MARKET_PAGE_APPS ? "apps" : "games");
-    if (strlen(s) >= 8 && n + 12 < (int)sizeof line)     /* the date of the serial */
-        ksnprintf(line + n, sizeof line - (size_t)n, ", %c%c%c%c-%c%c-%c%c",
-                  s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]);
-    return line;
-}
-
-void market_details(int i, char *buf, size_t n)
-{
-    buf[0] = 0;
-    int ci = cat_idx(i);
-    if (ci < 0)
-        return;
-    const catalog_game_t *g = &cat.games[ci];
-    const slot_t *s = &slots[ci];
-    if (s->busy)
-        ksnprintf(buf, n, "downloading %lu of %lu KiB", (unsigned long)(s->got / 1024),
-                  (unsigned long)((g->file.size + 1023) / 1024));
-    else
-        ksnprintf(buf, n, "%s   v%s   %s   %s   %lu KiB", g->author[0] ? g->author : "-", g->version, g->license,
-                  kind_of(g), (unsigned long)((g->file.size + 1023) / 1024));
 }
 
 int market_action(int i)
@@ -939,7 +937,7 @@ void market_ask(int i, home_do_t *d)
     if (up)
         ksnprintf(d->ask_detail, sizeof d->ask_detail, "The Market's version replaces it; saves stay.");
     else
-        ksnprintf(d->ask_detail, sizeof d->ask_detail, "%lu KiB, free, license %s",
+        ksnprintf(d->ask_detail, sizeof d->ask_detail, "%lu KB, free, license %s",
                   (unsigned long)((g->file.size + 1023) / 1024), g->license);
     ksnprintf(d->ask_yes, sizeof d->ask_yes, "%s", up ? "Update" : "Download");
 }
@@ -953,13 +951,23 @@ void market_get(int i)
     want_b16 = is_b16(cat.games[ci].file.path);
     slots[ci].failed = 0;
     if (!online())
-        say("no network: the download waits for it");
+        fail("no network: the download waits for it");
 }
 
 const char *market_path(int i)
 {
     int ci = cat_idx(i);
     return ci >= 0 ? slots[ci].path : "";
+}
+
+int market_has_update(const char *path)
+{
+    if (!have)
+        return 0;
+    for (int i = 0; i < cat.n; i++)
+        if (slots[i].update && slots[i].path[0] && strcmp(slots[i].path, path) == 0)
+            return 1;
+    return 0;
 }
 
 /* ---------------------------------------------------------------- options */
@@ -1000,12 +1008,12 @@ void market_panel(int i, home_panel_t *p)
              g->author[0] ? g->author : "-");
     home_row(p, MENU_ROW_INFO, M_VERSION, "Version", "Given by the author", "%s", g->version);
     home_row(p, MENU_ROW_INFO, M_LICENSE, "License", "What you may do with it", "%s", g->license);
-    home_row(p, MENU_ROW_INFO, M_SIZE, "Size", "The whole cartridge", "%lu KiB",
+    home_row(p, MENU_ROW_INFO, M_SIZE, "Size", "The whole cartridge", "%lu KB",
              (unsigned long)((g->file.size + 1023) / 1024));
     home_row(p, MENU_ROW_INFO, M_FILE, "File", s->path[0] ? "On the SD card" : "Not on the SD card yet",
              "%s", s->path[0] ? s->path : "-");
     home_row(p, MENU_ROW_INFO, M_TYPE, "Format",
-             is_b16(g->file.path) ? "Handheld edition (.b16, 8 MiB ceiling)" : "Native cartridge (.bm)",
+             is_b16(g->file.path) ? "An old edition (.b16)" : "A cartridge (.bm)",
              "%s (%s)", kind_of(g), g->is_app ? "app" : "game");
     if (s->path[0] && !s->busy)
         home_row(p, MENU_ROW_ACTION, M_DELETE, "Delete from the SD card",
@@ -1050,9 +1058,9 @@ void market_act(int i, int row, int how, home_do_t *d)
                 changed = 1;
                 d->what = HOME_BACK;
             } else {
+                d->fail = 1;
                 ksnprintf(d->note, sizeof d->note, "cannot delete %s: %s", s->path, fat_error());
             }
-            kprintf("market: %s\n", d->note);
         }
         break;
     }
@@ -1113,7 +1121,7 @@ static void keep_received(uint8_t *d, size_t len, const lan_offer_t *o)
     char path[PATH_MAX_], name[16], id[24];
     int ok = 0, g = find_sha(o->sha256);
     if (len < 128 || !bm_is_cart(d)) {
-        say("%s from %s: not a cartridge", o->title, o->from);
+        fail("%s from %s: not a cartridge", o->title, o->from);
         free(d);
         return;
     }
@@ -1126,14 +1134,14 @@ static void keep_received(uint8_t *d, size_t len, const lan_offer_t *o)
             ksnprintf(id, sizeof id, "%s", cat.games[g].id);
         else if (github_id_from_name(o->title, id, sizeof id) != 0)
             ksnprintf(id, sizeof id, "game");
-        if (new_path(id, g >= 0 && is_b16(cat.games[g].file.path) ? ".B16" : ".BM", name, sizeof name) == 0) {
+        if (new_path(id, g >= 0 && is_b16(cat.games[g].file.path) ? ".b16" : ".bm", name, sizeof name) == 0) {
             ksnprintf(path, sizeof path, GAMES_DIR "/%s", name);
             ok = fat_mkdirs(GAMES_DIR) == 0 && fat_write_file(GAMES_DIR, name, d, len) == 0;
         }
     }
     free(d);
     if (!ok) {
-        say("cannot write %s: %s", o->title, fat_error());
+        fail("cannot write %s: %s", o->title, fat_error());
         return;
     }
     if (g >= 0) {                       /* the Market's game: as if downloaded */
@@ -1148,17 +1156,35 @@ static void keep_received(uint8_t *d, size_t len, const lan_offer_t *o)
     say("%s received from %s", o->title, o->from);
 }
 
+/* When the listening cannot start it is tried again every 5 s, not every frame, and said once (26 Oct 2026: the
+ * message came every frame and filled the log, and the listening stayed off after a game received a moment ago). */
+#define LAN_RETRY_US 5000000u
+static int lan_retry_set, lan_fail_said;
+static uint32_t lan_retry_at;
+
 void market_lan(int on)
 {
     if (on && !lan_running() && net_ip()) {
-        char name[24];
-        lan_name(name, sizeof name);
-        if (lan_start(name) == 0)
-            kprintf("market: nearby consoles: listening as %s\n", name);
-        else
-            kprintf("market: cannot listen for nearby consoles\n");
-    } else if (!on && lan_running()) {
-        lan_stop();
+        const uint32_t now = timer_ticks();
+        if (!lan_retry_set || (int32_t)(now - lan_retry_at) >= 0) {
+            char name[24];
+            lan_name(name, sizeof name);
+            if (lan_start(name) == 0) {
+                kprintf("market: nearby consoles: listening as %s\n", name);
+                lan_retry_set = lan_fail_said = 0;
+            } else {
+                if (!lan_fail_said)
+                    kprintf("market: cannot listen for nearby consoles (lan error %d), trying again every 5 s\n",
+                            lan_last_error());
+                lan_fail_said = 1;
+                lan_retry_set = 1;
+                lan_retry_at = now + LAN_RETRY_US;
+            }
+        }
+    } else if (!on) {
+        lan_retry_set = lan_fail_said = 0;
+        if (lan_running())
+            lan_stop();
     }
     if (!lan_running())
         return;
@@ -1178,9 +1204,9 @@ int market_offer(char *q, size_t qn, char *detail, size_t dn)
     ksnprintf(q, qn, "%s sends %s", o.from, o.title);
     unsigned long kib = (o.size + 1023) / 1024;
     if (find_sha(o.sha256) >= 0)
-        ksnprintf(detail, dn, "%lu KiB, the Market's own: checked.", kib);
+        ksnprintf(detail, dn, "%lu KB, the Market's own: checked.", kib);
     else
-        ksnprintf(detail, dn, "%lu KiB, not in the Market: from friends only.", kib);
+        ksnprintf(detail, dn, "%lu KB, not in the Market: from friends only.", kib);
     return 1;
 }
 

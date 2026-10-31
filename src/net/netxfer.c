@@ -13,24 +13,40 @@
  * (the menu and its box go on while it is written; the PC has its answer
  * after the write); anywhere else (a game, the monitor) it is written at
  * once, the network polled meanwhile, as before: the restart follows.
+ *
+ * T (R-NET2): a screenshot of the game running (bm_shot_ask), the answer is
+ * OK + the name of the PNG in bm/shots, or NG (no frame in 3 s). G gets a
+ * file of bm/shots (OK, length, crc, the data): both with size 0, crc 0.
+ *
+ * F (29 Oct 2026, the slow stream of tools/bm_watch.py): the page on the screen
+ * now, whatever draws it (menu, monitor, game): OK, length, crc, then 8 bytes
+ * (width u16, height u16, depth u8, is_rgb u8, 2 zero) and the pixels row by
+ * row without the pitch's padding. Nothing is written on the SD card.
  */
 #include "netxfer.h"
+#include "aiconf.h"
 #include "netcon.h"
 #include "net.h"
 #include "kernel/config.h"
+#include "kernel/reports.h"
+#include "bm/runtime.h"
 #include "drivers/timer.h"
 #include "drivers/uart.h"
 #include "drivers/watchdog.h"
 #include "wifi/wifi.h"
 #include "fs/fat.h"
+#include "fs/sdlock.h"
 #include "kernel/crumbs.h"
 #include "kernel/fiber.h"
 #include "kernel/notice.h"
+#include "gfx/console.h"
+#include "drivers/fb.h"
 #include "lib/crc32.h"
 #include "lib/printf.h"
 
 #include "lwip/tcp.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -40,7 +56,7 @@
 #define CONFIG_REPLY (8u << 10)         /* the settings after it: under TCP_SND_BUF */
 
 static struct tcp_pcb *listener, *peer;
-static enum { IDLE, HEADER, DATA, DONE, WRITING, REPLIED } st;
+static enum { IDLE, HEADER, DATA, DONE, WRITING, REPLIED, SHOT, GETFILE, SENDING, FRAME, STREAMING } st;
 static uint8_t hdr[4 + 1 + 1 + 64 + 1 + 64 + 8];
 static unsigned hdr_len, need;
 static char op, path[65];
@@ -54,6 +70,9 @@ static int said;                        /* the tenth of a kernel, or the second,
 static uint8_t *play_buf;
 static size_t play_len;
 static unsigned saves;
+static uint32_t shot_t0;                /* T: when it was asked (timer_ticks) */
+static uint32_t sent, sent_at;          /* G: the bytes given to TCP, and when last */
+#define SHOT_WAIT_US 3000000u
 
 /* S: the file received and checked, waiting to be written (one at a time:
  * the memory is the temporary copy, the card is written once) */
@@ -136,7 +155,8 @@ static int parse_header(void)
     unsigned n = 6;
     if (hdr_len < n)
         return 1;
-    if (memcmp(hdr, "BMXF", 4) != 0 || (hdr[4] != 'S' && hdr[4] != 'P' && hdr[4] != 'K' && hdr[4] != 'C'))
+    if (memcmp(hdr, "BMXF", 4) != 0 || (hdr[4] != 'S' && hdr[4] != 'P' && hdr[4] != 'K' && hdr[4] != 'C' &&
+                           hdr[4] != 'T' && hdr[4] != 'G' && hdr[4] != 'R' && hdr[4] != 'F' && hdr[4] != 'V'))
         return -1;
     unsigned pl = hdr[5];
     n += pl + 1;
@@ -152,12 +172,30 @@ static int parse_header(void)
     const char *pw = netcon_password();
     if (pl != strlen(pw) || memcmp(hdr + 6, pw, pl) != 0)
         return -2;
+    if (bridge_mode() == BRIDGE_OFF)
+        return -3;                      /* the bridge is off (Settings > System > Bridge): nothing is accepted */
     memcpy(path, hdr + 6 + pl + 1, fl);
     path[fl] = 0;
     size = le32(hdr + n - 8);
     crc = le32(hdr + n - 4);
     need = n;
     return 0;
+}
+
+/* G: a file of bm/shots (one level, no ".."), one of the three logs the PC reads after a crash
+ * (exact names), or a battery log (bm/batNN.csv). The kernel masks the secrets when it writes them (sdlog.c), and G masks them again
+ * when it reads a log (reports_mask_secrets): a log written by an older kernel has the password in clear. */
+static int get_allowed(const char *p)
+{
+    static const char *const logs[] = { "bm/bootprev.txt", "bm/bootlog.txt", "bm/lastrun.txt", "bm/battery.csv" };
+    for (unsigned i = 0; i < sizeof logs / sizeof logs[0]; i++)
+        if (strcasecmp(p, logs[i]) == 0)
+            return 1;
+    /* the battery log of the RGB30 (battery.c): bm/bat00.csv ... bm/bat99.csv */
+    if (strncasecmp(p, "bm/bat", 6) == 0 && p[6] >= '0' && p[6] <= '9' && p[7] >= '0' && p[7] <= '9' &&
+        strcasecmp(p + 8, ".csv") == 0)
+        return 1;
+    return strncasecmp(p, "bm/shots/", 9) == 0 && p[9] && !strchr(p + 9, '/') && !strstr(p, "..");
 }
 
 /* "carts/pong.bm" and "/CARTS/PONG.BM" are the same file */
@@ -168,11 +206,10 @@ static int same_path(const char *a, const char *b)
     return strcasecmp(a, b) == 0;
 }
 
-/* The RGB30's menu lists bm/ (src/rgb30/ui.c): a game sent to carts/ (what
- * bm_net.py and easy_install.sh say by default) goes there. */
+/* The menus list bm/ (src/kernel/library.c): a game sent to carts/ (what
+ * older versions of bm_net.py and easy_install.sh say) goes there. */
 static void to_menu_folder(void)
 {
-#ifdef BM_RGB30
     const char *p = path[0] == '/' ? path + 1 : path;
     const char *dot = strrchr(p, '.');
     if (strncasecmp(p, "carts/", 6) == 0 && !strchr(p + 6, '/') && dot &&
@@ -182,7 +219,241 @@ static void to_menu_folder(void)
         memcpy(path, "bm/", 3);
         strcpy(path + 3, name);         /* shorter than it was */
     }
-#endif
+}
+
+/* V (29 Oct 2026): the stream. The path is "WxH" or "WxH@ms": the picture the PC wants (at most 640x360; the page on
+ * the screen is averaged down to it, 2x2 samples for each pixel) and the least time between two frames (40 to 5000 ms,
+ * 100 if missing). The answer is OK, then frames until the PC closes: u16 width, u16 height, u32 length, then the
+ * tokens (below) that turn the last picture into this one; a length of 0 is "nothing changed" (sent every 2 s, so the
+ * PC knows the console lives). Tokens, u16 each, the top two bits say what: 0 skip n pixels (they are as before),
+ * 1 n pixels follow, 2 the one pixel that follows n times; the pixels are RGB565. The end of the tokens leaves the rest
+ * of the picture as it was. The first frame has nothing before it. A frame is made only when the last one has been
+ * handed to TCP (its send buffer is small), so a slow link slows the stream and does not fill the memory. */
+#define VIEW_MAX_W 640u
+#define VIEW_MAX_H 360u
+#define VIEW_KEEPALIVE_US 2000000u
+static unsigned view_w, view_h, view_ms;
+static uint16_t *view_cur, *view_prev;
+static uint8_t *view_out;               /* the header and the tokens of the frame being sent */
+static uint32_t view_len, view_sent, view_next, view_alive;
+static int view_have;                   /* view_prev holds a picture already sent */
+
+static int view_num(const char **s, unsigned *v)
+{
+    unsigned n = 0, d = 0;
+    while (**s >= '0' && **s <= '9' && d < 5) {
+        n = n * 10 + (unsigned)(**s - '0');
+        (*s)++;
+        d++;
+    }
+    *v = n;
+    return d > 0;
+}
+
+static int view_start(const char *p)
+{
+    unsigned w, h, ms = 100;
+    if (!view_num(&p, &w) || *p++ != 'x' || !view_num(&p, &h))
+        return 0;
+    if (*p == '@') {
+        p++;
+        if (!view_num(&p, &ms))
+            return 0;
+    }
+    if (*p || w < 2 || h < 2 || w > VIEW_MAX_W || h > VIEW_MAX_H)
+        return 0;
+    ms = ms < 40 ? 40 : ms > 5000 ? 5000 : ms;
+    const size_t n = (size_t)w * h;
+    free(buf);
+    buf = malloc(n * 2 * 2 + n * 2 + 128);
+    if (!buf)
+        return 0;
+    view_w = w;
+    view_h = h;
+    view_ms = ms;
+    view_cur = (uint16_t *)buf;
+    view_prev = view_cur + n;
+    view_out = (uint8_t *)(view_prev + n);
+    view_len = view_sent = 0;
+    view_have = 0;
+    view_next = timer_ticks();
+    view_alive = timer_ticks();
+    sent_at = timer_ticks();
+    return 1;
+}
+
+/* the colour of the pixel (x, y) of a page, 8 bits each */
+static void view_rgb(const framebuffer_t *fb, const uint8_t *page, uint32_t x, uint32_t y,
+                     unsigned *r, unsigned *g, unsigned *b)
+{
+    if (fb->depth == 16) {
+        const unsigned v = *(const uint16_t *)(page + (size_t)y * fb->pitch + (size_t)x * 2);
+        const unsigned rr = (v >> 11) & 31, gg = (v >> 5) & 63, bb = v & 31;
+        *r = rr << 3 | rr >> 2;
+        *g = gg << 2 | gg >> 4;
+        *b = bb << 3 | bb >> 2;
+    } else {
+        const uint32_t v = *(const uint32_t *)(page + (size_t)y * fb->pitch + (size_t)x * 4);
+        const unsigned lo = v & 255, mid = (v >> 8) & 255, hi = (v >> 16) & 255;
+        *r = fb->is_rgb ? lo : hi;
+        *g = mid;
+        *b = fb->is_rgb ? hi : lo;
+    }
+}
+
+/* the page on the screen in w x h pixels: each one is the mean of four samples inside its box of the page */
+static void view_grab(const framebuffer_t *fb, uint16_t *out, unsigned w, unsigned h)
+{
+    const uint8_t *page = fb->mem + (size_t)fb->shown * fb->height * fb->pitch;
+    if (fb->width == w && fb->height == h) {            /* the screen's own size: each pixel as it is (one read, not four) */
+        for (unsigned ty = 0; ty < h; ty++)
+            for (unsigned tx = 0; tx < w; tx++) {
+                unsigned r, g, b;
+                view_rgb(fb, page, tx, ty, &r, &g, &b);
+                out[ty * w + tx] = (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
+            }
+        return;
+    }
+    for (unsigned ty = 0; ty < h; ty++) {
+        const uint32_t ya = (ty * 4u * fb->height + fb->height) / (4u * h);
+        const uint32_t yb = (ty * 4u * fb->height + 3u * fb->height) / (4u * h);
+        for (unsigned tx = 0; tx < w; tx++) {
+            const uint32_t xa = (tx * 4u * fb->width + fb->width) / (4u * w);
+            const uint32_t xb = (tx * 4u * fb->width + 3u * fb->width) / (4u * w);
+            const uint32_t xs[4] = { xa, xb, xa, xb }, ys[4] = { ya, ya, yb, yb };
+            unsigned sr = 0, sg = 0, sb = 0;
+            for (int k = 0; k < 4; k++) {
+                unsigned r, g, b;
+                view_rgb(fb, page, xs[k] < fb->width ? xs[k] : fb->width - 1, ys[k] < fb->height ? ys[k] : fb->height - 1,
+                         &r, &g, &b);
+                sr += r;
+                sg += g;
+                sb += b;
+            }
+            out[ty * w + tx] = (uint16_t)(((sr >> 2) >> 3) << 11 | ((sg >> 2) >> 2) << 5 | ((sb >> 2) >> 3));
+        }
+    }
+}
+
+static void put16(uint8_t *p, unsigned v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+/* the tokens that turn prev into cur (prev is ignored without `have`); returns their length in bytes */
+static uint32_t view_encode(uint8_t *out, const uint16_t *cur, const uint16_t *prev, int have, uint32_t n)
+{
+    uint32_t o = 0, i = 0;
+    while (i < n) {
+        uint32_t j = i;
+        if (have)
+            while (j < n && cur[j] == prev[j])
+                j++;
+        if (j > i) {
+            if (j == n)
+                break;                          /* the rest is as it was: nothing to say */
+            for (uint32_t k = j - i; k;) {
+                const uint32_t t = k > 16383 ? 16383 : k;
+                put16(out + o, (unsigned)t);
+                o += 2;
+                k -= t;
+            }
+            i = j;
+        }
+        uint32_t r = i + 1;                     /* a run of one colour: 4 or more are worth a token */
+        while (r < n && cur[r] == cur[i])
+            r++;
+        if (r - i >= 4) {
+            for (uint32_t k = r - i; k;) {
+                const uint32_t t = k > 16383 ? 16383 : k;
+                put16(out + o, 0x8000u | (unsigned)t);
+                put16(out + o + 2, cur[i]);
+                o += 4;
+                k -= t;
+            }
+            i = r;
+            continue;
+        }
+        uint32_t e = i;                         /* pixels that follow: changed ones, with the short gaps between them */
+        while (e < n && e - i < 16383) {
+            uint32_t run = 1;
+            while (e + run < n && run < 4 && cur[e + run] == cur[e])
+                run++;
+            if (e > i && run >= 4)
+                break;                          /* a run starts here: its own token */
+            if (!have || cur[e] != prev[e]) {
+                e++;
+                continue;
+            }
+            uint32_t g = 0;
+            while (e + g < n && cur[e + g] == prev[e + g])
+                g++;
+            if (g <= 2 && e + g < n) {
+                e += g;                         /* a gap of 2 pixels costs the same as a new token: kept */
+                continue;
+            }
+            break;
+        }
+        put16(out + o, 0x4000u | (unsigned)(e - i));
+        o += 2;
+        for (uint32_t k = i; k < e; k++) {
+            put16(out + o, cur[k]);
+            o += 2;
+        }
+        i = e;
+    }
+    return o;
+}
+
+/* one round of the stream, from netxfer_poll: what is left of the last frame goes on; else, when it is time, the next */
+static void view_step(void)
+{
+    if (!peer)
+        return;
+    const uint32_t now = timer_ticks();
+    if (view_sent < view_len) {
+        u32_t room = tcp_sndbuf(peer);
+        uint32_t n = view_len - view_sent < room ? view_len - view_sent : room;
+        if (n > 0xFFFFu)
+            n = 0xFFFFu;
+        if (n && tcp_write(peer, view_out + view_sent, (u16_t)n, TCP_WRITE_FLAG_COPY) == ERR_OK) {
+            view_sent += n;
+            sent_at = now;
+            tcp_output(peer);
+        } else if (now - sent_at > 10000000u) {
+            kprintf("net: stream stalled, given up\n");
+            drop_peer();
+            reset();
+        }
+    } else if ((int32_t)(now - view_next) >= 0) {
+        const framebuffer_t *fb = console_framebuffer();
+        const uint32_t bpp = fb ? fb->depth / 8 : 0;
+        if (!fb || !fb->mem || (bpp != 2 && bpp != 4) || !fb->width || !fb->height) {
+            view_next = now + 500000u;          /* no picture to read now: try again */
+            return;
+        }
+        view_next = now + view_ms * 1000u;
+        const uint32_t n = (uint32_t)view_w * view_h;
+        view_grab(fb, view_cur, view_w, view_h);
+        const uint32_t used = view_encode(view_out + 8, view_cur, view_prev, view_have, n);
+        if (used == 0 && view_have && now - view_alive < VIEW_KEEPALIVE_US)
+            return;                             /* nothing changed */
+        put16(view_out, view_w);
+        put16(view_out + 2, view_h);
+        view_out[4] = (uint8_t)used;
+        view_out[5] = (uint8_t)(used >> 8);
+        view_out[6] = (uint8_t)(used >> 16);
+        view_out[7] = (uint8_t)(used >> 24);
+        view_len = 8 + used;
+        view_sent = 0;
+        view_alive = now;
+        sent_at = now;
+        uint16_t *t = view_prev;                /* the picture just made is the one the next frame follows */
+        view_prev = view_cur;
+        view_cur = t;
+        view_have = 1;
+    }
 }
 
 static void feed(const uint8_t *p, unsigned len)
@@ -202,11 +473,61 @@ static void feed(const uint8_t *p, unsigned len)
                 if (r == -2)
                     kprintf("\x1b[91mnet: transfer with a wrong password from %s\x1b[0m\n",
                             ipaddr_ntoa(&peer->remote_ip));
-                fail(r == -2 ? "PW" : "BH");
+                if (r == -3)
+                    kprintf("net: refused, the bridge is off (Settings > System > Bridge)\n");
+                fail(r == -2 ? "PW" : r == -3 ? "BO" : "BH");
+                return;
+            }
+            if (op == 'R') {                    /* restart the console: the answer first, the restart 0.3 s later (as after a kernel) */
+                if (size || crc) {
+                    fail("BH");
+                    return;
+                }
+                reply("OK");
+                reboot_after = 1;
+                restart_at = timer_ticks() + 300000u;
+                said = -1;
+                st = REPLIED;
+                close_at = timer_ticks();
+                return;
+            }
+            if (op == 'V') {                    /* the stream: the picture's size and pace are in the path */
+                if (size || crc || !view_start(path)) {
+                    fail("BH");
+                    return;
+                }
+                reply("OK");
+                st = STREAMING;
+                return;
+            }
+            if (op == 'T' || op == 'G' || op == 'F') {
+                if (size || crc) {
+                    fail("BH");
+                    return;
+                }
+                if (op == 'T') {
+                    bm_shot_ask();
+                    shot_t0 = timer_ticks();
+                    st = SHOT;
+                } else if (op == 'F') {
+                    st = FRAME;         /* grabbed from netxfer_poll, outside lwIP */
+                } else {
+                    st = GETFILE;       /* read from netxfer_poll, outside lwIP */
+                }
                 return;
             }
             if (op == 'S')
                 to_menu_folder();
+            if (op == 'S' && bridge_file_name(path)) {
+                kprintf("net: refused, the bridge file is the user's (Settings > System > Bridge)\n");
+                fail("BF");
+                return;
+            }
+            if (op == 'S' && ai_protected_name(path)) {
+                kprintf("net: refused, the AI settings and their certificate are set on the console (bm Agent: /setup)\n");
+                fail("BF");
+                return;
+            }
             /* a file still to be written: another one waits (BY, busy), the
              * same one again replaces it while it is not being written; no
              * kernel (its restart would lose it) nor settings meanwhile */
@@ -307,6 +628,7 @@ int netxfer_start(void)
  * again from inside, has nothing to do while the state is WRITING. */
 static int keep_net(void)
 {
+    watchdog_progress();                /* a slow card writes a kernel for longer than the limit */
     net_poll();
     return 0;
 }
@@ -343,6 +665,84 @@ static int save(const char *p, const uint8_t *data, uint32_t len)
 #define KERNEL_FILE "kernel.img"
 #define KERNEL_MARK '6'
 #endif
+
+#define BACKUP_DIR "/bm/backup"
+#define STAGING_DIR "/bm/staging"
+#define STAGED_KERNEL_PATH STAGING_DIR "/" KERNEL_FILE
+
+static int staged_kernel;
+static uint32_t staged_kernel_size;
+static char staged_desc[48];
+
+static void kernel_staged(int r, uint32_t len)
+{
+    reply(r == 0 ? "OK" : "WE");
+    if (r == 0) {
+        saves++;
+        kprintf("\x1b[92mnet: kernel parked in %s (%lu bytes)\x1b[0m\n", STAGED_KERNEL_PATH, (unsigned long)len);
+        staged_kernel = 1;
+        staged_kernel_size = len;
+        notice_flash("Kernel downloaded", "Apply it in Settings > Updates", -1, 5000);
+    } else {
+        kprintf("\x1b[91mnet: could not write %s (%s)\x1b[0m\n", STAGED_KERNEL_PATH, fat_error());
+    }
+    st = REPLIED;
+    close_at = timer_ticks();
+}
+
+int netxfer_has_staged_kernel(void)
+{
+    if (staged_kernel)
+        return 1;
+    fat_entry_t e;
+    if (fat_find(STAGED_KERNEL_PATH, &e) == 0 && !e.is_dir && e.size > 0) {
+        staged_kernel = 1;
+        staged_kernel_size = e.size;
+        return 1;
+    }
+    return 0;
+}
+
+const char *netxfer_staged_kernel_desc(void)
+{
+    if (!netxfer_has_staged_kernel())
+        return "None";
+    snprintf(staged_desc, sizeof staged_desc, "%lu KiB ready", (unsigned long)((staged_kernel_size + 1023) / 1024));
+    return staged_desc;
+}
+
+int netxfer_apply_staged_kernel(void)
+{
+    fat_entry_t e;
+    if (fat_find(STAGED_KERNEL_PATH, &e) != 0 || e.is_dir)
+        return -1;
+    uint8_t *data = NULL;
+    size_t len = 0;
+    if (fat_load(&e, &data, &len) != 0 || !data)
+        return -1;
+    /* backup old kernel */
+    fat_entry_t old_e;
+    uint8_t *old_data = NULL;
+    size_t old_len = 0;
+    if (fat_find("/" KERNEL_FILE, &old_e) == 0 && fat_load(&old_e, &old_data, &old_len) == 0) {
+        fat_mkdirs(BACKUP_DIR);
+        fat_write_file(BACKUP_DIR, KERNEL_FILE, old_data, old_len);
+        free(old_data);
+    }
+    int r = save(KERNEL_FILE, data, len);
+    free(data);
+    if (r == 0) {
+        fat_delete(STAGED_KERNEL_PATH);
+        staged_kernel = 0;
+        staged_kernel_size = 0;
+        reboot_after = 1;
+        restart_at = timer_ticks() + 3000000u;
+        said = -1;
+        notice_flash("Kernel installed", "Restarting in 3 seconds...", -1, 3000);
+        return 0;
+    }
+    return -1;
+}
 
 static int kernel_fits(const uint8_t *img, uint32_t len)
 {
@@ -403,12 +803,12 @@ static void kernel_written(int r, uint32_t len)
 
 /* A kernel written at once, outside the menu: the network polled after
  * each piece (keep_net) */
-static int save_now(const uint8_t *data, uint32_t len)
+static int save_now(const char *dest, const uint8_t *data, uint32_t len)
 {
     int (*was)(void) = fat_write_tick;
     st = WRITING;
     fat_write_tick = keep_net;
-    int r = save(KERNEL_FILE, data, len);
+    int r = save(dest ? dest : KERNEL_FILE, data, len);
     fat_write_tick = was;
     return r;
 }
@@ -421,7 +821,7 @@ void netxfer_poll(void)
         const int tenth = (int)((uint64_t)got * 10 / size);
         if (tenth != said) {
             said = tenth;
-            kprintf("net: kernel %d%% (%lu of %lu KiB)\n", tenth * 10, got / 1024, size / 1024);
+            kprintf("net: kernel %d%% (%lu of %lu KB)\n", tenth * 10, got / 1024, size / 1024);
         }
     }
     /* a PC that went away in the middle (no FIN reached us): after 10 s of
@@ -441,8 +841,123 @@ void netxfer_poll(void)
             q.data = NULL;
             q.path[0] = 0;
             q.kernel = 0;
-            kernel_written(save_now(d, n), n);
+            if (dev_mode()) {
+                kernel_written(save_now(KERNEL_FILE, d, n), n);
+            } else {
+                kernel_staged(save_now(STAGED_KERNEL_PATH, d, n), n);
+            }
             free(d);
+        }
+    }
+    if (st == STREAMING)
+        view_step();
+    if ((st == SHOT || st == GETFILE || st == SENDING || st == FRAME || st == STREAMING) && !peer) {
+        if (st == SHOT)
+            bm_shot_cancel();
+        reset();                        /* the PC went away */
+    }
+    if (st == SHOT) {
+        char name[16];
+        const int r = bm_shot_done(name, sizeof name);
+        if (r == 1) {
+            reply_text("OK", name, (uint32_t)strlen(name));
+        } else if (r < 0 || timer_ticks() - shot_t0 > SHOT_WAIT_US) {
+            bm_shot_cancel();
+            reply("NG");                /* no game drew a frame, or the card refused it */
+        }
+        if (r != 0 || timer_ticks() - shot_t0 > SHOT_WAIT_US) {
+            st = REPLIED;
+            close_at = timer_ticks();
+        }
+    }
+    if (st == FRAME) {                  /* F: a copy of the page on the screen, so the answer is one picture */
+        const framebuffer_t *fb = console_framebuffer();
+        const uint32_t bpp = fb ? fb->depth / 8 : 0;
+        if (!fb || !fb->mem || (bpp != 2 && bpp != 4) || !fb->width || !fb->height) {
+            fail("NG");
+        } else {
+            const uint32_t row = fb->width * bpp;
+            size = 8 + row * fb->height;
+            buf = malloc(size);
+            if (!buf) {
+                fail("SZ");
+            } else {
+                const uint8_t *page = fb->mem + (size_t)fb->shown * fb->height * fb->pitch;
+                buf[0] = (uint8_t)fb->width;
+                buf[1] = (uint8_t)(fb->width >> 8);
+                buf[2] = (uint8_t)fb->height;
+                buf[3] = (uint8_t)(fb->height >> 8);
+                buf[4] = (uint8_t)fb->depth;
+                buf[5] = (uint8_t)fb->is_rgb;
+                buf[6] = buf[7] = 0;
+                for (uint32_t y = 0; y < fb->height; y++)
+                    memcpy(buf + 8 + (size_t)y * row, page + (size_t)y * fb->pitch, row);
+                crc = crc32(buf, size);
+                uint8_t h[10] = { 'O', 'K', (uint8_t)size, (uint8_t)(size >> 8), (uint8_t)(size >> 16),
+                                  (uint8_t)(size >> 24), (uint8_t)crc, (uint8_t)(crc >> 8),
+                                  (uint8_t)(crc >> 16), (uint8_t)(crc >> 24) };
+                tcp_write(peer, h, sizeof h, TCP_WRITE_FLAG_COPY);
+                tcp_output(peer);
+                sent = 0;
+                sent_at = timer_ticks();
+                st = SENDING;
+            }
+        }
+    }
+    if (st == GETFILE) {
+        const char *p = path;
+        while (*p == '/')
+            p++;
+        fat_entry_t e;
+        char full[80];
+        size_t len = 0;
+        if (!get_allowed(p)) {
+            fail("PA");                 /* only the files of bm/shots (one level) and the three logs */
+        } else {
+            full[0] = '/';
+            strcpy(full + 1, p);               /* (a path is at most 64 characters) */
+            if (fat_find(full, &e) != 0 || e.is_dir) {
+                fail("NF");
+            } else if (e.size > MAX_SIZE) {
+                fail("SZ");
+            } else if (fat_load(&e, &buf, &len) != 0) {
+                buf = NULL;
+                fail("NF");
+            } else {
+                if (strncasecmp(p, "bm/shots/", 9) != 0)
+                    reports_mask_secrets((char *)buf, len);   /* a log: the passwords never leave the console */
+                size = (uint32_t)len;
+                crc = crc32(buf, size);
+                uint8_t h[10] = { 'O', 'K', (uint8_t)size, (uint8_t)(size >> 8), (uint8_t)(size >> 16),
+                                  (uint8_t)(size >> 24), (uint8_t)crc, (uint8_t)(crc >> 8),
+                                  (uint8_t)(crc >> 16), (uint8_t)(crc >> 24) };
+                tcp_write(peer, h, sizeof h, TCP_WRITE_FLAG_COPY);
+                tcp_output(peer);
+                sent = 0;
+                sent_at = timer_ticks();
+                st = SENDING;
+            }
+        }
+    }
+    if (st == SENDING) {                /* the file, in pieces of what TCP has room for */
+        u32_t room = tcp_sndbuf(peer);
+        uint32_t n = size - sent < room ? size - sent : room;
+        if (n > 0xFFFFu)
+            n = 0xFFFFu;
+        if (n && tcp_write(peer, buf + sent, (u16_t)n, TCP_WRITE_FLAG_COPY) == ERR_OK) {
+            sent += n;
+            sent_at = timer_ticks();
+            tcp_output(peer);
+        }
+        if (sent == size) {
+            free(buf);
+            buf = NULL;
+            st = REPLIED;
+            close_at = timer_ticks();
+        } else if (timer_ticks() - sent_at > 10000000u) {
+            kprintf("\x1b[91mnet: file transfer stalled, given up\x1b[0m\n");
+            drop_peer();
+            reset();
         }
     }
     if (st == DONE) {
@@ -464,6 +979,9 @@ void netxfer_poll(void)
             const int r = list ? config_merge((const char *)buf, size, list, CONFIG_REPLY) : -2;
             if (r == -2) {
                 reply("SZ");
+            } else if (r == -3) {
+                reply("BF");
+                kprintf("net: settings refused (dev and bridge are the user's: Settings > System > Bridge), nothing changed\n");
             } else if (r < 0) {
                 reply("KV");
                 kprintf("\x1b[91mnet: settings refused (not key=value lines), nothing changed\x1b[0m\n");
@@ -487,7 +1005,8 @@ void netxfer_poll(void)
                 buf = NULL;
                 reply("QD");
                 kprintf("net: %s received (%lu bytes): written on the SD card from the menu\n", q.path, size);
-                notice_flash("Update received", file_name(q.path), -1, 4000);
+                if (!dev_mode())
+                    notice_flash("Update received", file_name(q.path), -1, 4000);
             }
             reset();
         } else if (op == 'K' && !kernel_fits(buf, size)) {
@@ -495,20 +1014,34 @@ void netxfer_poll(void)
             kprintf("\x1b[91mnet: not a kernel for this console, nothing written (the Pi Zero 2 W "
                     "takes kernel7.img, the RGB30 kernel8.img, the other boards kernel.img)\x1b[0m\n");
             reset();
+        } else if (dev_mode()) {
+            /* dev mode: write directly to KERNEL_FILE and restart without staging or confirmation */
+            if (menu_here() && !q.data) {
+                q.path[0] = '/';
+                strcpy(q.path + 1, KERNEL_FILE);
+                q.data = buf;
+                q.len = size;
+                q.kernel = 1;
+                buf = NULL;
+                st = WRITING;
+                waits = 1;
+                kprintf("net: dev mode: kernel received (%lu bytes): written directly to %s\n", (unsigned long)size, KERNEL_FILE);
+            } else {
+                kernel_written(save_now(KERNEL_FILE, buf, size), size);
+                reset();
+            }
         } else if (menu_here() && !q.data) {
-            /* the kernel: with the menu there, its fiber writes it like a
-             * file, alone on the card, and the answer goes after */
-            q.path[0] = '/';
-            strcpy(q.path + 1, KERNEL_FILE);
+            /* the kernel: with the menu there, parked in staging without forced reboot */
+            snprintf(q.path, sizeof q.path, "%s", STAGED_KERNEL_PATH);
             q.data = buf;
             q.len = size;
             q.kernel = 1;
             buf = NULL;
             st = WRITING;
             waits = 1;
-            kprintf("net: kernel received (%lu bytes): written on the SD card from the menu\n", size);
+            kprintf("net: kernel received (%lu bytes): parked in %s\n", (unsigned long)size, STAGED_KERNEL_PATH);
         } else {
-            kernel_written(save_now(buf, size), size);
+            kernel_staged(save_now(STAGED_KERNEL_PATH, buf, size), size);
             reset();
         }
         if (!waits) {
@@ -530,12 +1063,7 @@ void netxfer_poll(void)
         if (!secs && st == IDLE) {
             kprintf("net: restarting with the new kernel...\n");
             timer_delay_ms(200);
-            wifi_leave();               /* the AP told: it does not hold the old association */
-            /* an intentional restart, as every other one (update.c, monitor.c):
-             * without it the next boot reported a freeze (2026-10-11) */
-            crumbs_clean_exit();
-            uart_flush();
-            watchdog_reboot();
+            crumbs_restart(0);
         }
     }
 }
@@ -555,7 +1083,9 @@ static void write_main(void *arg)
     (void)arg;
     int (*was)(void) = fat_write_tick;
     fat_write_tick = write_tick;
+    sd_writer_begin("netxfer", netxfer_write_pause);    /* a writer that begins later pauses this one */
     write_rc = save(q.path, q.data, q.len);
+    sd_writer_end("netxfer");
     fat_write_tick = was;
     write_stopped = write_rc != 0 && fiber_cancelled();
 }
@@ -567,8 +1097,12 @@ static void write_over(void)
         kprintf("net: writing %s paused, it starts again later\n", q.path);
         return;
     }
-    if (q.kernel) {                     /* the PC's answer, the restart */
-        kernel_written(write_rc, q.len);
+    if (q.kernel) {                     /* the PC's answer */
+        if (dev_mode()) {
+            kernel_written(write_rc, q.len);
+        } else {
+            kernel_staged(write_rc, q.len);
+        }
         free(q.data);
         q.data = NULL;
         q.path[0] = 0;
@@ -578,7 +1112,8 @@ static void write_over(void)
     if (write_rc == 0) {
         saves++;
         kprintf("\x1b[92mnet: saved %s on the SD card (%lu bytes)\x1b[0m\n", q.path, q.len);
-        notice_flash("Updated", file_name(q.path), -1, 3000);
+        if (!dev_mode())
+            notice_flash("Updated", file_name(q.path), -1, 3000);
     } else {
         kprintf("\x1b[91mnet: could not write %s (%s)\x1b[0m\n", q.path, fat_error());
         notice_flash("Could not write", file_name(q.path), -1, 5000);

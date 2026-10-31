@@ -13,7 +13,7 @@
  * card with the same files (market_url=sd:/market/): either way it must
  * be signed with the Market key (keys/market-pub.pem, built in, or
  * bm/market.pem on the SD card for a market of one's own) and every file
- * must have the size and SHA-256 the catalog says. Games go into /carts
+ * must have the size and SHA-256 the catalog says. Games go into /bm
  * (on the RGB30 into /bm, and only its .b16 games are listed); the cache
  * and the list of installed games into /bm/market.
  */
@@ -38,15 +38,15 @@ enum { MARKET_PAGE_GAMES = 0, MARKET_PAGE_APPS = 1 };
 int  market_page(void);
 void market_set_page(int page);
 int  market_page_count(int page);
+/* 1 if the refresh button is ready, 0 while loading or during the 10s cooldown. */
+int  market_refresh_available(void);
+/* Refresh the catalog from the network; 1 if started, 0 if unavailable or ignored. */
+int  market_refresh(void);
 
 /* The grid: the games or apps of the current page, or placeholders while loading. */
 int  market_items(menu_item_t *items, int max);
 /* A line instead of a game's title ("Loading the Market..."), or NULL. */
 const char *market_banner(void);
-/* The footer line: the catalog, the last download. */
-const char *market_status(void);
-/* The details line of game i (author, version, license, format, size). */
-void market_details(int i, char *buf, size_t n);
 
 /* What A does on game i. */
 enum { MARKET_NONE, MARKET_GET, MARKET_PLAY, MARKET_UPDATE, MARKET_BUSY };
@@ -59,6 +59,8 @@ void market_ask(int i, home_do_t *d);
 void market_get(int i);
 /* The installed file of game i, "" if it is not on the SD card. */
 const char *market_path(int i);
+/* 1 if the catalog in memory has a newer version of the game at `path`. */
+int market_has_update(const char *path);
 
 /* The options of game i (X): a panel like the settings. */
 enum { M_GET = 300, M_PLAY, M_UPDATE, M_AUTHOR, M_VERSION, M_LICENSE, M_SIZE, M_FILE, M_TYPE, M_DELETE };

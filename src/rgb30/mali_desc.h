@@ -1,5 +1,5 @@
 /*
- * M41: the Mali-G52's (Bifrost, "v7") descriptors for a draw: the vertex and
+ * The Mali-G52's (Bifrost, "v7") descriptors for a draw: the vertex and
  * tiler jobs and what they point at. Every field's place is that of Mesa's
  * src/panfrost/genxml/v7.xml (MIT), the values those Mesa's pan_shader.h,
  * pan_blend.c and panvk fill in for a shader without depth, stencil or
@@ -62,6 +62,8 @@ typedef struct {
     uint64_t varying_buffers, varyings;
     uint64_t viewport;
     uint64_t thread_storage;    /* Local Storage */
+    uint64_t textures;          /* an array of Texture descriptors (Bifrost: the descriptors themselves, 32 bytes each) */
+    uint64_t samplers;          /* an array of Sampler descriptors (32 bytes each) */
 } md_draw_t;
 void md_draw(uint8_t *p, const md_draw_t *s);
 
@@ -70,13 +72,20 @@ typedef struct {
     int fragment;               /* else a vertex shader */
     uint64_t shader;            /* the shader's address */
     uint32_t attribute_count, varying_count, ubo_count;
+    uint32_t sampler_count, texture_count;  /* the shader's samplers and textures (Shader struct, word 2) */
     uint32_t work_regs;         /* <= 32: 32 per thread, else 64 */
     uint64_t preload_regs;      /* the compiler's preload bit mask (info.preload) */
     uint32_t push_count;        /* pushed words: the uniform count is half of it, rounded up */
     int pixel_kill, zs_update;  /* MD_KILL_*, fragment only */
+    int depth_func;             /* MD_FUNC_*; 0 is the default: always */
+    int depth_write;            /* the test writes the depth buffer */
     int wait6, wait7;           /* shader wait dependency 6 and 7 (info.bifrost.wait_6, wait_7), fragment only */
 } md_renderer_state_t;
+/* the depth functions of Renderer State (0 means MD_FUNC_ALWAYS in md_renderer_state_t) */
+enum { MD_FUNC_NEVER = 1, MD_FUNC_LESS, MD_FUNC_EQUAL, MD_FUNC_LEQUAL, MD_FUNC_GREATER, MD_FUNC_NOTEQUAL, MD_FUNC_GEQUAL };
 void md_renderer_state(uint8_t *p, const md_renderer_state_t *s);
+void md_set_msaa(int on);                       /* the Renderer States built after this call have the multisample bit (4x MSAA frames) */
+void md_rs_texture_count(uint8_t *p, uint32_t n);   /* the texture count of a built Renderer State (a draw with fewer sheets) */
 
 /* Blend (16 bytes, 16-aligned) for a render target written as it is: mode Opaque, 4 components, the
  * colour converted from `reg_format` (MD_REG_*) to the memory format `mem_format` */
@@ -105,6 +114,17 @@ void md_tiler_context(uint8_t *p, uint32_t w, uint32_t h, uint32_t hierarchy_mas
 /* Attribute (8 bytes) and Attribute Buffer (16 bytes, 32-aligned): a 1D buffer of vertices `stride` apart */
 void md_attribute(uint8_t *p, uint32_t buffer, uint32_t format, int32_t offset, int offset_enable);
 void md_attribute_buffer(uint8_t *p, uint64_t pointer, uint32_t stride, uint32_t size);
+
+/* Texture (32 bytes, 32-aligned): a 2D texture of w x h texels of RGB565 (Pixel Format RGB565, component order BGR1), one level,
+ * linear, with the Surface With Stride array at `surfaces` */
+#define MD_FMT_RGB5A1       ((65u << 12) | 0u)    /* order RGBA of the Mali: red in the low bits (R 4:0, G 9:5, B 14:10, A 15) */
+#define MD_FMT_RGB565       ((64u << 12) | 20u)   /* order BGR1: the Mali's RGB565 holds blue in the high bits; a page texel has red there */
+void md_texture(uint8_t *p, uint32_t w, uint32_t h, uint32_t format, uint64_t surfaces);
+/* Surface With Stride (16 bytes, 16-aligned) */
+void md_surface(uint8_t *p, uint64_t pointer, uint32_t row_stride, uint32_t surface_stride);
+/* Sampler (32 bytes, 32-aligned): normalised coordinates, the nearest texel, clamped to the edge, one level */
+void md_sampler_nearest(uint8_t *p);
+void md_sampler(uint8_t *p, int linear);       /* clamp to edge, normalised coordinates, no mipmaps: nearest texel or bilinear */
 
 /* the Tiler Job's pieces at j (256 bytes, zeroed first): the header is the caller's (mali.c job_header),
  * p the Primitive, tiler the Tiler Context's address, d the Draw */

@@ -19,6 +19,14 @@ typedef struct {
     uint8_t *cell_opaque;       /* per 8x8 cell: 1 if every pixel is opaque */
     uint32_t version;           /* changes with every g16_sheet_set / _update_cell, and is
                                  * new for every sheet allocated (copies, e.g. a GPU texture) */
+    /* g16_map: the opaque cells it draws, packed one after the other (128 bytes a cell, 8 rows of 16 bytes). A cell of a wide
+     * sheet is 8 rows 8 KB apart, so reading it costs 8 cache misses; a packed cell costs 4 lines in a row. Made when a cell is
+     * first drawn, dropped when the sheet changes (tver != version); a sheet that changes every frame turns it off (toff). */
+    uint16_t *tpool;            /* tcap cells of 64 pixels */
+    uint16_t *tslot;            /* per cell: its place in tpool + 1, 0 = not packed */
+    uint32_t *tcell;            /* per place: the cell it holds */
+    uint32_t tn, tcap, tver;
+    uint8_t toff, tresets;
 } g16_sheet_t;
 
 typedef struct {
@@ -52,6 +60,10 @@ void g16_target(g16_t *g, uint16_t *px, uint32_t stride, int w, int h, const fon
 void g16_clip(g16_t *g, int x, int y, int w, int h);    /* w or h <= 0: full screen */
 void g16_camera(g16_t *g, int x, int y);
 
+/* A w x h RGB565 picture (rows w apart) copied whole to (x, y), each pixel scale x scale (1..8), the camera
+ * and the clip as for g16_rectfill. */
+void g16_blit565(g16_t *g, const uint16_t *src, int w, int h, int x, int y, int scale);
+
 void g16_cls(g16_t *g, uint16_t c);
 void g16_pset(g16_t *g, int x, int y, uint16_t c);
 int  g16_pget(const g16_t *g, int x, int y);             /* -1 outside */
@@ -71,6 +83,18 @@ void g16_sspr(g16_t *g, const g16_sheet_t *s, int sx, int sy, int sw, int sh,
  * covers round(sw * zoom) x round(sh * zoom) pixels of the screen. */
 void g16_sspr_zoom(g16_t *g, const g16_sheet_t *s, int sx, int sy, int sw, int sh,
                    int dx, int dy, int flip_x, int flip_y, float zoom);
+/* Sprite stacking: `n` slices of sw x sh, side by side on the sheet from
+ * (sx, sy), slice 0 is the bottom and is drawn first.  (x, y) is the centre of
+ * the bottom slice; each slice turns by `rz` (radians) around its centre, is
+ * `scale` times bigger and sits step * scale pixels above the one below.
+ * Colour 0 (alpha 0) is transparent.  Without turn and scale it equals n calls
+ * of g16_sspr. */
+void g16_stack(g16_t *g, const g16_sheet_t *s, int sx, int sy, int sw, int sh,
+               int n, int x, int y, float rz, float scale, float step);
+/* The same with the slices one under the other on the sheet from (sx, sy), top to
+ * bottom; the top one is slice 0 (the bottom of the stack). */
+void g16_stackv(g16_t *g, const g16_sheet_t *s, int sx, int sy, int sw, int sh,
+                int n, int x, int y, float rz, float scale, float step);
 /* Map cells [mx, mx+mw) x [my, my+mh) drawn at (x, y); cell 0 is skipped. */
 void g16_map(g16_t *g, const g16_sheet_t *s, const g16_map_t *m,
              int mx, int my, int x, int y, int mw, int mh);
@@ -114,6 +138,9 @@ typedef struct {
     int levels;                 /* 2..G16_FADE_LEVELS */
     int ncol;                   /* colours with a table */
     uint8_t *lv;                /* w x h levels */
+    int step;                   /* 1 (0): a level for each pixel; 2: the glows work on lv2, a level for each 2x2 pixels (g16_fade_set_step) */
+    int w2, h2;                 /* lv2's size: (w + 1) / 2 x (h + 1) / 2 */
+    uint8_t *lv2;               /* step 2: the half-size map the glows fill; g16_fade_flush copies it to lv */
     uint8_t *index;             /* 65536: RGB565 -> its table, 255 = none */
     uint16_t *tab;              /* G16_FADE_LEVELS x 256: the colour at each level */
     uint16_t from[256];         /* the colour of each table */
@@ -129,6 +156,11 @@ void g16_fade_reset(g16_fade_t *f, int levels);
 int  g16_fade_colour(g16_fade_t *f, uint16_t from, const uint16_t *to);
 /* After the tables: the scale of the colours without one. */
 void g16_fade_done(g16_fade_t *f);
+/* step 2: the glows and the clear work on a quarter of the pixels (light with the granularity of 2 pixels, a
+ * quarter of the time); step 1 (the default) is the full-size map. Returns -1 when there is no memory. */
+int  g16_fade_set_step(g16_fade_t *f, int step);
+/* At step 2 the half-size map is copied to lv, 2x2 pixels a level (g16_fade_apply reads lv2 itself; the QPU fade reads lv). At step 1: nothing. */
+void g16_fade_flush(g16_fade_t *f);
 void g16_fade_clear(g16_fade_t *f, int ambient);
 /* A lamp at screen (x, y): `level` at the centre, 0 at `radius`; dither
  * 0..256 is how much of each ring edge is mixed (0 = sharp rings, 256 = a

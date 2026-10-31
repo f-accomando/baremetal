@@ -2,8 +2,10 @@
 #include "config.h"
 #include "fiber.h"
 #include "icons.h"
+#include "menu_bg.h"
 #include "pointer.h"
 #include "prompts.h"
+#include "stalls.h"
 #include "syskeys.h"
 #include "bm/bm.h"
 #include "drivers/sd.h"
@@ -29,12 +31,32 @@ static int sw = 640, sh = 360, cols = MENU_COLS;
 #define MAX_W 640
 #define MAX_H 360
 #define WIDE (SW >= 640)                /* the Pi's layout; else the narrow one */
-/* the screen is the layout `scale` times bigger (menu_scale=3 on the Pi:
- * 1920x1080), drawn in `frame` and enlarged at the flip */
+/* the screen is the layout `scale` times bigger (2 on the Pi by default: 1280x720;
+ * menu_scale=3: 1920x1080), drawn in `frame` and enlarged at the flip */
 static int scale = 1;
+static int foot_y = 316, nrows = 2, grid_y0 = 112;     /* the bottom bar; the whole rows of covers (2 at 360 high, more in the native layout) */
+static int bgz = 1;                     /* the background is made at 640x360 and drawn bgz times bigger (native layout) */
+static int char_w = 8;                   /* the width of a text character in the layout's own pixels: the font's width divided by `scale` (8 with the fonts of today) */
+#define CW char_w
+#define BGW (SW / bgz)
+#define BGH (SH / bgz)
 static uint16_t *frame;
-static int gpu_big;                     /* M37: the GPU enlarges it (else the ARM) */
+static int gpu_big;                     /* bm3d 4.8: the GPU enlarges it (else the ARM) */
+static int gpu_draw;                    /* the GPU draws the 1080p layout directly (menu_gpu=1) */
+static g16_sheet_t bg_sheet;
+static int bg_sheet_alloced;
+static uintptr_t bg_sig;                /* what the background sheet holds: the picture's address, bit 0 dim (0: nothing yet) */
+
+static int bm_font;                     /* menu_font=bm: the bm font family at 720p and 1080p (a trial, 29 Oct 2026) */
+
+static inline const font_t *menu_font(int sc)
+{
+    if (bm_font && sc >= 2)
+        return sc == 3 ? &font_bm_18x48 : &font_bm_12x32;
+    return sc == 3 ? &font_console_24x48 : sc == 2 ? &font_console_16x32 : &font_console_8x16;
+}
 #define FRAME_US 16667
+#define IDLE_MIN_US 3000                /* the least free time a late frame gives the jobs (Pi), times (menu_scale - 1) */
 
 /* layout: text sits on the 8x16 grid, on solid colours (the QEMU tests
  * read the screen back) */
@@ -42,20 +64,21 @@ static int gpu_big;                     /* M37: the GPU enlarges it (else the AR
 #define TITLE_ROW   4               /* name of the selected cartridge */
 #define CARD_W      MENU_CARD       /* squares, as the bm Suite's icons */
 #define CARD_H      MENU_CARD
-#define RADIUS      16              /* rounded corners of the covers (the icons' own) */
-#define GAP_X       12
+#define RADIUS      0               /* square corners of the covers */
+#define GAP_X       6
 #define PITCH_Y     (CARD_H + GAP_X)
 #define GRID_X0     ((SW - (cols * CARD_W + (cols - 1) * GAP_X)) / 2)
-#define FOOT_Y      316             /* bottom bar, text rows 20-21 */
+#define FOOT_Y      foot_y          /* bottom bar (316 at 360 high), text rows 20-21 */
 #define GRID_BOT    FOOT_Y          /* grid clip */
+#define HROW        ((FOOT_Y + 20) / 16)    /* the text row of the key chips in the bottom bar (21 at 360 high) */
 /* two whole rows, and the top of the next one showing: there is more below */
 #define PEEK        16
-#define GRID_Y0     (GRID_BOT - PEEK - 2 * PITCH_Y)     /* first row of covers */
-#define GRID_TOP    (GRID_Y0 - 8)   /* the selection ring is 6 px out */
+#define GRID_Y0     grid_y0     /* first row of covers */
+#define GRID_TOP    (GRID_Y0 - 8)   /* the selection ring is 6 px out (3 gap + 3 line) */
 /* scroll bar in the right margin, along the two whole rows */
 #define SBAR_W      4
 #define SBAR_X      (SW - GRID_X0 / 2 - SBAR_W / 2)
-#define SBAR_H      (2 * PITCH_Y - GAP_X)
+#define SBAR_H      (nrows * PITCH_Y - GAP_X)
 #define FADE_FRAMES 10
 
 #define C_BAR       0x16161C
@@ -79,6 +102,7 @@ static uint32_t frame_end;          /* when the last frame was over: the drawing
 static int idle_frames, idle_gave;
 static uint32_t idle_offered, idle_used, idle_over;
 static int32_t idle_slack = SLACK_NONE;
+static uint32_t st_draw, st_enlarge, st_flip;      /* us over IDLE_FRAMES: drawing, enlarging, flip */
 static int idle_first;              /* the frame after the menu opens: its slack is the opening's */
 static uint32_t idle_sd_retries, idle_sd_timeouts;  /* sd_counters at the last line */
 static float scroll;                /* first visible row, eased */
@@ -87,6 +111,9 @@ static int first_row;
 static uint16_t *bg_cur, *bg_prev;  /* blurred covers, SW x SH */
 static const g16_sheet_t *bg_key;   /* the cover bg_cur was made from */
 static int bg_valid, fade;
+static menu_bg_t bgb;               /* the picture being made into bg_cur */
+static int bg_building;             /* bg_cur is not whole yet: bg_prev is shown */
+#define BG_ROWS 24                  /* rows made per frame (tests/ui/test_menu_bg.c: keep equal) */
 static int dim;                     /* a panel is open: the rest at half brightness */
 
 /* the things the pointer can click in the frame on screen, drawn last on
@@ -119,12 +146,87 @@ static inline uint16_t half(uint16_t c) { return (uint16_t)(c >> 1 & 0x7BEF); }
 
 static uint16_t c16(uint32_t rgb) { return g16_rgb24(rgb); }
 
+static inline void m_clip(int x, int y, int w, int h)
+{
+    if (gpu_draw) {
+        if (w <= 0 || h <= 0)
+            g16_clip(&g, 0, 0, 0, 0);
+        else
+            g16_clip(&g, x * scale, y * scale, w * scale, h * scale);
+    } else {
+        g16_clip(&g, x, y, w, h);
+    }
+}
+
+static inline void m_rect(int x, int y, int w, int h, uint16_t c)
+{
+    if (w <= 0 || h <= 0)
+        return;
+    if (gpu_draw)
+        gpu3d_rect2d(&g, x * scale, y * scale, (x + w) * scale, (y + h) * scale, c);
+    else
+        g16_rectfill(&g, x, y, w, h, c);
+}
+
+static inline void m_rect_px(int x0, int y0, int x1, int y1, uint16_t c)
+{
+    if (x1 <= x0 || y1 <= y0)
+        return;
+    if (gpu_draw)
+        gpu3d_rect2d(&g, x0, y0, x1, y1, c);
+    else
+        g16_rectfill(&g, x0, y0, x1 - x0, y1 - y0, c);
+}
+
+static inline void m_text(int x, int y, const char *str, uint16_t c)
+{
+    if (gpu_draw) {
+        int z = (g.font == menu_font(scale)) ? 1 : scale;
+        gpu3d_text2d(&g, x * scale, y * scale, str, c, z);
+    } else {
+        g16_text(&g, x, y, str, c);
+    }
+}
+
+static inline void m_text_small(int x, int y, const char *str, uint16_t c)
+{
+    if (gpu_draw) {
+        const font_t *saved = g.font;
+        g.font = &font_console_8x16;
+        gpu3d_text2d(&g, x * scale, y * scale, str, c, 1);
+        g.font = saved;
+    } else {
+        g16_text(&g, x, y, str, c);
+    }
+}
+
+static inline void m_pointer(framebuffer_t *fb)
+{
+    if (gpu_draw)
+        pointer_draw((uint16_t *)fb->base, fb->pitch / 2, SW * scale, SH * scale);
+    else
+        pointer_draw(g.px, g.stride, SW, SH);
+}
+
 /* ---------------------------------------------------------------- covers */
 
+/* A decode of a cover runs in a fiber job (covers, Market): it gives the CPU back every COVER_BAND rows
+ * (fiber_slice: cheap before the slice ends, nothing outside a fiber) and stops when the job is cancelled.
+ * 1: stop, the result is not wanted. The two buffers are the call's own: another job runs in the gaps. */
+#define COVER_BAND  4
+
+static int cover_band(int y)
+{
+    if ((y & (COVER_BAND - 1)) != COVER_BAND - 1)
+        return 0;
+    fiber_slice();
+    return fiber_cancelled();
+}
+
 /* the box (cx, cy, cw, ch) of rgba (w wide) into out (CARD_W wide, RGB)
- * at (dx, dy) dw x dh: each pixel the average of what falls on it */
-static void area_scale(const uint8_t *rgba, int w, int cx, int cy, int cw, int ch,
-                       uint8_t *out, int dx, int dy, int dw, int dh)
+ * at (dx, dy) dw x dh: each pixel the average of what falls on it; 1 if cancelled */
+static int area_scale(const uint8_t *rgba, int w, int cx, int cy, int cw, int ch,
+                      uint8_t *out, int dx, int dy, int dw, int dh)
 {
     for (int y = 0; y < dh; y++) {
         int sy0 = cy + y * ch / dh, sy1 = cy + (y + 1) * ch / dh;
@@ -142,23 +244,31 @@ static void area_scale(const uint8_t *rgba, int w, int cx, int cy, int cw, int c
             uint8_t *o = out + ((size_t)(dy + y) * CARD_W + dx + x) * 3;
             o[0] = (uint8_t)(acc[0] / n); o[1] = (uint8_t)(acc[1] / n); o[2] = (uint8_t)(acc[2] / n);
         }
+        if (cover_band(y))
+            return 1;
     }
+    return 0;
 }
 
 int menu_load_cover(g16_sheet_t *s, const uint8_t *rgba, int w, int h)
 {
     if (w <= 0 || h <= 0 || w > 1024 || h > 1024)
         return -1;
-    static uint8_t out[CARD_W * CARD_H * 3];
+    enum { LO = 8 };
+    uint8_t *out = malloc((size_t)CARD_W * CARD_H * 3);
+    uint8_t *lo = malloc((size_t)LO * CARD_W * 3);
+    int r = -1;
+    if (!out || !lo)
+        goto done;
     if (w * 10 >= h * 9 && h * 10 >= w * 9) {
-        area_scale(rgba, w, 0, 0, w, h, out, 0, 0, CARD_W, CARD_H);     /* (nearly) a square */
+        if (area_scale(rgba, w, 0, 0, w, h, out, 0, 0, CARD_W, CARD_H))     /* (nearly) a square */
+            goto done;
     } else {
         /* the middle square in 8x8 blocks, stretched smooth and darker:
          * the rest of the card; the picture whole over it */
-        enum { LO = 8 };
-        static uint8_t lo[LO * CARD_W * 3];
         const int c = w < h ? w : h;
-        area_scale(rgba, w, (w - c) / 2, (h - c) / 2, c, c, lo, 0, 0, LO, LO);
+        if (area_scale(rgba, w, (w - c) / 2, (h - c) / 2, c, c, lo, 0, 0, LO, LO))
+            goto done;
         for (int y = 0; y < CARD_H; y++) {
             float v = (y + 0.5f) * LO / CARD_H - 0.5f;
             int j0 = v < 0 ? 0 : (int)v, j1 = j0 + 1 < LO ? j0 + 1 : LO - 1;
@@ -174,21 +284,34 @@ int menu_load_cover(g16_sheet_t *s, const uint8_t *rgba, int w, int h)
                     out[(y * CARD_W + x) * 3 + k] = (uint8_t)((top + (bot - top) * fy) * 0.45f);
                 }
             }
+            if (cover_band(y))
+                goto done;
         }
         const int fw = w >= h ? CARD_W : CARD_W * w / h, fh = w >= h ? CARD_H * h / w : CARD_H;
-        area_scale(rgba, w, 0, 0, w, h, out, (CARD_W - fw) / 2, (CARD_H - fh) / 2, fw, fh);
+        if (area_scale(rgba, w, 0, 0, w, h, out, (CARD_W - fw) / 2, (CARD_H - fh) / 2, fw, fh))
+            goto done;
     }
     if (g16_sheet_alloc(s, CARD_W, CARD_H) != 0)
-        return -1;
-    for (int y = 0; y < CARD_H; y++)
+        goto done;
+    for (int y = 0; y < CARD_H; y++) {
         for (int x = 0; x < CARD_W; x++) {
             const uint8_t *p = out + (y * CARD_W + x) * 3;
             g16_sheet_set(s, x, y, g16_rgb(p[0], p[1], p[2]), 1);
         }
-    return 0;
+        if (cover_band(y)) {
+            g16_sheet_free(s);
+            goto done;
+        }
+    }
+    r = 0;
+done:
+    free(out);
+    free(lo);
+    return r;
 }
 
-int menu_make_cover(g16_sheet_t *s, const char *title, const char *kind)
+
+int menu_make_cover(g16_sheet_t *s, const char *title)
 {
     if (g16_sheet_alloc(s, CARD_W, CARD_H) != 0)
         return -1;
@@ -225,7 +348,6 @@ int menu_make_cover(g16_sheet_t *s, const char *title, const char *kind)
         g16_text(&cg, x + 1, y0 + i * 16 + 1, lines[i], 0);
         g16_text(&cg, x, y0 + i * 16, lines[i], g16_rgb(255, 230, 120));
     }
-    g16_text(&cg, s->w - 8 * (int)strlen(kind) - 8, s->h - 20, kind, g16_rgb(200, 210, 230));
     memset(s->alpha, 1, (size_t)s->w * s->h);
     return 0;
 }
@@ -418,67 +540,56 @@ int menu_make_tool_cover(g16_sheet_t *s, const char *title, int icon, uint32_t r
 
 /* ---------------------------------------------------------------- background */
 
-static const uint8_t bayer[4][4] = {
-    { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 },
-};
-
-/* The cover shrunk to 16x10 (8x8 averages: the blur), stretched back to
- * the whole screen with bilinear filtering, darkened towards the bottom,
- * dithered to RGB565. Made once per selection. */
-static void make_background(uint16_t *out, const g16_sheet_t *cover)
-{
-    enum { LW = 16, LH = 10 };
-    float lo[LH][LW][3];
-    for (int j = 0; j < LH; j++)
-        for (int i = 0; i < LW; i++) {
-            uint32_t r = 0, gg = 0, b = 0;
-            if (cover && cover->px && cover->w >= LW && cover->h >= LH) {
-                /* the block of the cover under this one */
-                int x0 = i * cover->w / LW, x1 = (i + 1) * cover->w / LW;
-                int y0 = j * cover->h / LH, y1 = (j + 1) * cover->h / LH;
-                uint32_t n = 0;
-                for (int y = y0; y < y1; y++)
-                    for (int x = x0; x < x1; x++, n++) {
-                        uint32_t c = g16_to_rgb24(cover->px[y * cover->w + x]);
-                        r += c >> 16; gg += c >> 8 & 255; b += c & 255;
-                    }
-                r /= n; gg /= n; b /= n;
-            } else {
-                r = 40; gg = 44; b = 70;
-            }
-            lo[j][i][0] = (float)r; lo[j][i][1] = (float)gg; lo[j][i][2] = (float)b;
-        }
-    for (int y = 0; y < SH; y++) {
-        float v = (y + 0.5f) * LH / SH - 0.5f;
-        int j0 = (int)floorf(v);
-        float fy = v - j0;
-        int ja = j0 < 0 ? 0 : j0, jb = j0 + 1 >= LH ? LH - 1 : j0 + 1;
-        /* darker at the bottom, where the grid is */
-        float dark = 0.50f - 0.22f * (float)y / SH;
-        for (int x = 0; x < SW; x++) {
-            float u = (x + 0.5f) * LW / SW - 0.5f;
-            int i0 = (int)floorf(u);
-            float fx = u - i0;
-            int ia = i0 < 0 ? 0 : i0, ib = i0 + 1 >= LW ? LW - 1 : i0 + 1;
-            float edge = 1.0f - 0.25f * fabsf((float)x / SW - 0.5f) * 2.0f;
-            int d = bayer[y & 3][x & 3];
-            uint32_t c[3];
-            for (int k = 0; k < 3; k++) {
-                float top = lo[ja][ia][k] + (lo[ja][ib][k] - lo[ja][ia][k]) * fx;
-                float bot = lo[jb][ia][k] + (lo[jb][ib][k] - lo[jb][ia][k]) * fx;
-                float val = (top + (bot - top) * fy) * dark * edge + 10.0f;
-                int q = (int)val + (k == 1 ? d >> 2 : d >> 1);
-                c[k] = q < 0 ? 0 : q > 255 ? 255 : (uint32_t)q;
-            }
-            out[y * SW + x] = g16_rgb(c[0], c[1], c[2]);
-        }
-    }
-}
 
 /* the background into the frame, cross-fading from the previous one */
 static void put_background(void)
 {
-    if (fade > 0) {
+    if (gpu_draw) {
+        if (!bg_sheet_alloced) {
+            if (g16_sheet_alloc(&bg_sheet, BGW, BGH) == 0) {
+                memset(bg_sheet.alpha, 1, (size_t)bg_sheet.w * bg_sheet.h);
+                bg_sheet_alloced = 1;
+            }
+        }
+        if (fade > 0 && !bg_building) {
+            uint32_t a = (uint32_t)(FADE_FRAMES - fade) * 32 / FADE_FRAMES;     /* 0..32 of the new */
+            for (int y = 0; y < BGH; y++) {
+                const uint16_t *p = bg_prev + y * BGW, *q = bg_cur + y * BGW;
+                uint16_t *o = bg_sheet.px + (uint32_t)y * bg_sheet.w;
+                for (int x = 0; x < BGW; x++) {
+                    uint32_t A = (p[x] | (uint32_t)p[x] << 16) & 0x07E0F81Fu;
+                    uint32_t B = (q[x] | (uint32_t)q[x] << 16) & 0x07E0F81Fu;
+                    uint32_t m = (A * (32 - a) + B * a) >> 5 & 0x07E0F81Fu;
+                    o[x] = dim ? half((uint16_t)(m | m >> 16)) : (uint16_t)(m | m >> 16);
+                }
+            }
+            fade--;
+            bg_sheet.version++;
+            bg_sig = 0;                         /* the next still frame copies the picture whole */
+        } else {
+            /* a still picture is copied, and the GPU makes its texture again, only when what shows changed:
+             * 28 Oct 2026, on the Pi at 360p this was 20 ms a frame (the copy, then the texture made again) */
+            const uint16_t *src = bg_building ? bg_prev : bg_cur;
+            const uintptr_t sig = (uintptr_t)src | (dim ? 1u : 0u);
+            if (sig != bg_sig) {
+                bg_sig = sig;
+                for (int y = 0; y < BGH; y++) {
+                    uint16_t *o = bg_sheet.px + (uint32_t)y * bg_sheet.w;
+                    const uint16_t *q = src + y * BGW;
+                    if (!dim || y * bgz < BAR_H || y * bgz >= FOOT_Y)
+                        memcpy(o, q, BGW * 2);
+                    else
+                        for (int x = 0; x < BGW; x++)
+                            o[x] = half(q[x]);
+                }
+                bg_sheet.version++;
+            }
+        }
+        if (bg_sheet_alloced)
+            gpu3d_blit2d(&g, &bg_sheet, 0, 0, BGW, BGH, 0, 0, scale * bgz, 0, 0);
+        return;
+    }
+    if (fade > 0 && !bg_building) {
         uint32_t a = (uint32_t)(FADE_FRAMES - fade) * 32 / FADE_FRAMES;     /* 0..32 of the new */
         for (int y = 0; y < SH; y++) {
             const uint16_t *p = bg_prev + y * SW, *q = bg_cur + y * SW;
@@ -497,7 +608,7 @@ static void put_background(void)
     /* the video memory has no cache: only written, never read back */
     for (int y = 0; y < SH; y++) {
         uint16_t *o = g.px + (uint32_t)y * g.stride;
-        const uint16_t *q = bg_cur + y * SW;
+        const uint16_t *q = (bg_building ? bg_prev : bg_cur) + y * SW;
         if (!dim || y < BAR_H || y >= FOOT_Y)
             memcpy(o, q, SW * 2);
         else
@@ -520,6 +631,11 @@ static int corner_inset(int r, int dy)
 
 static void hspan(int x0, int x1, int y, uint16_t c)       /* [x0, x1), clipped */
 {
+    if (gpu_draw) {
+        if (x1 > x0)
+            gpu3d_rect2d(&g, x0 * scale, y * scale, x1 * scale, (y + 1) * scale, c);
+        return;
+    }
     if (y < g.cy0 || y >= g.cy1) return;
     if (x0 < g.cx0) x0 = g.cx0;
     if (x1 > g.cx1) x1 = g.cx1;
@@ -530,6 +646,22 @@ static void hspan(int x0, int x1, int y, uint16_t c)       /* [x0, x1), clipped 
 
 static void round_rect(int x, int y, int w, int h, int r, uint16_t c)
 {
+    if (r <= 0) {
+        m_rect(x, y, w, h, c);
+        return;
+    }
+    if (gpu_draw && h > 2 * r) {
+        for (int j = 0; j < r; j++) {
+            int in = corner_inset(r, j);
+            hspan(x + in, x + w - in, y + j, c);
+        }
+        m_rect(x, y + r, w, h - 2 * r, c);
+        for (int j = h - r; j < h; j++) {
+            int in = corner_inset(r, h - 1 - j);
+            hspan(x + in, x + w - in, y + j, c);
+        }
+        return;
+    }
     for (int j = 0; j < h; j++) {
         int dy = j < h / 2 ? j : h - 1 - j;
         int in = corner_inset(r, dy);
@@ -541,10 +673,10 @@ static void round_rect(int x, int y, int w, int h, int r, uint16_t c)
  * rows scrolled out at the top are not taken for gone. */
 static void scroll_bar(int rows, float first)
 {
-    int th = SBAR_H * 2 / rows;
+    int th = SBAR_H * nrows / rows;
     if (th < 24)
         th = 24;
-    float k = first / (float)(rows - 2);
+    float k = first / (float)(rows - nrows);
     k = k < 0 ? 0 : k > 1 ? 1 : k;
     int ty = GRID_Y0 + (int)lroundf(k * (float)(SBAR_H - th));
     uint16_t track = c16(C_LINE), thumb = c16(C_TEXT);
@@ -559,6 +691,13 @@ static void scroll_bar(int rows, float first)
 /* ring between two rounded rectangles: outer (x, y, w, h, r), thickness t */
 static void round_ring(int x, int y, int w, int h, int r, int t, uint16_t c)
 {
+    if (r <= 0) {
+        m_rect(x, y, w, t, c);
+        m_rect(x, y + h - t, w, t, c);
+        m_rect(x, y + t, t, h - 2 * t, c);
+        m_rect(x + w - t, y + t, t, h - 2 * t, c);
+        return;
+    }
     for (int j = 0; j < h; j++) {
         int dy = j < h / 2 ? j : h - 1 - j;
         int in = corner_inset(r, dy);
@@ -574,9 +713,38 @@ static void round_ring(int x, int y, int w, int h, int r, int t, uint16_t c)
     }
 }
 
-/* the cover with rounded corners, clipped to the grid rows */
-static void card(const g16_sheet_t *s, int x, int y)
+/* A cover made for the other device: the drawing stays, the colour changes (mostly grey with a cool tint)
+ * and a vignette darkens it towards the corners. v: 256 = no darkening, 0 = black. */
+static uint16_t cover_grey(uint16_t p, int v)
 {
+    int r = p >> 11 & 31, g = (p >> 6 & 31), b = p & 31;       /* (g: its top 5 of 6 bits) */
+    int l = (r * 77 + g * 150 + b * 29) >> 8;
+    r = (l * 160 + r * 96) >> 8;
+    g = (l * 160 + g * 96) >> 8;
+    b = (l * 160 + b * 96) >> 8;
+    r = r > 0 ? r - 1 : 0;                              /* the cool tint */
+    b = b < 30 ? b + 2 : 31;
+    r = r * v >> 8;
+    g = g * v >> 8;
+    b = b * v >> 8;
+    return (uint16_t)(r << 11 | g << 6 | b);
+}
+
+/* the cover with rounded corners, clipped to the grid rows */
+static void card(const g16_sheet_t *s, int x, int y, int grey)
+{
+    const int fade = dim || grey;
+    if (gpu_draw) {
+        if (s && s->px && s->w >= CARD_W && s->h >= CARD_H && !fade) {
+            gpu3d_blit2d(&g, s, 0, 0, CARD_W, CARD_H, x * scale, y * scale, scale, 0, 0);
+        } else if (s && s->px && s->w >= CARD_W && s->h >= CARD_H) {
+            gpu3d_blit2d(&g, s, 0, 0, CARD_W, CARD_H, x * scale, y * scale, scale, 0, 0);
+        } else {
+            m_rect(x, y, CARD_W, CARD_H, fade ? half(c16(0x303040)) : c16(0x303040));
+        }
+        return;
+    }
+    const int hw = CARD_W / 2, hh = CARD_H / 2, far2 = hw * hw + hh * hh;
     for (int j = 0; j < CARD_H; j++) {
         int yy = y + j;
         if (yy < g.cy0 || yy >= g.cy1)
@@ -584,15 +752,23 @@ static void card(const g16_sheet_t *s, int x, int y)
         int dy = j < CARD_H / 2 ? j : CARD_H - 1 - j;
         int in = corner_inset(RADIUS, dy);
         uint16_t *dst = g.px + (uint32_t)yy * g.stride + x + in;
-        if (s && s->px && s->w >= CARD_W && s->h >= CARD_H && !dim) {
+        if (s && s->px && s->w >= CARD_W && s->h >= CARD_H && !fade) {
             memcpy(dst, s->px + j * s->w + in, (size_t)(CARD_W - 2 * in) * 2);
         } else if (s && s->px && s->w >= CARD_W && s->h >= CARD_H) {
             const uint16_t *src = s->px + j * s->w + in;
-            for (int i = 0; i < CARD_W - 2 * in; i++)
-                dst[i] = half(src[i]);
+            for (int i = 0; i < CARD_W - 2 * in; i++) {
+                if (grey) {
+                    int ddx = i + in - hw, ddy = j - hh;
+                    int v = 240 - 95 * (ddx * ddx + ddy * ddy) / far2;      /* 240 in the middle, 145 at the corners */
+                    uint16_t c = cover_grey(src[i], v);
+                    dst[i] = dim ? half(c) : c;
+                } else {
+                    dst[i] = half(src[i]);
+                }
+            }
         } else {
             for (int i = 0; i < CARD_W - 2 * in; i++)
-                dst[i] = dim ? half(c16(0x303040)) : c16(0x303040);
+                dst[i] = fade ? half(c16(0x303040)) : c16(0x303040);
         }
     }
 }
@@ -616,13 +792,13 @@ static void placeholder(const menu_item_t *it, int x, int y, float t, int i)
         lines[n][take] = 0;
         p += take;
     }
-    const int tx = (x + 4 + 7) / 8 * 8;         /* on the text grid */
+    const int tx = (x + 4 + CW - 1) / CW * CW;         /* on the text grid */
     for (int n = 0; n < 2; n++) {
         int ty = (y + 12 + 7) / 16 * 16 + 16 * n;
         if (lines[n][0] && ty >= GRID_TOP && ty + 16 <= GRID_BOT)
-            g16_text(&g, tx, ty, lines[n], dim ? c16(0x4D4D58) : c16(C_DIM));
+            m_text(tx, ty, lines[n], dim ? c16(0x4D4D58) : c16(C_DIM));
     }
-    if (it->badge || it->busy || it->running)
+    if (it->badge || it->busy)
         return;                         /* the badge is where the bars go */
     float k = 0.5f + 0.5f * sinf(t * 3.0f - (float)i * 0.6f);
     uint16_t bar = c16(over(0x3A3A4A, 0x5A5A70, (int)(k * 255.0f)));
@@ -636,29 +812,43 @@ static void placeholder(const menu_item_t *it, int x, int y, float t, int i)
  * the text grid; `hot`: on the accent colour. */
 static void cover_badge(int x, int y, const char *text, int hot)
 {
-    int tx = (x + 6 + 7) / 8 * 8, ty = (y + CARD_H - 20) / 16 * 16, n = (int)strlen(text);
+    int tx = (x + 6 + CW - 1) / CW * CW, ty = (y + CARD_H - 20) / 16 * 16, n = (int)strlen(text);
     if (ty < GRID_TOP || ty + 16 > GRID_BOT)
         return;
     uint32_t bg = hot ? C_ACCENT : 0x101014, fg = hot ? C_BAR : C_TEXT;
-    round_rect(tx - 6, ty - 2, n * 8 + 12, 20, 10, dim ? half(c16(bg)) : c16(bg));
-    g16_text(&g, tx, ty, text, dim ? c16(C_DIM) : c16(fg));
+    round_rect(tx - 6, ty - 2, n * CW + 12, 20, 10, dim ? half(c16(bg)) : c16(bg));
+    m_text(tx, ty, text, dim ? c16(C_DIM) : c16(fg));
 }
 
-/* A small pill at the top-right of a loaded cover ("BM" or "B16"). */
-static void cover_format(int x, int y, const char *fmt)
+/* A game in memory: a star at the top right of the cover, 11x11, with a shadow. */
+static void cover_star(int x, int y)
 {
-    int b16 = strcmp(fmt, "b16") == 0;
-    const char *label = b16 ? "B16" : "BM";
-    int pw = (int)strlen(label) * 6 + 8, ph = 14;
-    int bx = x + CARD_W - pw - 5, by = y + 5;
-    if (by < GRID_TOP || by + ph > GRID_BOT)
-        return;
-    uint32_t bg = b16 ? 0x241808 : 0x101C2C, fg = b16 ? 0xF0A030 : 0x70B8F8;
-    round_rect(bx, by, pw, ph, 5, dim ? half(c16(bg)) : c16(bg));
-    const font_t *old = g.font;
-    g.font = &font_console_6x12;
-    g16_text(&g, bx + 4, by + 1, label, dim ? c16(C_DIM) : c16(fg));
-    g.font = old;
+    static const int8_t rows[11][4] = {         /* inclusive spans a-b and c-d (c < 0: none) */
+        { 5, 5, -1, 0 }, { 4, 6, -1, 0 }, { 4, 6, -1, 0 }, { 0, 10, -1, 0 }, { 1, 9, -1, 0 }, { 2, 8, -1, 0 },
+        { 3, 7, -1, 0 }, { 3, 7, -1, 0 }, { 2, 8, -1, 0 }, { 2, 4, 6, 8 }, { 1, 3, 7, 9 },
+    };
+    const int sx = x + CARD_W - 11 - 4, sy = y + 4;
+    const uint16_t fill = dim ? half(c16(0xFFD23C)) : c16(0xFFD23C), shade = c16(0x201800);
+    for (int pass = 0; pass < 2; pass++)
+        for (int j = 0; j < 11; j++) {
+            const int o = pass ? 0 : 1;         /* the shadow first, 1 px down and right */
+            hspan(sx + rows[j][0] + o, sx + rows[j][1] + 1 + o, sy + j + o, pass ? fill : shade);
+            if (rows[j][2] >= 0)
+                hspan(sx + rows[j][2] + o, sx + rows[j][3] + 1 + o, sy + j + o, pass ? fill : shade);
+        }
+}
+
+/* A game with a newer version in the Market: a triangle pointing down at the
+ * bottom right of the cover, 11 wide and 6 high, with a shadow. */
+static void cover_update(int x, int y)
+{
+    const int tx = x + CARD_W - 11 - 4, ty = y + CARD_H - 6 - 4;
+    const uint16_t fill = dim ? half(c16(C_ACCENT)) : c16(C_ACCENT), shade = c16(0x001018);
+    for (int pass = 0; pass < 2; pass++)
+        for (int j = 0; j < 6; j++) {
+            const int o = pass ? 0 : 1;
+            hspan(tx + j + o, tx + 11 - j + o, ty + j + o, pass ? fill : shade);
+        }
 }
 
 /* a download: a bar along the bottom of the cover */
@@ -674,14 +864,14 @@ static void cover_progress(int x, int y, int percent)
 static void pill_at(int x, int row, const char *s, uint32_t fg, uint32_t bg)
 {
     int n = (int)strlen(s);
-    round_rect(x - 8, row * 16 - 4, (n + 2) * 8, 24, 12, c16(bg));
-    g16_text(&g, x, row * 16, s, c16(fg));
+    round_rect(x - CW, row * 16 - 4, (n + 2) * CW, 24, 12, c16(bg));
+    m_text(x, row * 16, s, c16(fg));
 }
 
 /* the same at text column `col` */
 static int pill_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
 {
-    pill_at(col * 8, row, s, fg, bg);
+    pill_at(col * CW, row, s, fg, bg);
     return col + (int)strlen(s) + 2;
 }
 
@@ -697,10 +887,36 @@ static uint32_t over(uint32_t b, uint32_t c, int a)
 }
 
 /* a prompt of prompts.c over the bar's colour at (x, y); returns its right edge */
+static int chips_dry;                   /* the key chips are measured, not drawn (to centre them) */
+
 static int put_prompt(const prompt_t *p, int x, int y)
 {
     if (!p)
         return x;
+    if (chips_dry)
+        return x + p->w;
+    if (gpu_draw) {
+        for (int j = 0; j < PROMPT_H; j++) {
+            for (int i = 0; i < p->w; i++) {
+                uint32_t c = p->px[j * p->w + i], a = c >> 24;
+                if (!a)
+                    continue;
+                uint16_t col = c16(over(C_BAR, c & 0xFFFFFF, (int)a));
+                int i1 = i;
+                while (i1 + 1 < p->w) {
+                    uint32_t c1 = p->px[j * p->w + i1 + 1], a1 = c1 >> 24;
+                    if (!a1)
+                        break;
+                    if (c16(over(C_BAR, c1 & 0xFFFFFF, (int)a1)) != col)
+                        break;
+                    i1++;
+                }
+                gpu3d_rect2d(&g, (x + i) * scale, (y + j) * scale, (x + i1 + 1) * scale, (y + j + 1) * scale, col);
+                i = i1;
+            }
+        }
+        return x + p->w;
+    }
     for (int j = 0; j < PROMPT_H; j++) {
         uint16_t *row = g.px + (uint32_t)(y + j) * g.stride;
         for (int i = 0; i < p->w; i++) {
@@ -713,7 +929,7 @@ static int put_prompt(const prompt_t *p, int x, int y)
 }
 
 /* the buttons of the hints, for the device pressed last */
-enum { BTN_A, BTN_B, BTN_X, BTN_CHANGE, BTN_MONITOR, BTN_Y };
+enum { BTN_A, BTN_B, BTN_X, BTN_CHANGE, BTN_MONITOR, BTN_Y, BTN_REFRESH };
 
 /* up to three prompts for a button, and what goes between them */
 static int button_prompts(const menu_view_t *v, int b, const prompt_t *p[3], const char **join)
@@ -727,6 +943,7 @@ static int button_prompts(const menu_view_t *v, int b, const prompt_t *p[3], con
         case BTN_B: p[0] = prompt_get(PROMPT_KEY_ESC, 0); return 1;
         case BTN_X: p[0] = prompt_key('C'); return 1;
         case BTN_Y: p[0] = prompt_key('V'); return 1;
+        case BTN_REFRESH: p[0] = prompt_key('R'); return 1;
         case BTN_CHANGE:
             p[0] = prompt_get(PROMPT_KEY_LEFT, 0);
             p[1] = prompt_get(PROMPT_KEY_RIGHT, 0);
@@ -741,8 +958,16 @@ static int button_prompts(const menu_view_t *v, int b, const prompt_t *p[3], con
     }
     const int rgb30 = v->prompts == MENU_PROMPTS_RGB30;  /* the console's own A B X Y */
     int ds = v->prompts != MENU_PROMPTS_PAD && !rgb30;
-    if (!ds && v->confirm_b && (b == BTN_A || b == BTN_B))
-        b = b == BTN_A ? BTN_B : BTN_A;         /* confirm on B, back on A */
+    if (rgb30) {                                /* the console's OK is B and its back Y unless the player set others */
+        const char *face = b == BTN_A ? v->ok_btn : b == BTN_B ? v->back_btn : NULL;
+        if (b == BTN_B && !face)
+            face = "Y";
+        if (face)
+            b = face[0] == 'A' ? BTN_A : face[0] == 'B' ? BTN_B : face[0] == 'X' ? BTN_X : BTN_Y;
+        else if (v->confirm_b && b == BTN_A)
+            b = BTN_B;
+    } else if (!ds && v->confirm_b && (b == BTN_A || b == BTN_B))
+        b = b == BTN_A ? BTN_B : BTN_A;         /* confirm on B */
     switch (b) {
     case BTN_A: case BTN_B: case BTN_X:
         p[0] = ds ? prompt_get(ds4[b], v->prompts_colour)
@@ -751,6 +976,9 @@ static int button_prompts(const menu_view_t *v, int b, const prompt_t *p[3], con
     case BTN_Y:
         p[0] = ds ? prompt_get(PROMPT_TRIANGLE, v->prompts_colour)
                   : prompt_get(rgb30 ? PROMPT_RGB30_Y : PROMPT_PAD_Y, 0);
+        return 1;
+    case BTN_REFRESH:
+        p[0] = prompt_get(ds ? PROMPT_SHARE : PROMPT_PAD_SELECT, 0);
         return 1;
     case BTN_CHANGE:
         p[0] = prompt_get(PROMPT_DPAD_LEFTRIGHT, 0);
@@ -766,30 +994,37 @@ static int button_prompts(const menu_view_t *v, int b, const prompt_t *p[3], con
 /* the button's prompts from 4 px left of text column `col`, then a label
  * on the text grid after them; returns the column after the label and a
  * gap */
-static int hint(const menu_view_t *v, int col, int row, int b, const char *label)
+static int hint_btn(const menu_view_t *v, int col, int row, int b, const char *label, int enabled)
 {
     const prompt_t *p[3] = { NULL, NULL, NULL };
     const char *join;
     int n = button_prompts(v, b, p, &join);
-    int x = col * 8 - 4, y = row * 16;
+    int x = col * CW - 4, y = row * 16;
     for (int i = 0; i < n; i++) {
         if (i) {
             x += 2;
             if (join[0]) {
-                g16_text(&g, x, y, join, c16(C_TEXT));
-                x += 8 * (int)strlen(join) + 2;
+                if (!chips_dry)
+                    m_text(x, y, join, c16(enabled ? C_TEXT : C_DIM));
+                x += CW * (int)strlen(join) + 2;
             }
         }
         x = put_prompt(p[i], x, y);
     }
-    int lc = (x + 4 + 7) / 8;
-    g16_text(&g, lc * 8, y, label, c16(C_TEXT));
-    /* the pointer (M32) clicks it: A, B, X; "Change" is A on a choice row */
-    static const char letter[] = { 'A', 'B', 'X', 'A', 0, 'Y' };
-    if (!hints_dead && letter[b])
-        zone(col * 8 - 8, y - 4, (lc + (int)strlen(label)) * 8 - (col * 8 - 8) + 4, 24,
+    int lc = (x + 4 + CW - 1) / CW;
+    if (!chips_dry)
+        m_text(lc * CW, y, label, c16(enabled ? C_TEXT : C_DIM));
+    /* the pointer (M32) clicks it: A, B, X; "Change" is A on a choice row; R for refresh */
+    static const char letter[] = { 'A', 'B', 'X', 'A', 0, 'Y', 'R' };
+    if (!chips_dry && !hints_dead && enabled && letter[b])
+        zone(col * CW - CW, y - 4, (lc + (int)strlen(label)) * CW - (col * CW - CW) + 4, 24,
              MENU_HIT_BUTTON, letter[b], 1);
     return lc + (int)strlen(label) + 3;
+}
+
+static int hint(const menu_view_t *v, int col, int row, int b, const char *label)
+{
+    return hint_btn(v, col, row, b, label, 1);
 }
 
 /* a small triangle pointing up (dir -1) or down (+1), for the scroll marks */
@@ -801,45 +1036,77 @@ static void scroll_mark(int cx, int cy, int dir, uint16_t c)
 
 /* panel geometry: text rows 4 (title), 6..16 every other one (the rows),
  * 18 (help); columns 10-70 on the Pi, 2-43 on the narrow layout */
-#define PANEL_X     (WIDE ? 10 * 8 : 2 * 8)
-#define PANEL_W     (SW - 2 * PANEL_X)
+#define PANEL_X0    (WIDE ? 10 * CW : 2 * CW)
+/* the native layouts (720p, 1080p: bgz > 1) have 8x16 text on a screen 2 or 3 times wider: the box is half of what it
+ * was and sits in the middle (29 Oct 2026) */
+#define PANEL_W     (bgz > 1 ? (SW - 2 * PANEL_X0) / 2 : SW - 2 * PANEL_X0)
+#define PANEL_X     (bgz > 1 ? (SW - PANEL_W) / 2 : PANEL_X0)
 #define PANEL_Y     52
-#define PANEL_H     (310 - PANEL_Y)
+#define PANEL_EXTRA ((menu_panel_rows() - MENU_PANEL_ROWS) * 32)    /* the taller box of a native layout */
+#define PANEL_H     (310 - PANEL_Y + PANEL_EXTRA)
 #define PANEL_ROW0  6
-#define PANEL_COL   (PANEL_X / 8)
+#define PANEL_COL   (PANEL_X / CW)
 #define LABEL_COL   (PANEL_COL + 3)
-#define VALUE_END   ((PANEL_X + PANEL_W) / 8 - 3)   /* values end before this column */
+#define VALUE_END   ((PANEL_X + PANEL_W) / CW - 3)   /* values end before this column */
+
+static int by_enter;                    /* Settings: Enter changes a choice (no arrows), set a frame */
 
 /* faded: a question is over it */
 /* a list of rows in a box from x, w wide: the title, MENU_PANEL_ROWS rows
  * (the selected one on a pill; faded: grey, the focus is elsewhere; sel < 0:
  * none), the line of help (p->help) at the bottom; values: the rows'
  * values (else only the ">" of a submenu) */
+int menu_panel_rows(void)
+{
+    return bgz > 1 ? MENU_PANEL_ROWS_TALL : MENU_PANEL_ROWS;
+}
+
 static void draw_list(const menu_panel_t *p, int x0, int w, int faded, int hit, int values)
 {
     round_rect(x0 - 2, PANEL_Y - 2, w + 4, PANEL_H + 4, 16, c16(C_LINE));
     round_rect(x0, PANEL_Y, w, PANEL_H, 14, c16(C_BAR));
-    const int col0 = x0 / 8, label_col = col0 + 3, value_end = (x0 + w) / 8 - 3;
+    const int col0 = x0 / CW, label_col = col0 + 3, value_end = (x0 + w) / CW - 3;
     char buf[72];
     ksnprintf(buf, sizeof buf, "%s", p->title ? p->title : "");
-    if (w / 8 - 4 < (int)sizeof buf)
-        buf[w / 8 - 4] = 0;
-    g16_text(&g, (col0 + 2) * 8, 4 * 16, buf, c16(faded ? C_DIM : C_TEXT));
-    g16_rectfill(&g, x0 + 16, 88, w - 32, 1, c16(C_LINE));
-    for (int i = 0; i < MENU_PANEL_ROWS && p->top + i < p->n; i++) {
+    if (w / CW - 4 < (int)sizeof buf)
+        buf[w / CW - 4] = 0;
+    m_text((col0 + 2) * CW, 4 * 16, buf, c16(faded ? C_DIM : C_TEXT));
+    m_rect(x0 + 16, 88, w - 32, 1, c16(C_LINE));
+    const int prows = menu_panel_rows(), extra = PANEL_EXTRA;
+    for (int i = 0; i < prows && p->top + i < p->n; i++) {
         const menu_row_t *r = &p->rows[p->top + i];
         int row = PANEL_ROW0 + 2 * i, y = row * 16, sel = p->top + i == p->sel;
         zone(x0 + 16, y - 8, w - 32, 32, hit, p->top + i, 1);
         if (sel)
             round_rect(x0 + 16, y - 6, w - 32, 28, 8, faded ? c16(C_LINE) : c16(C_TAB_ON));
         sel = sel && !faded;
-        uint16_t fg = sel ? c16(C_BAR) : r->kind == MENU_ROW_INFO ? c16(C_DIM) : c16(C_TEXT);
-        uint16_t fv = sel ? c16(0x4A4A56) : r->kind == MENU_ROW_INFO ? c16(C_TEXT) : c16(C_DIM);
+        const int info = r->kind == MENU_ROW_INFO || r->kind == MENU_ROW_BAR;
+        uint16_t fg = sel ? c16(C_BAR) : info ? c16(C_DIM) : c16(C_TEXT);
+        uint16_t fv = sel ? c16(0x4A4A56) : info ? c16(C_TEXT) : c16(C_DIM);
         ksnprintf(buf, sizeof buf, "%s", r->label ? r->label : "");
         buf[30] = 0;
-        g16_text(&g, label_col * 8, y, buf, fg);
+        if (r->swatch)
+            m_rect(label_col * CW - 12, y + 3, 8, 8, c16(r->swatch));
+        m_text(label_col * CW, y, buf, fg);
+        if (r->kind == MENU_ROW_BAR) {
+            static const uint32_t part_col[MENU_BAR_PARTS] = { 0xE06C75, 0x61AFEF, 0x98C379, 0xC678DD, 0x56B6C2, 0xE5C07B, 0x4A5060 };  /* kernel, bm, bme, glb, bmm, other, free */
+            const int bx = (label_col + (int)strlen(buf) + 1) * CW, bw = value_end * CW - bx;
+            if (r->bar && bw > 0) {
+                m_rect(bx, y + 2, bw, 10, c16(C_LINE));
+                int px = bx;
+                for (int k = 0; k < MENU_BAR_PARTS; k++) {
+                    int pw = bw * r->bar[k] / 1000;
+                    if (pw > bx + bw - px)
+                        pw = bx + bw - px;
+                    if (pw > 0)
+                        m_rect(px, y + 2, pw, 10, c16(part_col[k]));
+                    px += pw;
+                }
+            }
+            continue;
+        }
         const char *val = values && r->value ? r->value : "";
-        if (r->kind == MENU_ROW_CHOICE && sel && values)
+        if (r->kind == MENU_ROW_CHOICE && sel && values && !by_enter)
             ksnprintf(buf, sizeof buf, "< %s >", val);
         else if (r->kind == MENU_ROW_SUB)
             ksnprintf(buf, sizeof buf, "%s%s>", val, val[0] ? "  " : "");
@@ -850,18 +1117,18 @@ static void draw_list(const menu_panel_t *p, int x0, int w, int faded, int hit, 
         if (max < 0) max = 0;
         if ((int)strlen(buf) > max)
             buf[max] = 0;
-        g16_text(&g, (value_end - (int)strlen(buf)) * 8, y, buf, fv);
+        m_text((value_end - (int)strlen(buf)) * CW, y, buf, fv);
     }
     if (p->top > 0)
         scroll_mark(x0 + w - 12, 100, -1, c16(C_DIM));
-    if (p->top + MENU_PANEL_ROWS < p->n)
-        scroll_mark(x0 + w - 12, 268, 1, c16(C_DIM));
-    g16_rectfill(&g, x0 + 16, 281, w - 32, 1, c16(C_LINE));
+    if (p->top + prows < p->n)
+        scroll_mark(x0 + w - 12, 268 + extra, 1, c16(C_DIM));
+    m_rect(x0 + 16, 281 + extra, w - 32, 1, c16(C_LINE));
     if (p->help) {
         ksnprintf(buf, sizeof buf, "%s", p->help);
-        if (w / 8 - 4 < (int)sizeof buf)
-            buf[w / 8 - 4] = 0;
-        g16_text(&g, (col0 + 2) * 8, 18 * 16, buf, c16(C_DIM));
+        if (w / CW - 4 < (int)sizeof buf)
+            buf[w / CW - 4] = 0;
+        m_text((col0 + 2) * CW, 18 * 16 + extra, buf, c16(C_DIM));
     }
 }
 
@@ -874,24 +1141,29 @@ static void draw_panel(const menu_panel_t *p, int faded)
 /* ---------------------------------------------------------------- the Settings page */
 
 #define C_PAGE      0x0E0E12
-#define SECTIONS_W  (25 * 8)                    /* the left column on the Pi */
+#define SECTIONS_W  (25 * CW)                    /* the left column on the Pi */
 
 static void draw_page(const menu_page_t *pg, int faded)
 {
-    g16_rectfill(&g, 0, BAR_H, SW, FOOT_Y - BAR_H, c16(C_PAGE));
+    m_rect(0, BAR_H, SW, FOOT_Y - BAR_H, c16(C_PAGE));
     if (WIDE) {
         /* the help of the focused list under the rows (the wide box) */
-        const int rx = 2 * 8 + SECTIONS_W + 8;
+        int sx = 2 * CW, rw = SW - 2 * CW - (sx + SECTIONS_W + 8);
+        if (bgz > 1) {                          /* the native layouts: the submenu half as wide, both boxes in the middle */
+            rw /= 2;
+            sx = (SW - (SECTIONS_W + 8 + rw)) / 2;
+        }
+        const int rx = sx + SECTIONS_W + 8;
         menu_panel_t sec = *pg->sections;
         sec.help = NULL;
-        draw_list(&sec, 2 * 8, SECTIONS_W, faded || pg->focus != 0,
+        draw_list(&sec, sx, SECTIONS_W, faded || pg->focus != 0,
                   pg->focus ? MENU_HIT_SECTION : MENU_HIT_ROW, 0);
         if (pg->rows) {
             menu_panel_t rows = *pg->rows;
             if (!pg->focus)
                 rows.help = pg->sections->help;
-            zone(rx - 2, PANEL_Y - 2, SW - 2 * 8 - rx + 4, PANEL_H + 4, MENU_HIT_PANEL, 0, 1);
-            draw_list(&rows, rx, SW - 2 * 8 - rx, faded || pg->focus != 1,
+            zone(rx - 2, PANEL_Y - 2, rw + 4, PANEL_H + 4, MENU_HIT_PANEL, 0, 1);
+            draw_list(&rows, rx, rw, faded || pg->focus != 1,
                       pg->focus ? MENU_HIT_ROW : MENU_HIT_PANEL, 1);
         }
     } else {
@@ -900,98 +1172,34 @@ static void draw_page(const menu_page_t *pg, int faded)
     }
 }
 
-/* ---------------------------------------------------------------- the Lib tab */
-
-/* geometry: the groups on text row 4, the list (columns 2-31) and the
- * preview box (columns 35-77) on rows 6-18, the details on rows 14-18 */
-#define LIB_GROUP_ROW   4
-#define LIB_ROW0        6
-#define LIB_LIST_X      (2 * 8)
-#define LIB_LIST_W      (30 * 8)
-#define LIB_COL_END     32                      /* the list's values end before this column */
-#define LIB_BOX_X       (35 * 8)
-#define LIB_BOX_W       (42 * 8)
-#define LIB_BOX_Y       (LIB_ROW0 * 16 - 4)
-#define LIB_BOX_H       (8 * 16)
-#define LIB_INFO_ROW    14
-#define C_HEAD          0x2A2A36                /* the row of a file */
-
-static void draw_lib(const menu_lib_t *l)
-{
-    char buf[64];
-    /* the groups, on a bar of their own: the selected one on a pill like the tabs */
-    int col = 5;
-    round_rect(LIB_LIST_X - 8, LIB_GROUP_ROW * 16 - 8, SW - 2 * (LIB_LIST_X - 8), 32, 10, c16(C_BAR));
-    g16_text(&g, 2 * 8, LIB_GROUP_ROW * 16, "<", c16(C_DIM));
-    for (int i = 0; i < l->ngroups; i++) {
-        int n = (int)strlen(l->groups[i]);
-        zone(col * 8 - 8, LIB_GROUP_ROW * 16 - 6, (n + 2) * 8, 28, MENU_HIT_GROUP, i, 1);
-        if (i == l->group)
-            pill_text(col, LIB_GROUP_ROW, l->groups[i], C_BAR, C_TAB_ON);
-        else
-            g16_text(&g, col * 8, LIB_GROUP_ROW * 16, l->groups[i], c16(C_TEXT));
-        col += n + 3;
-    }
-    g16_text(&g, col * 8 - 8, LIB_GROUP_ROW * 16, ">", c16(C_DIM));
-
-    /* the list */
-    round_rect(LIB_LIST_X - 8, LIB_BOX_Y - 4, LIB_LIST_W + 16, MENU_LIB_ROWS * 16 + 16, 10, c16(C_BAR));
-    if (!l->n && l->empty) {
-        ksnprintf(buf, sizeof buf, "%s", l->empty);
-        buf[29] = 0;
-        g16_text(&g, LIB_LIST_X + 8, LIB_ROW0 * 16, buf, c16(C_DIM));
-    }
-    for (int i = 0; i < MENU_LIB_ROWS && l->top + i < l->n; i++) {
-        const menu_lib_row_t *r = &l->rows[l->top + i];
-        int y = (LIB_ROW0 + i) * 16, sel = l->top + i == l->sel;
-        uint16_t fg = c16(C_TEXT), fv = c16(C_DIM);
-        if (r->header) {
-            g16_rectfill(&g, LIB_LIST_X, y, LIB_LIST_W, 16, c16(C_HEAD));
-            fg = c16(C_DIM);
-        } else {
-            zone(LIB_LIST_X, y, LIB_LIST_W, 16, MENU_HIT_LIB, l->top + i, 1);
-            if (sel) {
-                g16_rectfill(&g, LIB_LIST_X, y, LIB_LIST_W, 16, c16(C_TAB_ON));
-                fg = c16(C_BAR);
-                fv = c16(0x4A4A56);
-            }
-        }
-        int indent = r->header ? 1 : 2;
-        ksnprintf(buf, sizeof buf, "%s", r->label ? r->label : "");
-        buf[22] = 0;
-        g16_text(&g, LIB_LIST_X + indent * 8 - 8, y, buf, fg);
-        if (r->value && r->value[0]) {
-            ksnprintf(buf, sizeof buf, "%s", r->value);
-            buf[8] = 0;
-            g16_text(&g, (LIB_COL_END - (int)strlen(buf)) * 8, y, buf, fv);
-        }
-    }
-    if (l->top > 0)                             /* in the panel's margin, above and below the rows */
-        scroll_mark(LIB_LIST_X + LIB_LIST_W - 4, LIB_ROW0 * 16 - 5, -1, c16(C_DIM));
-    if (l->top + MENU_LIB_ROWS < l->n)
-        scroll_mark(LIB_LIST_X + LIB_LIST_W - 4, (LIB_ROW0 + MENU_LIB_ROWS) * 16 + 5, 1, c16(C_DIM));
-
-    /* the preview and the details */
-    round_rect(LIB_BOX_X - 8, LIB_BOX_Y - 4, LIB_BOX_W + 16, MENU_LIB_ROWS * 16 + 16, 10, c16(C_BAR));
-    g16_rectfill(&g, LIB_BOX_X, LIB_BOX_Y, LIB_BOX_W, LIB_BOX_H, c16(C_PILL));
-    if (l->preview) {
-        g16_clip(&g, LIB_BOX_X, LIB_BOX_Y, LIB_BOX_W, LIB_BOX_H);
-        l->preview(&g, LIB_BOX_X, LIB_BOX_Y, LIB_BOX_W, LIB_BOX_H, l->ctx);
-        g16_clip(&g, 0, 0, 0, 0);
-    }
-    for (int i = 0; i < 5; i++) {
-        if (!l->lines[i] || !l->lines[i][0])
-            continue;
-        ksnprintf(buf, sizeof buf, "%s", l->lines[i]);
-        buf[42] = 0;
-        g16_text(&g, LIB_BOX_X, (LIB_INFO_ROW + i) * 16, buf, i == 0 ? c16(0xFFB040) : c16(i == 1 ? C_TEXT : C_DIM));
-    }
-}
-
 /* an icon of icons.c over the bar: the icon in `ink`, the number's disc in
  * `disc` with the digit in `digit`; only written */
 static void put_icon(const icon_mask_t *m, int x0, int y0, uint32_t ink, uint32_t disc, uint32_t digit)
 {
+    if (gpu_draw) {
+        for (int y = 0; y < ICON_BH; y++) {
+            for (int x = 0; x < ICON_W; x++) {
+                int i = y * ICON_W + x;
+                if (!m->icon[i] && !m->disc[i])
+                    continue;
+                uint32_t c = m->digit[i] ? digit : over(over(C_BAR, ink, m->icon[i]), disc, m->disc[i]);
+                uint16_t col = c16(c);
+                int x1 = x;
+                while (x1 + 1 < ICON_W) {
+                    int i1 = y * ICON_W + x1 + 1;
+                    if (!m->icon[i1] && !m->disc[i1])
+                        break;
+                    uint32_t c1 = m->digit[i1] ? digit : over(over(C_BAR, ink, m->icon[i1]), disc, m->disc[i1]);
+                    if (c16(c1) != col)
+                        break;
+                    x1++;
+                }
+                gpu3d_rect2d(&g, (x0 + x) * scale, (y0 + y) * scale, (x0 + x1 + 1) * scale, (y0 + y + 1) * scale, col);
+                x = x1;
+            }
+        }
+        return;
+    }
     for (int y = 0; y < ICON_BH; y++) {
         uint16_t *p = g.px + (uint32_t)(y0 + y) * g.stride + x0;
         for (int x = 0; x < ICON_W; x++) {
@@ -1069,10 +1277,10 @@ static const struct { const char *keys, *what; } menu_keys[] = {
     { "up down left right", "choose (or w a s d)" },
     { "enter", "play, open, yes" },
     { "c", "options of the game" },
-    { "v", "the Lib tab: listen" },
+    { "v", "Market: Apps or Games" },
     { "q / e", "the tab before, after" },
     { "tab", "the next tab" },
-    { "1 - 5", "Market ... Settings" },
+    { "1 - 4", "Market ... Settings" },
     { "r", "read the SD card again" },
     { "mouse", "click: play; right: back" },
 };
@@ -1120,8 +1328,8 @@ static int key_pictures(const char *keys, int x, int row)
         if (p) {
             x = put_prompt(p, x, row * 16) + 2;
         } else {
-            g16_text(&g, x + 2, row * 16, tok, c16(C_DIM));
-            x += 8 * (int)strlen(tok) + 4;
+            m_text(x + 2, row * 16, tok, c16(C_DIM));
+            x += CW * (int)strlen(tok) + 4;
         }
     }
     return x;
@@ -1131,12 +1339,12 @@ static int key_pictures(const char *keys, int x, int row)
  * pictures, over everything (columns on the text grid) */
 static void keys_help(void)
 {
-    g16_rectfill(&g, 0, 0, SW, SH, c16(C_BAR));
-    g16_text(&g, 2 * 8, 0, "Keys", c16(C_ACCENT));
-    g16_text(&g, 7 * 8, 0, "(F12 held)", c16(C_DIM));
+    m_rect(0, 0, SW, SH, c16(C_BAR));
+    m_text(2 * CW, 0, "Keys", c16(C_ACCENT));
+    m_text(7 * CW, 0, "(F12 held)", c16(C_DIM));
     /* the system's keys in the first column, the menu's in the next (one
      * column: one after the other) */
-    const int cols = WIDE ? 2 : 1, colw = (SW / 8 - 2) / cols, rows = SH / 16 - 2;
+    const int cols = WIDE ? 2 : 1, colw = (SW / CW - 2) / cols, rows = SH / 16 - 2;
     const int nsys = syskeys_count(), nmenu = (int)(sizeof menu_keys / sizeof menu_keys[0]);
     for (int i = 0; i < 2 + nsys + nmenu; i++) {
         const int at = cols > 1 && i > nsys ? rows + (i - nsys - 1) : i;
@@ -1146,7 +1354,7 @@ static void keys_help(void)
         const int col = 2 + c * colw, row = 2 + r;
         const char *keys, *what;
         if (i == 0 || i == nsys + 1) {
-            g16_text(&g, col * 8, row * 16, i == 0 ? "bm" : "Menu", c16(0xFFB040));
+            m_text(col * CW, row * 16, i == 0 ? "bm" : "Menu", c16(0xFFB040));
             continue;
         }
         if (i <= nsys) {
@@ -1156,14 +1364,14 @@ static void keys_help(void)
             keys = menu_keys[i - nsys - 2].keys;
             what = menu_keys[i - nsys - 2].what;
         }
-        int x = key_pictures(keys, col * 8, row);
-        int tc = (x + 8 + 7) / 8;               /* the text on the grid (the tests read it) */
+        int x = key_pictures(keys, col * CW, row);
+        int tc = (x + 8 + CW - 1) / CW;               /* the text on the grid (the tests read it) */
         char buf[48];
         ksnprintf(buf, sizeof buf, "%s", what);
         int room = col + colw - 1 - tc;
         if (room < (int)strlen(buf))
             buf[room > 0 ? room : 0] = 0;
-        g16_text(&g, tc * 8, row * 16, buf, c16(C_TEXT));
+        m_text(tc * CW, row * 16, buf, c16(C_TEXT));
     }
 }
 
@@ -1175,35 +1383,51 @@ int menu_ui_cols(void)
 }
 
 /* the screen of the layout: on the RGB30 360x360 shown 2x (the display
- * controller enlarges it); on the Pi 640x360, or 1920x1080 with
- * menu_scale=3 in bm/config.txt (the ARM enlarges it at each flip: a try,
- * the GPU will draw it there one day) */
+ * controller enlarges it); on the Pi 640x360 drawn by the ARM (the HDMI
+ * scaler enlarges it). menu_scale in bm/config.txt (Settings > Screen > Menu size) asks for more:
+ * 2 is 1280x720 and 3 is 1920x1080, both drawn by the GPU at their own size; 4 is 640x360 drawn by the
+ * GPU. The ARM never enlarges the menu: when the GPU cannot draw it, the menu stays at 360p on the ARM. */
 static int screen_open(framebuffer_t *fb)
 {
 #ifdef BM_RGB30
     sw = 360;
     scale = 1;
+    gpu_draw = 0;
+    gpu_big = 0;
     return fb_init_mode(fb, (uint32_t)sw, (uint32_t)sh, 3, 16, 2, 0);
 #else
     const char *ms = config_get("menu_scale");
     sw = 640;
-    scale = ms && strcmp(ms, "3") == 0 ? 3 : 1;
-    if (scale > 1 && !frame)
-        frame = malloc(MAX_W * MAX_H * 2);
-    if (scale > 1 && (!frame || fb_init_depth(fb, (uint32_t)(sw * scale), (uint32_t)(sh * scale), 3, 16) != 0))
+    sh = 360;
+    bgz = 1;
+    gpu_draw = 0;
+    gpu_big = 0;
+    /* no key: 720p drawn by the GPU (28 Oct 2026); 1: 360p on the ARM; 4: 360p drawn by the GPU */
+    scale = ms && ms[0] == '3' ? 3 : ms && ms[0] == '1' ? 1 : ms && ms[0] == '4' ? 1 : 2;
+    const char *ml = config_get("menu_layout");
+    if (scale > 1 && ml && ml[0] == '1') {      /* a layout of its own size: more covers, the same sizes */
+        sw = 640 * scale;
+        sh = 360 * scale;
+        bgz = scale;
         scale = 1;
-    if (scale > 1) {
-        /* M37: the GPU enlarges the layout (a job a frame: the ARM's 4 MB
-         * of writes gone), where there is one; else the ARM, as before */
-        const int was = gpu_big;
-        gpu_big = fb->pitch == fb->width * 2 && gpu3d_init() == 0;
-        if (gpu_big) {
+    }
+    if (sw > 640 || scale > 1 || (ms && ms[0] == '4')) {
+        if (fb_init_depth(fb, (uint32_t)(sw * scale), (uint32_t)(sh * scale), 3, 16) == 0 &&
+            fb->pitch == fb->width * 2 && gpu3d_init() == 0) {
             gpu3d_set_fb(fb->mem, fb->size, fb->bus);
             gpu3d_set_size((int)fb->width, (int)fb->height);
+            gpu_draw = 1;
+            kprintf("menu: %lux%lu, drawn by the GPU\n", (unsigned long)fb->width, (unsigned long)fb->height);
+            return 0;
         }
-        if (gpu_big != was)
-            kprintf("menu: %lux%lu, the layout enlarged by the %s\n", fb->width, fb->height, gpu_big ? "GPU" : "ARM");
-        return 0;
+        if (scale > 1 || sw > 640)
+            kprintf("menu: the GPU cannot draw %dx, 360p on the ARM\n", scale > 1 ? scale : bgz);
+        else
+            kprintf("menu: the GPU cannot draw 360p, the ARM does\n");
+        scale = 1;
+        sw = 640;
+        sh = 360;
+        bgz = 1;
     }
     return fb_init_depth(fb, (uint32_t)sw, (uint32_t)sh, 3, 16);
 #endif
@@ -1228,9 +1452,31 @@ int menu_ui_open(framebuffer_t *fb)
         console_suspend(0);
         return -1;
     }
-    cols = (SW - 16) / (CARD_W + GAP_X);    /* 6 at 640, 3 at 360 */
+    if (gpu_draw) {
+        if (!bg_sheet_alloced) {
+            if (g16_sheet_alloc(&bg_sheet, BGW, BGH) == 0) {
+                memset(bg_sheet.alpha, 1, (size_t)bg_sheet.w * bg_sheet.h);
+                bg_sheet_alloced = 1;
+            }
+        }
+    }
+    {
+        const char *mf = config_get("menu_font");
+        bm_font = mf && mf[0] == 'b';
+    }
+    char_w = menu_font(scale)->width / scale;      /* 8 with the fonts of today; the text grid and the boxes follow it */
+    cols = bgz > 1 ? 8 : (SW - 16) / (CARD_W + GAP_X);    /* 6 at 640, 3 at 360, 8 in the native layouts */
+    foot_y = SH - 44;                       /* 316 at 360 high */
+    nrows = (foot_y - PEEK - 100) / PITCH_Y;    /* 2 at 360 high: the same as before */
+    if (nrows < 2)
+        nrows = 2;
+    grid_y0 = foot_y - PEEK - nrows * PITCH_Y;
+    if (bgz > 1)                                /* the native layouts: the grid in the middle of the room it has */
+        grid_y0 -= ((foot_y - PEEK - 100) - nrows * PITCH_Y) / 2;
     ready = 1;
     bg_valid = 0;
+    bg_building = 0;
+    bg_sig = 0;
     fade = 0;
     nzones = 0;
     pointer_env(1, SW, SH);
@@ -1248,6 +1494,14 @@ static void close_menu(framebuffer_t *fb, int console)
     ready = 0;
     nzones = 0;
     pointer_env(0, 0, 0);
+    if (bg_sheet_alloced) {
+        g16_sheet_free(&bg_sheet);
+        bg_sheet_alloced = 0;
+    }
+    if (gpu_draw || gpu_big) {
+        gpu3d_drop();
+        gpu_draw = gpu_big = 0;
+    }
     fb_init(fb, con_w, con_h, 2);
     if (console)
         console_suspend(0);
@@ -1287,42 +1541,133 @@ static void enlarge(framebuffer_t *fb)
     }
 }
 
-void menu_ui_frame(framebuffer_t *fb, const menu_view_t *v)
-{
-    if (!ready)
-        return;
-    if (scale > 1)
-        g16_target(&g, frame, (uint32_t)SW, SW, SH, &font_console_8x16);
-    else
-        g16_target(&g, (uint16_t *)fb->base, fb->pitch / 2, SW, SH, &font_console_8x16);
-    float t = (float)(timer_ticks() - t0) * 1e-6f;
-    const menu_item_t *cur = v->sel >= 0 && v->sel < v->n ? &v->items[v->sel] : NULL;
-    dim = v->panel != NULL;
-    nzones = 0;
+/* menu_gpu=1: the first frames, what the GPU wrote against the pixels the ARM would copy: how many are wrong,
+ * by row of the block (y % scale), by column of the block (x % scale) and by row parity of the layout, the
+ * first wrong one and the colours of the first row; then the ARM draws the frame as it should be, so the
+ * menu stays readable (the stripes of the Pi, 24 Oct: the line tells which kind they are) */
+#define GPU_CHECKS 3
+static int gpu_checks;
 
-    /* background: the selected cover, blurred; a cross-fade on change */
-    const g16_sheet_t *key = cur ? cur->cover : NULL;
-    if (!bg_valid || key != bg_key) {
-        if (bg_valid) {
-            uint16_t *s = bg_prev; bg_prev = bg_cur; bg_cur = s;
-            fade = FADE_FRAMES;
+static void gpu_check(framebuffer_t *fb)
+{
+    gpu3d_sync();                       /* the job is over before the ARM reads the page */
+    const uint32_t stride = fb->pitch / 2;
+    const uint16_t *page = (const uint16_t *)fb->base;
+    uint32_t bad = 0, by_row[3] = { 0, 0, 0 }, by_col[3] = { 0, 0, 0 }, by_par[2] = { 0, 0 };
+    int fx = -1, fy = -1;
+    uint16_t got = 0, want = 0;
+    for (int y = 0; y < SH * scale; y++)
+        for (int x = 0; x < SW * scale; x++) {
+            const uint16_t w = frame[(y / scale) * SW + x / scale], v = page[(uint32_t)y * stride + (uint32_t)x];
+            if (v == w)
+                continue;
+            if (!bad) {
+                fx = x; fy = y; got = v; want = w;
+            }
+            bad++;
+            by_row[y % scale]++;
+            by_col[x % scale]++;
+            by_par[(y / scale) & 1]++;
         }
-        make_background(bg_cur, key);
+    gpu_checks++;
+    kprintf("menu: GPU check %d: %lu of %lu pixels differ; by row of the block %lu/%lu/%lu, by column %lu/%lu/%lu, "
+            "even/odd layout rows %lu/%lu; first at %d,%d got %04x want %04x; pitch %lu, width %lu\n", gpu_checks,
+            (unsigned long)bad, (unsigned long)(SW * scale) * (unsigned long)(SH * scale), (unsigned long)by_row[0],
+            (unsigned long)by_row[1], (unsigned long)by_row[2], (unsigned long)by_col[0], (unsigned long)by_col[1],
+            (unsigned long)by_col[2], (unsigned long)by_par[0], (unsigned long)by_par[1], fx, fy, got, want,
+            (unsigned long)fb->pitch, (unsigned long)fb->width);
+    if (bad)
+        enlarge(fb);
+}
+
+
+/* the long calls that hold the CPU (stalls.h), a line when one ran in the window: count,
+ * the last and the longest in ms; the hash adds the KB. Starts counting again. */
+static void stall_print(const char *name, stall_t *s, char *buf, size_t n, size_t *k)
+{
+    if (!s->n)
+        return;
+    if (*k < n)
+        *k += (size_t)ksnprintf(buf + *k, n - *k, "%s%s %lux last %lu.%lu worst %lu.%lu ms", *k ? ", " : "", name,
+                                (unsigned long)s->n, (unsigned long)(s->last / 1000),
+                                (unsigned long)(s->last / 100 % 10), (unsigned long)(s->worst / 1000),
+                                (unsigned long)(s->worst / 100 % 10));
+    if (s->bytes && *k < n)
+        *k += (size_t)ksnprintf(buf + *k, n - *k, " (%lu KB)", (unsigned long)(s->bytes / 1024));
+    *s = (stall_t){0};
+}
+
+static void stalls_report(void)
+{
+    char line[160];
+    size_t k = 0;
+    stall_print("tls handshake", &stall_tls, line, sizeof line, &k);
+    stall_print("verify", &stall_verify, line, sizeof line, &k);
+    stall_print("file hash", &stall_hash, line, sizeof line, &k);
+    if (k)
+        kprintf("menu stalls: %s\n", line);
+}
+
+/* Where the frame is drawn: the panel, or the layout that is enlarged after. */
+static void frame_target(framebuffer_t *fb)
+{
+    if (gpu_draw) {
+        g16_target(&g, (uint16_t *)fb->base, fb->pitch / 2, SW * scale, SH * scale, menu_font(scale));
+        gpu3d_drop();
+        gpu3d_page(1, 0);
+        m_clip(0, 0, 0, 0);
+    } else if (scale > 1) {
+        g16_target(&g, frame, (uint32_t)SW, SW, SH, &font_console_8x16);
+    } else {
+        g16_target(&g, (uint16_t *)fb->base, fb->pitch / 2, SW, SH, &font_console_8x16);
+    }
+}
+
+/* The background: the selected cover, blurred, and the cross-fade. */
+static void frame_background(const menu_item_t *cur)
+{
+    /* background: the selected cover, blurred; a cross-fade on change. It is
+     * made BG_ROWS rows per frame while the old one stays on screen: the
+     * whole picture in one frame was 3 frames or more on the Pi, and the
+     * pointer jumped each time it moved onto another cover. */
+    const g16_sheet_t *key = cur ? cur->cover : NULL;
+    const uint16_t *kpx = key && key->px && key->w >= 16 && key->h >= 10 ? key->px : NULL;
+    if (!bg_valid) {
+        menu_bg_begin(&bgb, kpx, key ? key->w : 0, key ? key->h : 0, BGW, BGH);
+        menu_bg_step(&bgb, bg_cur, BGH);         /* the first one: nothing to show meanwhile */
         bg_key = key;
         bg_valid = 1;
+        bg_building = 0;
+    } else if (key != bg_key) {
+        if (!bg_building) {                     /* the picture on screen is kept in bg_prev */
+            uint16_t *s = bg_prev; bg_prev = bg_cur; bg_cur = s;
+            bg_sig = 0;
+        }
+        fade = 0;
+        bg_building = 1;
+        menu_bg_begin(&bgb, kpx, key ? key->w : 0, key ? key->h : 0, BGW, BGH);
+        bg_key = key;
+    }
+    if (bg_building && menu_bg_step(&bgb, bg_cur, BG_ROWS)) {
+        bg_building = 0;
+        fade = FADE_FRAMES;
     }
     put_background();
+}
 
-    /* grid: keep the selected row among the two fully visible ones */
+/* The grid of covers (or the Settings page), with the pointer zones. */
+static void frame_grid(const menu_view_t *v, float t)
+{
+    /* grid: keep the selected row among the fully visible ones */
     int sel_row = v->sel / cols;
     if (sel_row < first_row) first_row = sel_row;
-    if (sel_row > first_row + 1) first_row = sel_row - 1;
+    if (sel_row > first_row + nrows - 1) first_row = sel_row - (nrows - 1);
     if (first_row < 0) first_row = 0;
     scroll += ((float)first_row - scroll) * 0.25f;
     if (fabsf(scroll - (float)first_row) < 0.01f) scroll = (float)first_row;
 
-    g16_clip(&g, 0, GRID_TOP, SW, GRID_BOT - GRID_TOP);
-    for (int i = 0; !v->lib && !v->page && i < v->n; i++) {
+    m_clip(0, GRID_TOP, SW, GRID_BOT - GRID_TOP);
+    for (int i = 0; !v->page && i < v->n; i++) {
         int row = i / cols, col = i % cols;
         int x = GRID_X0 + col * (CARD_W + GAP_X);
         int y = GRID_Y0 + (int)lroundf(((float)row - scroll) * PITCH_Y);
@@ -1333,42 +1678,44 @@ void menu_ui_frame(framebuffer_t *fb, const menu_view_t *v)
             zone(x, z0, CARD_W, z1 - z0, MENU_HIT_COVER, i, y >= GRID_TOP && y + CARD_H <= GRID_BOT);
         }
         if (i == v->sel)            /* ring with a gap, like the home screens */
-            round_ring(x - 6, y - 6, CARD_W + 12, CARD_H + 12, RADIUS + 6, 3,
+            round_ring(x - 3, y - 3, CARD_W + 6, CARD_H + 6, RADIUS, 3,
                        dim ? c16(0x45454B) : pulse(t));
         const menu_item_t *it = &v->items[i];
-        card(it->cover, x, y);
+        card(it->cover, x, y, it->grey);
         if (it->loading && !it->cover)
             placeholder(it, x, y, t, i);
-        if (it->format && it->format[0] && (!it->loading || it->cover))
-            cover_format(x, y, it->format);
         if (it->busy) {
             char pc[8];
             ksnprintf(pc, sizeof pc, "%d%%", it->percent);
             cover_badge(x, y, pc, 1);
             cover_progress(x, y, it->percent);
-        } else if (it->running) {
-            cover_badge(x, y, "Playing", 0);
         } else if (it->badge) {
-            cover_badge(x, y, it->badge, strcmp(it->badge, "Update") == 0);
+            cover_badge(x, y, it->badge, 0);
         }
+        if (it->running)
+            cover_star(x, y);
+        if (it->update)
+            cover_update(x, y);
     }
-    g16_clip(&g, 0, 0, 0, 0);
-    if (!v->lib && !v->page && v->n > 2 * cols)
+    m_clip(0, 0, 0, 0);
+    if (!v->page && v->n > nrows * cols)
         scroll_bar((v->n + cols - 1) / cols, scroll);
-    if (v->lib && !v->on_gear)
-        draw_lib(v->lib);
     if (v->page)
         draw_page(v->page, v->ask != NULL);
+}
 
+/* The top bar: the tabs and Settings. */
+static void frame_tabs(const menu_view_t *v)
+{
     /* top bar: the tabs and Settings (the last tab: its panel; L1 / R1 move
      * between them), then the players and the network */
-    g16_rectfill(&g, 0, 0, SW, BAR_H, c16(C_BAR));
+    m_rect(0, 0, SW, BAR_H, c16(C_BAR));
     /* the first tab (the Market) off the screen at the left, the end of its
      * name showing, unless it is the tab: then all of them slide right */
     {
         float to = 0;
         if (v->peek_first && v->ntabs > 1 && (v->tab != 0 || v->on_gear))
-            to = -8.0f * (float)(strlen(v->tabs[0]) + 1);
+            to = -(float)CW * (float)(strlen(v->tabs[0]) + 1);
         tab_shift += (to - tab_shift) * 0.3f;
         if (fabsf(tab_shift - to) < 0.5f)
             tab_shift = to;                     /* at rest on the font's columns */
@@ -1377,231 +1724,183 @@ void menu_ui_frame(framebuffer_t *fb, const menu_view_t *v)
     /* the tabs stop short of the icons (the RGB30's narrow bar: Settings
      * peeks at the right while the Market is the tab), closer there */
     const int icons_x = status_icons(v), sep = SW < 480 ? 3 : 4;
-    g16_clip(&g, 0, 0, icons_x - 8, BAR_H);
+    m_clip(0, 0, icons_x - 8, BAR_H);
     int col = 3;
     for (int i = 0; i < v->ntabs; i++) {
-        int n = (int)strlen(v->tabs[i]), x = col * 8 + ox;
-        int zx = x - 8 < 0 ? 0 : x - 8, zw = x - 8 + (n + 2) * 8 - zx;
+        int n = (int)strlen(v->tabs[i]), x = col * CW + ox;
+        int zx = x - CW < 0 ? 0 : x - CW, zw = x - CW + (n + 2) * CW - zx;
         zone(zx, 4, zw, 40, MENU_HIT_TAB, i, 1);
         if (i == v->tab && !v->on_gear)
             pill_at(x, 1, v->tabs[i], C_BAR, C_TAB_ON);
         else
-            g16_text(&g, x, 16, v->tabs[i], c16(C_DIM));
+            m_text(x, 16, v->tabs[i], c16(C_DIM));
         col += n + sep;
     }
-    zone(col * 8 + ox - 8, 4, 10 * 8, 40, MENU_HIT_SETTINGS, 0, 1);
+    zone(col * CW + ox - CW, 4, 10 * CW, 40, MENU_HIT_SETTINGS, 0, 1);
     if (v->on_gear)
-        pill_at(col * 8 + ox, 1, "Settings", C_BAR, C_TAB_ON);
+        pill_at(col * CW + ox, 1, "Settings", C_BAR, C_TAB_ON);
     else
-        g16_text(&g, col * 8 + ox, 16, "Settings", c16(C_DIM));
-    g16_clip(&g, 0, 0, 0, 0);
+        m_text(col * CW + ox, 16, "Settings", c16(C_DIM));
+    m_clip(0, 0, 0, 0);
+}
 
-    /* the name of the selected cartridge, on a pill (and subtabs at the right) */
-    if (v->panel || v->lib || v->page) {
-        /* the panel covers it; the Lib tab has its groups there */
-    } else {
-        int sub_w = 0;
-        if (v->subtabs && v->nsubtabs > 0) {
-            for (int i = 0; i < v->nsubtabs; i++)
-                sub_w += (int)strlen(v->subtabs[i]) + (i + 1 < v->nsubtabs ? 3 : 0);
-            sub_w += 3;
-            int scol = SW / 8 - sub_w;
-            round_rect((scol - 2) * 8, TITLE_ROW * 16 - 6, (sub_w + 1) * 8, 28, 14, c16(C_BAR));
-            for (int i = 0; i < v->nsubtabs; i++) {
-                int sn = (int)strlen(v->subtabs[i]);
-                zone(scol * 8 - 8, TITLE_ROW * 16 - 6, (sn + 2) * 8, 28, MENU_HIT_GROUP, i, 1);
-                if (i == v->subtab)
-                    pill_text(scol, TITLE_ROW, v->subtabs[i], C_BAR, C_TAB_ON);
-                else
-                    g16_text(&g, scol * 8, TITLE_ROW * 16, v->subtabs[i], c16(C_DIM));
-                scol += sn + 3;
-            }
+/* The name of the selected cartridge, and the sub tabs at the right. */
+static void frame_title(const menu_view_t *v, const menu_item_t *cur)
+{
+    int sub_w = 0;
+    if (v->subtabs && v->nsubtabs > 0) {
+        for (int i = 0; i < v->nsubtabs; i++)
+            sub_w += (int)strlen(v->subtabs[i]) + (i + 1 < v->nsubtabs ? 3 : 0);
+        sub_w += 3;
+        if (v->refresh_label && v->refresh_label[0])
+            sub_w += (int)strlen(v->refresh_label) + 4;
+        int scol = SW / CW - sub_w;
+        round_rect((scol - 2) * CW, TITLE_ROW * 16 - 6, (sub_w + 1) * CW, 28, 14, c16(C_BAR));
+        for (int i = 0; i < v->nsubtabs; i++) {
+            int sn = (int)strlen(v->subtabs[i]);
+            zone(scol * CW - CW, TITLE_ROW * 16 - 6, (sn + 2) * CW, 28, MENU_HIT_GROUP, i, 1);
+            if (i == v->subtab)
+                pill_text(scol, TITLE_ROW, v->subtabs[i], C_BAR, C_TAB_ON);
+            else
+                m_text(scol * CW, TITLE_ROW * 16, v->subtabs[i], c16(C_DIM));
+            scol += sn + 3;
         }
-        int max_cols = SW / 8 - 6 - sub_w - (cur && cur->format && cur->format[0] ? 8 : 0);
-        if (max_cols < 12)
-            max_cols = 12;
-        if (v->banner) {
-            char buf[72];
-            ksnprintf(buf, sizeof buf, "%s", v->banner);
-            if (max_cols < (int)sizeof buf)
-                buf[max_cols] = 0;
-            pill_text(3, TITLE_ROW, buf, C_DIM, C_PILL);
-        } else if (cur && cur->title && cur->title[0]) {
-            char buf[72];
-            ksnprintf(buf, sizeof buf, "%s", cur->title);
-            if (max_cols < (int)sizeof buf)
-                buf[max_cols] = 0;
-            int n = (int)strlen(buf);
-            round_rect(3 * 8 - 10, TITLE_ROW * 16 - 6, (n + 2) * 8 + 4, 28, 14, c16(C_LINE));
-            int next_col = pill_text(3, TITLE_ROW, buf, C_TEXT, C_PILL);
-            if (cur->format && cur->format[0]) {
-                int b16 = strcmp(cur->format, "b16") == 0;
-                const char *fstr = b16 ? ".b16" : ".bm";
-                uint32_t fg = b16 ? 0xF0A030 : 0x70B8F8;
-                uint32_t bg = b16 ? 0x241808 : 0x101C2C;
-                uint32_t bd = b16 ? 0x704810 : 0x284868;
-                int fn = (int)strlen(fstr), fc = next_col + 2;
-                round_rect(fc * 8 - 10, TITLE_ROW * 16 - 6, (fn + 2) * 8 + 4, 28, 14, c16(bd));
-                pill_text(fc, TITLE_ROW, fstr, fg, bg);
-            }
-        } else if (v->n == 0) {
-            pill_text(3, TITLE_ROW, "nothing here yet", C_DIM, C_PILL);
+        if (v->refresh_label && v->refresh_label[0]) {
+            int rn = (int)strlen(v->refresh_label);
+            zone(scol * CW - CW, TITLE_ROW * 16 - 6, (rn + 2) * CW, 28, MENU_HIT_BUTTON, 'R', v->refresh_enabled);
+            if (v->refresh_enabled)
+                pill_text(scol, TITLE_ROW, v->refresh_label, C_BAR, C_ACCENT);
+            else
+                m_text(scol * CW, TITLE_ROW * 16, v->refresh_label, c16(C_DIM));
         }
     }
+    int max_cols = SW / CW - 6 - sub_w;
+    if (max_cols < 12)
+        max_cols = 12;
+    if (v->banner) {
+        char buf[72];
+        ksnprintf(buf, sizeof buf, "%s", v->banner);
+        if (max_cols < (int)sizeof buf)
+            buf[max_cols] = 0;
+        pill_text(3, TITLE_ROW, buf, C_DIM, C_PILL);
+    } else if (cur && cur->title && cur->title[0]) {
+        char buf[72];
+        ksnprintf(buf, sizeof buf, "%s", cur->title);
+        if (max_cols < (int)sizeof buf)
+            buf[max_cols] = 0;
+        int n = (int)strlen(buf);
+        round_rect(3 * CW - 10, TITLE_ROW * 16 - 6, (n + 2) * CW + 4, 28, 14, c16(C_LINE));
+        pill_text(3, TITLE_ROW, buf, C_TEXT, C_PILL);
+    } else if (v->n == 0) {
+        pill_text(3, TITLE_ROW, "nothing here yet", C_DIM, C_PILL);
+    }
+}
 
-    /* bottom bar: details, last game, buttons */
-    hints_dead = v->ask != NULL;
-    g16_rectfill(&g, 0, FOOT_Y, SW, SH - FOOT_Y, c16(C_BAR));
-    g16_rectfill(&g, 16, FOOT_Y + 1, SW - 32, 1, c16(C_LINE));
-    char buf[96];
-    int shown = 0;
-    if (v->details && !v->panel && !v->page) {
-        ksnprintf(buf, sizeof buf, "%s", v->details);
-        buf[SW / 8 - 4] = 0;
-        g16_text(&g, 2 * 8, 20 * 16, buf, c16(C_DIM));
-        shown = 1;
-    }
-    /* the note left of the hints; on the narrow layout over them, if free */
-    if (v->note && v->note[0] && (WIDE || !shown)) {
-        ksnprintf(buf, sizeof buf, "%s", v->note);
-        buf[WIDE ? 29 : SW / 8 - 4] = 0;
-        g16_text(&g, 2 * 8, (WIDE ? 21 : 20) * 16, buf, c16(C_DIM));
-    }
-    const int hc = WIDE ? 32 : 2;               /* where the hints start */
+/* The key chips from text column `hc`; the column after the last one. */
+static int hints_run(const menu_view_t *v, const menu_item_t *cur, int hc)
+{
+    int col = hc;
     /* the hints of a panel, or of the Settings page's focused list */
     const menu_panel_t *hp = v->panel ? v->panel
                            : v->page ? (v->page->focus && v->page->rows ? v->page->rows : v->page->sections) : NULL;
     if (hp) {
         const menu_row_t *r = hp->sel >= 0 && hp->sel < hp->n ? &hp->rows[hp->sel] : NULL;
-        col = WIDE ? 40 : hc;
+        col = WIDE ? hc + 8 : hc;
         if (r && r->kind == MENU_ROW_CHOICE)
-            col = hint(v, col, 21, BTN_CHANGE, "Change");
-        else if (r && r->kind != MENU_ROW_INFO)
-            col = hint(v, col, 21, BTN_A, r->kind == MENU_ROW_SUB ? "Open" : "Select");
-        hint(v, WIDE && col < 55 ? 55 : col, 21, BTN_B, "Back");
+            col = hint(v, col, HROW, v->on_gear ? BTN_A : BTN_CHANGE, "Change");
+        else if (r && r->kind != MENU_ROW_INFO && r->kind != MENU_ROW_BAR)
+            col = hint(v, col, HROW, BTN_A, r->kind == MENU_ROW_SUB ? "Open" : "Select");
+        col = hint(v, WIDE && col < hc + 23 ? hc + 23 : col, HROW, BTN_B, "Back");
     } else if (v->on_gear) {
-        col = hint(v, hc, 21, BTN_A, "Settings");
+        col = hint(v, hc, HROW, BTN_A, "Settings");
         if (!v->no_monitor)
-            hint(v, col, 21, BTN_MONITOR, "Monitor");
-    } else if (v->lib) {
-        col = hc;
-        if (v->lib->open)
-            col = hint(v, col, 21, BTN_A, v->lib->open);
-        if (v->lib->play)
-            col = hint(v, col, 21, BTN_Y, v->lib->play);
-        if (!v->no_monitor)
-            hint(v, col, 21, BTN_MONITOR, "Monitor");
+            col = hint(v, col, HROW, BTN_MONITOR, "Monitor");
     } else {
         const char *a = v->a_label ? v->a_label
                       : cur && cur->kind && (!strcmp(cur->kind, "tool") || !strcmp(cur->kind, "bme")) ? "Open"
                                                                                                           : "Play";
-        col = hc;
         if (a[0])
-            col = hint(v, col, 21, BTN_A, a);
+            col = hint(v, col, HROW, BTN_A, a);
         if (cur && cur->kind && strcmp(cur->kind, "market") == 0 && cur->title && cur->title[0])
-            col = hint(v, col, 21, BTN_X, "Details");
+            col = hint(v, col, HROW, BTN_X, "Details");
         else if (v->n && v->items[v->sel].path && v->items[v->sel].path[0])
-            col = hint(v, col, 21, BTN_X, "Options");
+            col = hint(v, col, HROW, BTN_X, "Options");
         if (v->y_label && v->y_label[0])
-            col = hint(v, col, 21, BTN_Y, v->y_label);
-        if (!v->no_monitor && (!WIDE || col <= (v->prompts == MENU_PROMPTS_KEYBOARD ? 60 : 66)))
-            hint(v, col, 21, BTN_MONITOR, "Monitor");
+            col = hint(v, col, HROW, BTN_Y, v->y_label);
+        if (v->refresh_label && v->refresh_label[0])
+            col = hint_btn(v, col, HROW, BTN_REFRESH, v->refresh_label, v->refresh_enabled);
+        if (!v->no_monitor && (!WIDE || col <= hc + (v->prompts == MENU_PROMPTS_KEYBOARD ? 28 : 34)))
+            col = hint(v, col, HROW, BTN_MONITOR, "Monitor");
     }
+    return col;
+}
 
-    hints_dead = 0;
-    if (v->panel)
-        draw_panel(v->panel, v->ask != NULL);
+/* The bottom bar: the key chips. */
+static void frame_hints(const menu_view_t *v, const menu_item_t *cur)
+{
+    /* bottom bar: the key chips only (2026-10-25, the user's request); what
+     * went wrong goes to the notice box, the rest to the console log */
+    hints_dead = v->ask != NULL;
+    m_rect(0, FOOT_Y, SW, SH - FOOT_Y, c16(C_BAR));
+    m_rect(16, FOOT_Y + 1, SW - 32, 1, c16(C_LINE));
+    int hc = WIDE ? 32 : 2;                     /* where the hints start */
+    if (bgz > 1) {                              /* the native layouts: the chips in the middle of the bar */
+        chips_dry = 1;
+        const int width = hints_run(v, cur, 0) - 3;
+        chips_dry = 0;
+        hc = (SW / CW - width) / 2;
+        if (hc < 2)
+            hc = 2;
+    }
+    hints_run(v, cur, hc);
+}
 
-    /* a question in a panel over everything */
-    if (v->ask) {
-        const int px = WIDE ? 12 * 8 : 2 * 8, py = 8 * 16 - 8, pw = SW - 2 * px, ph = 5 * 16 + 16;
-        round_rect(px - 2, py - 2, pw + 4, ph + 4, 14, c16(C_LINE));
-        round_rect(px, py, pw, ph, 12, c16(C_BAR));
-        zone(px - 2, py - 2, pw + 4, ph + 4, MENU_HIT_ASK, 0, 1);
-        char q[64];
-        ksnprintf(q, sizeof q, "%s", v->ask);
-        q[pw / 8 - 2] = 0;
-        g16_text(&g, (SW / 8 - (int)strlen(q)) / 2 * 8, 9 * 16, q, c16(C_TEXT));
-        if (v->ask_detail) {
-            ksnprintf(q, sizeof q, "%s", v->ask_detail);
-            q[pw / 8 - 2] = 0;
-            g16_text(&g, (SW / 8 - (int)strlen(q)) / 2 * 8, 10 * 16, q, c16(C_DIM));
-        }
-        int c = hint(v, WIDE ? 26 : 4, 12, BTN_A, v->ask_yes ? v->ask_yes : "Close it");
-        hint(v, c + 2, 12, BTN_B, "Cancel");
+/* A question in a panel over everything. */
+static void frame_ask(const menu_view_t *v)
+{
+    const int px = WIDE ? 12 * CW : 2 * CW, py = 8 * 16 - 8, pw = SW - 2 * px, ph = 5 * 16 + 16;
+    round_rect(px - 2, py - 2, pw + 4, ph + 4, 14, c16(C_LINE));
+    round_rect(px, py, pw, ph, 12, c16(C_BAR));
+    zone(px - 2, py - 2, pw + 4, ph + 4, MENU_HIT_ASK, 0, 1);
+    char q[64];
+    ksnprintf(q, sizeof q, "%s", v->ask);
+    q[pw / CW - 2] = 0;
+    m_text((SW / CW - (int)strlen(q)) / 2 * CW, 9 * 16, q, c16(C_TEXT));
+    if (v->ask_detail) {
+        ksnprintf(q, sizeof q, "%s", v->ask_detail);
+        q[pw / CW - 2] = 0;
+        m_text((SW / CW - (int)strlen(q)) / 2 * CW, 10 * 16, q, c16(C_DIM));
     }
+    int c = hint(v, WIDE ? 26 : 4, 12, BTN_A, v->ask_yes ? v->ask_yes : "Close it");
+    hint(v, c + 2, 12, BTN_B, "Cancel");
+}
 
-    /* the system's notice, over everything (a kernel arriving, a restart) */
-    if (v->notice) {
-        const int px = WIDE ? 12 * 8 : 2 * 8, py = 8 * 16 - 8, pw = SW - 2 * px, ph = 5 * 16 + 16;
-        round_rect(px - 2, py - 2, pw + 4, ph + 4, 14, c16(C_ACCENT));
-        round_rect(px, py, pw, ph, 12, c16(C_BAR));
-        char q[64];
-        ksnprintf(q, sizeof q, "%s", v->notice);
-        q[pw / 8 - 2] = 0;
-        g16_text(&g, (SW / 8 - (int)strlen(q)) / 2 * 8, 9 * 16, q, c16(C_TEXT));
-        if (v->notice_detail) {
-            ksnprintf(q, sizeof q, "%s", v->notice_detail);
-            q[pw / 8 - 2] = 0;
-            g16_text(&g, (SW / 8 - (int)strlen(q)) / 2 * 8, 10 * 16, q, c16(C_DIM));
-        }
-        if (v->notice_progress >= 0) {
-            const int bx = px + 16, bw = pw - 32, by = 12 * 16 + 4, fill = bw * v->notice_progress / 1000;
-            round_rect(bx, by, bw, 8, 4, c16(C_LINE));
-            if (fill > 8)
-                round_rect(bx, by, fill, 8, 4, c16(C_ACCENT));
-        }
+/* The system's notice, over everything (a kernel arriving, a restart). */
+static void frame_notice(const menu_view_t *v)
+{
+    const int px = WIDE ? 12 * CW : 2 * CW, py = 8 * 16 - 8, pw = SW - 2 * px, ph = 5 * 16 + 16;
+    round_rect(px - 2, py - 2, pw + 4, ph + 4, 14, c16(C_ACCENT));
+    round_rect(px, py, pw, ph, 12, c16(C_BAR));
+    char q[64];
+    ksnprintf(q, sizeof q, "%s", v->notice);
+    q[pw / CW - 2] = 0;
+    m_text((SW / CW - (int)strlen(q)) / 2 * CW, 9 * 16, q, c16(C_TEXT));
+    if (v->notice_detail) {
+        ksnprintf(q, sizeof q, "%s", v->notice_detail);
+        q[pw / CW - 2] = 0;
+        m_text((SW / CW - (int)strlen(q)) / 2 * CW, 10 * 16, q, c16(C_DIM));
     }
+    if (v->notice_progress >= 0) {
+        const int bx = px + 16, bw = pw - 32, by = 12 * 16 + 4, fill = bw * v->notice_progress / 1000;
+        round_rect(bx, by, bw, 8, 4, c16(C_LINE));
+        if (fill > 8)
+            round_rect(bx, by, fill, 8, 4, c16(C_ACCENT));
+    }
+}
 
-    if (v->keys_help)
-        keys_help();
-    pointer_draw(g.px, g.stride, SW, SH);       /* the arrow over everything */
-    if (scale > 1) {
-        g16_t page;
-        g16_target(&page, (uint16_t *)fb->base, fb->pitch / 2, SW * scale, SH * scale, &font_console_8x16);
-        if (!gpu_big || gpu3d_enlarge(frame, SW, SH, scale, &page) != 0) {
-            if (gpu_big)
-                kprintf("menu: the GPU did not enlarge the layout (%s): the ARM does\n", gpu3d_status());
-            gpu_big = 0;
-            enlarge(fb);
-        }
-    }
-    const uint32_t drawn = timer_ticks();
-    int paced = fb_flip(fb);
-#ifndef BM_RGB30
-    paced = 0;                          /* the Pi keeps its timer pacing, as it was */
-#endif
-    const uint32_t flipped = timer_ticks();
-    const int32_t slack = (int32_t)(deadline - 1500 - flipped);
-    uint32_t until = 0;
-    int gave = 0;
-    if (paced) {
-        /* RGB30: the flip waited for the panel's frame start (16,675 us, a
-         * hair longer than FRAME_US), so deadline falls behind it and the
-         * slack below never comes: the Market never loaded. The frame is the
-         * panel's: free time up to the next flip, less this frame's drawing
-         * (from the end of the last one to the flip) and the margin; no wait */
-        const int32_t work = (int32_t)(drawn - frame_end);
-        until = flipped + FRAME_US - (uint32_t)work - 1500;
-        gave = v->idle && work >= 0 && (int32_t)(until - flipped) > 0;
-    } else {
-        /* what is left of the frame: the Market's work, if any (a little
-         * margin for the flip), then the wait */
-        until = deadline - 1500;
-        gave = v->idle && (int32_t)(until - timer_ticks()) > 0;
-    }
-    if (gave) {
-        const uint32_t from = timer_ticks();
-        v->idle(until);
-        const uint32_t to = timer_ticks();
-        idle_offered += until - from;
-        idle_used += to - from;
-        if ((int32_t)(to - until) > (int32_t)idle_over)
-            idle_over = to - until;
-    }
-    if (!paced)
-        while ((int32_t)(timer_ticks() - deadline) < 0)
-            ;
+/* The log line of the menu's free time and frame times, every IDLE_FRAMES frames. */
+static void frame_idle_report(int gave, int paced, int32_t slack)
+{
     /* the background's time (fiber.h), a line in the log every IDLE_FRAMES
      * frames when a job ran or more than one frame had no free time: the
      * frames with some, the ms taken of the ms offered, the most past a
@@ -1619,7 +1918,7 @@ void menu_ui_frame(framebuffer_t *fb, const menu_view_t *v)
     else if (slack < idle_slack)
         idle_slack = slack;
     if (++idle_frames >= IDLE_FRAMES) {
-        char jobs[256], sd[48] = "";
+        char jobs[384], sd[48] = "";
         const int ran = fiber_jobs_report(jobs, sizeof jobs);
         uint32_t retries, timeouts;
         sd_counters(&retries, &timeouts);
@@ -1633,13 +1932,214 @@ void menu_ui_frame(framebuffer_t *fb, const menu_view_t *v)
                     "min slack %d us, paced %d%s\n", idle_gave, idle_frames, (unsigned long)(idle_used / 1000),
                     (unsigned long)(idle_offered / 1000), (unsigned long)(idle_over / 1000),
                     (unsigned long)(idle_over / 100 % 10), ran ? jobs : "no job", (int)idle_slack, paced, sd);
+        {
+            char st[160];
+            if (sd_stats_line(st, sizeof st))
+                kprintf("menu idle: %s\n", st);
+        }
+        stalls_report();
+        kprintf("menu frame: %dx, a frame averages draw %lu us, enlarge %lu us, flip %lu us, free time used %lu us "
+                "(%d frames)\n", scale, (unsigned long)(st_draw / (uint32_t)idle_frames),
+                (unsigned long)(st_enlarge / (uint32_t)idle_frames), (unsigned long)(st_flip / (uint32_t)idle_frames),
+                (unsigned long)(idle_used / (uint32_t)idle_frames), idle_frames);
+        st_draw = st_enlarge = st_flip = 0;
         idle_frames = idle_gave = 0;
         idle_offered = idle_used = idle_over = 0;
         idle_slack = SLACK_NONE;
     }
+}
+
+/* The pointer over everything, and the layout enlarged to the panel's size. */
+static void frame_show(framebuffer_t *fb)
+{
+    if (gpu_draw) {
+        gpu3d_flush(&g, 0);
+        m_pointer(fb);
+    } else {
+        pointer_draw(g.px, g.stride, SW, SH);       /* the arrow over everything */
+        if (scale > 1) {
+            g16_t page;
+            g16_target(&page, (uint16_t *)fb->base, fb->pitch / 2, SW * scale, SH * scale, &font_console_8x16);
+            if (!gpu_big || gpu3d_enlarge(frame, SW, SH, scale, &page) != 0) {
+                if (gpu_big)
+                    kprintf("menu: the GPU did not enlarge the layout (%s): the ARM does\n", gpu3d_status());
+                gpu_big = 0;
+                enlarge(fb);
+            } else if (gpu_checks < GPU_CHECKS) {
+                gpu_check(fb);              /* menu_gpu=1: what the GPU wrote, against the ARM's copy (a log line) */
+            }
+        }
+    }
+}
+
+/* The flip, the time the frame took, the free time for the jobs (v->idle), the wait for the next frame. `pre`:
+ * when the drawing ended. */
+static void frame_flip_and_wait(framebuffer_t *fb, const menu_view_t *v, uint32_t pre)
+{
+    const uint32_t drawn = timer_ticks();
+    int paced = fb_flip(fb);
+#ifndef BM_RGB30
+    paced = 0;                          /* the Pi keeps its timer pacing, as it was */
+#endif
+    const uint32_t flipped = timer_ticks();
+    if (gpu_draw) {
+        st_draw += drawn - frame_end;
+        st_enlarge += 0;
+    } else {
+        st_draw += pre - frame_end;
+        st_enlarge += drawn - pre;
+    }
+    st_flip += flipped - drawn;
+    const int32_t slack = (int32_t)(deadline - 1500 - flipped);
+    uint32_t until = 0;
+    int gave = 0;
+    if (paced) {
+        /* RGB30: the flip waited for the panel's frame start (16,675 us, a
+         * hair longer than FRAME_US), so deadline falls behind it and the
+         * slack below never comes: the Market never loaded. The frame is the
+         * panel's: free time up to the next flip, less this frame's drawing
+         * (from the end of the last one to the flip) and the margin; no wait */
+        const int32_t work = (int32_t)(drawn - frame_end);
+        until = flipped + FRAME_US - (uint32_t)work - 1500;
+        gave = v->idle && work >= 0 && (int32_t)(until - flipped) > 0;
+    } else {
+        /* what is left of the frame: the Market's work, if any (a little
+         * margin for the flip), then the wait */
+        until = deadline - 1500;
+        gave = v->idle && (int32_t)(until - timer_ticks()) > 0;
+        if (v->idle && !gave) {
+            /* a frame that took its whole time (menu_scale 2 or 3: the ARM enlarges each frame) left no time:
+             * the Market and the covers never ran (Pi log of 25 Oct: 0/300 frames given). A late frame gives the
+             * jobs a small slice anyway; the menu drops frames, the work goes on. */
+            until = timer_ticks() + IDLE_MIN_US * (uint32_t)(scale > 1 ? scale - 1 : 1);
+            gave = 1;
+        }
+    }
+    if (gave) {
+        const uint32_t from = timer_ticks();
+        v->idle(until);
+        const uint32_t to = timer_ticks();
+        idle_offered += until - from;
+        idle_used += to - from;
+        if ((int32_t)(to - until) > (int32_t)idle_over)
+            idle_over = to - until;
+    }
+    if (!paced)
+        while ((int32_t)(timer_ticks() - deadline) < 0)
+            ;
+    frame_idle_report(gave, paced, slack);
     uint32_t now = timer_ticks();
     deadline += FRAME_US;
     if ((int32_t)(now - deadline) > 0)
         deadline = now + FRAME_US;
     frame_end = now;
+}
+
+/* when the selection or the tab last changed (menu_ui_still); 0: not yet */
+static uint32_t moved_at;
+static int moved_sel = -1, moved_tab = -1;
+
+int menu_ui_still(uint32_t us)
+{
+    return !moved_at || (uint32_t)(timer_ticks() - moved_at) >= us;
+}
+
+void menu_ui_frame(framebuffer_t *fb, const menu_view_t *v)
+{
+    by_enter = v->on_gear;
+    if (!ready)
+        return;
+    if (v->sel != moved_sel || v->tab != moved_tab) {
+        moved_sel = v->sel;
+        moved_tab = v->tab;
+        moved_at = timer_ticks() | 1;           /* 0 means "never moved" */
+    }
+    frame_target(fb);
+    float t = (float)(timer_ticks() - t0) * 1e-6f;
+    const menu_item_t *cur = v->sel >= 0 && v->sel < v->n ? &v->items[v->sel] : NULL;
+    dim = v->panel != NULL;
+    nzones = 0;
+
+    frame_background(cur);
+    frame_grid(v, t);
+    frame_tabs(v);
+    if (!v->panel && !v->page)
+        frame_title(v, cur);                    /* (a panel covers it) */
+    frame_hints(v, cur);
+    hints_dead = 0;
+    if (v->panel)
+        draw_panel(v->panel, v->ask != NULL);
+
+    if (v->ask)
+        frame_ask(v);
+    if (v->notice)
+        frame_notice(v);
+    if (v->keys_help)
+        keys_help();
+    const uint32_t pre = timer_ticks();
+    frame_show(fb);
+    frame_flip_and_wait(fb, v, pre);
+}
+
+/* The pointer over the menu: moving over a cover or a row selects it, the left button does what A does there
+ * (or what is clicked: a tab, a button of the hints), the right one goes back, or opens the options of a cover;
+ * outside a panel or a question it closes them; the wheel moves by rows. */
+int menu_ui_pointer(menu_ptr_t *io)
+{
+    const pointer_t *pt = pointer_update();
+    io->dy = io->action = io->back = io->opts = io->ybtn = io->refresh = io->settings = 0;
+    io->tabto = io->panel_sel = io->section = io->cover_sel = io->page = -1;
+    if (!io->gfx || !pt->shown)
+        return 0;
+    const menu_hit_t h = menu_ui_hit(pt->x, pt->y);
+    const int click = pt->pressed & 1, right = pt->pressed & 2;
+    io->dy = -pt->wheel;
+    if (io->ask) {
+        if (click && h.kind == MENU_HIT_BUTTON && h.index == 'A')
+            io->action = 1;
+        else if (click && h.kind == MENU_HIT_BUTTON)
+            io->back = 1;
+        else if ((click && h.kind != MENU_HIT_ASK) || right)
+            io->back = 1;
+    } else if (io->panel) {
+        if (h.kind == MENU_HIT_ROW && h.index < io->panel_rows && (pt->moved || click)) {
+            io->panel_sel = h.index;
+            io->action = click;
+        } else if (click && h.kind == MENU_HIT_SECTION && io->on_gear) {
+            io->section = h.index;              /* another section of the Settings page */
+            io->action = 1;
+        } else if (click && h.kind == MENU_HIT_BUTTON) {
+            io->action = h.index == 'A';
+            io->back = h.index == 'B';
+        } else if (click && h.kind == MENU_HIT_TAB) {
+            io->tabto = h.index;
+        } else if (click && h.kind == MENU_HIT_SETTINGS) {
+            io->settings = 1;
+        } else if ((click && h.kind != MENU_HIT_PANEL && h.kind != MENU_HIT_ROW) || right) {
+            io->back = 1;
+        }
+    } else {
+        if (h.kind == MENU_HIT_COVER && h.index < io->covers && ((pt->moved && h.full) || click || right))
+            io->cover_sel = h.index;
+        if (click && h.kind == MENU_HIT_COVER && h.full)
+            io->action = 1;
+        else if (click && h.kind == MENU_HIT_GROUP && io->market) {
+            if (h.index != io->market_page)
+                io->page = h.index;
+        } else if (click && h.kind == MENU_HIT_BUTTON && h.index == 'Y')
+            io->ybtn = 1;
+        else if (click && h.kind == MENU_HIT_BUTTON && h.index == 'R')
+            io->refresh = io->market;
+        else if (click && h.kind == MENU_HIT_TAB)
+            io->tabto = h.index;
+        else if (click && h.kind == MENU_HIT_SETTINGS)
+            io->settings = 1;
+        else if (click && h.kind == MENU_HIT_BUTTON && h.index == 'A')
+            io->action = 1;
+        else if (click && h.kind == MENU_HIT_BUTTON && h.index == 'X')
+            io->opts = 1;
+        else if (right && h.kind == MENU_HIT_COVER)
+            io->opts = 1;
+    }
+    return 1;
 }

@@ -50,39 +50,54 @@ sources = ["docs/api/tools.md", "docs/RISORSE.md", "docs/PROJECT-LAYOUT.md", "do
 [[manual]]
 id = "editor-sdk"
 order = 10
-sources = ["carts/editor/main.lua", "sdk/README.md", "docs/RISORSE.md"]
+sources = ["sdk/README.md", "docs/RISORSE.md"]
 
 [[manual]]
 id = "editor-code"
 order = 11
-sources = ["carts/code/main.lua", "sdk/README.md", "docs/RISORSE.md"]
+sources = ["sdk/README.md", "docs/RISORSE.md"]
 
 [[manual]]
 id = "editor-pixel"
 order = 12
-sources = ["carts/pixel/main.lua", "sdk/README.md", "docs/RISORSE.md"]
+sources = ["sdk/README.md", "docs/RISORSE.md"]
 
 [[manual]]
 id = "editor-studio"
 order = 13
-sources = ["carts/studio/main.lua", "sdk/README.md", "docs/RISORSE.md"]
+sources = ["sdk/README.md", "docs/RISORSE.md"]
 
 [[manual]]
 id = "editor-animator"
 order = 14
-sources = ["carts/animator/main.lua", "sdk/README.md", "docs/RISORSE.md"]
+sources = ["sdk/README.md", "docs/RISORSE.md"]
 
 [[manual]]
 id = "editor-mesh"
 order = 15
-sources = ["carts/mesh/main.lua", "sdk/README.md", "docs/RISORSE.md"]
+sources = ["sdk/README.md", "docs/RISORSE.md"]
 
 [[manual]]
 id = "editor-sound"
 order = 16
-sources = ["carts/sound/main.lua", "sdk/README.md", "docs/RISORSE.md"]
+sources = ["sdk/README.md", "docs/RISORSE.md"]
 
 [[manual]]
 id = "editor-write"
 order = 17
-sources = ["carts/write/main.lua", "sdk/README.md", "docs/RISORSE.md"]
+sources = ["sdk/README.md", "docs/RISORSE.md"]
+
+[[manual]]
+id = "characters"
+order = 18
+sources = ["docs/api/draw.md", "docs/api/light3d.md"]
+
+[[manual]]
+id = "levels"
+order = 19
+sources = ["src/bm/map3d.c", "docs/api/draw.md", "docs/api/bmlib.md", "docs/api/light3d.md", "docs/GAME-GUIDE.md"]
+
+[[manual]]
+id = "graphics-techniques"
+order = 21
+sources = ["docs/PERF-BUDGET.md", "docs/DRIVERS.md"]

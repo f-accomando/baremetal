@@ -8,7 +8,9 @@ PLAT=virt (PL011 serial port, ramfb screen, GICv3, generic timer).
 import argparse
 import os
 import re
+import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -23,8 +25,24 @@ import bm_load  # noqa: E402
 sys.path.insert(0, os.path.join(HERE, "..", "..", "scripts"))
 import mksd  # noqa: E402
 import mkbm  # noqa: E402
+import bmaudio  # noqa: E402
 
 QEMU = os.environ.get("QEMU64", "qemu-system-aarch64")
+
+TMP_DIRS = []           # the temporary folders of the running test, removed by main() after it
+
+
+def mktmp(prefix):
+    """A temporary folder (an SD image is 64 MB, and /tmp of WSL is a 3.9 GB tmpfs)."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    TMP_DIRS.append(d)
+    return d
+
+
+def rm_tmps():
+    while TMP_DIRS:
+        shutil.rmtree(TMP_DIRS.pop(), ignore_errors=True)
+
 SCREEN = 360           # the menu (made as big as the 720x720 panel on the console)
 
 
@@ -34,7 +52,7 @@ RAMDISK = 0x50000000    # src/rgb30/sd_virt.c
 class Qemu:
     def __init__(self, image, machine="virt,gic-version=3", extra=(), sd=None):
         """sd: an SD card image (scripts/mksd.py), loaded as a RAM disk."""
-        self.tmp = tempfile.mkdtemp(prefix="bm64-")
+        self.tmp = mktmp(prefix="bm64-")
         if sd:
             extra = (*extra, "-device", f"loader,file={sd},addr={RAMDISK:#x},force-raw=on")
         self.mon_path = os.path.join(self.tmp, "mon.sock")
@@ -146,10 +164,21 @@ def lua_prompt(q):
     q.expect("\n> ", timeout=5)
 
 
-def make_sd(tmp, files):
-    """files: {"bm/name": bytes}; returns the image path."""
+def declare_both(data):
+    """A real .bm (not a stub) with no compatibility block gets one for the Pi and the RGB30: the policy
+    (the development notes) greys an old .bm on the RGB30 and asks before it starts."""
+    if len(data) >= 128 and data[:6] == b"BMCART" and not data[18] & 16:        # flag bit 4, BM_FLAG_COMPAT
+        return mkbm.mark_compat(data, 3)
+    return data
+
+
+def make_sd(tmp, files, declare=True):
+    """files: {"bm/name": bytes}; returns the image path. declare: the .bm carts of bm/ and carts/ are made
+    for both kernels (declare_both), so the menu starts them with no question; False leaves them as they are."""
     src = []
     for i, (dest, data) in enumerate(files.items()):
+        if declare and dest.lower().endswith(".bm") and dest.split("/")[0] in ("bm", "carts"):
+            data = declare_both(data)
         path = os.path.join(tmp, f"f{i}")
         with open(path, "wb") as f:
             f.write(data)
@@ -157,6 +186,65 @@ def make_sd(tmp, files):
     out = os.path.join(tmp, "sd.img")
     mksd.build(out, src, size_mib=64)
     return out
+
+
+def wait_screen(q, want, tries=80):
+    """Poll the screen until all the words of `want` are on it (the menu's row must be there BEFORE Enter)."""
+    text = ""
+    for _ in range(tries):
+        text = screen_all(q.screendump())
+        if all(w in text for w in want):
+            return text
+        time.sleep(0.25)
+    raise AssertionError(f"want {want} on the screen:\n{text}")
+
+
+def press(q, k, want, tries=6, wait=6.0):
+    """Send the button `k` and wait until all the words of `want` are on the screen; send it again if they do not
+    come within `wait` seconds. The menu reads a serial key as held for PAD_SERIAL_MS (120 ms): a frame
+    longer than that, as under load, drops the press, and two presses of one key close together merge. So the test
+    waits for the state that the key makes, not for a fixed time. `want` must not be on the screen before the key.
+    Returns the text of the screen."""
+    text = ""
+    for _ in range(tries):
+        q.send(k)
+        end = time.time() + wait
+        while time.time() < end:
+            text = screen_all(q.screendump())
+            if all(w in text for w in want):
+                return text
+            time.sleep(0.25)
+    raise AssertionError(f"key {k!r}: {want} never came on the screen:\n{text}")
+
+
+def press_serial(q, k, needle, tries=6, wait=10.0):
+    """As press(), for a key whose effect is a line on the serial port; returns the serial text up to `needle`."""
+    for _ in range(tries):
+        q.send(k)
+        try:
+            return q.expect(needle, timeout=wait).decode(errors="replace")
+        except AssertionError:
+            pass
+    raise AssertionError(f"key {k!r}: {needle!r} never came on the serial port:\n" + q.buf.decode(errors="replace"))
+
+
+def down_until(q, want, limit=24):
+    """Press the down key until all the words of `want` (a row's help) are on the screen."""
+    for _ in range(limit):
+        try:
+            return press(q, "s", want, tries=1, wait=1.5)
+        except AssertionError:
+            pass
+    raise AssertionError(f"down {limit} times: {want} never came:\n" + screen_all(q.screendump()))
+
+
+def open_settings_screen(q):
+    """From the Games tab: the Settings tab, its Screen section opened (the Screen modes row selected)."""
+    press(q, "r", ["bm SDK"])            # the Dev tab: the bm SDK
+    press(q, "r", ["Controllers", "built in"])  # the Settings tab
+    press(q, "s", ["The link, the address"])    # WiFi
+    press(q, "s", ["Screen modes, 3D Bench"])   # Screen
+    return press(q, "\r", ["Settings > Screen"])
 
 
 def test_boot_banner(b, opts):
@@ -173,6 +261,24 @@ def test_boot_banner(b, opts):
         q.close()
 
 
+def test_smp_cores_up(b, opts):
+    """M1 of the development notes: PSCI CPU_ON brings cores 1-3 up on the same page tables."""
+    q = Qemu(os.path.join(b, "kernel.elf"), extra=("-smp", "4"))
+    try:
+        out = boot(q)
+        for core in (1, 2, 3):
+            assert f"smp: core {core} up" in out, f"core {core} not up:\n{out}"
+        assert "smp: selftest ok (4 cores, 400000)" in out, out    # atomics and a lock, 4 cores
+        assert "smp: offload sha256 ok (2 jobs on workers)" in out, out   # M5: the hash of a release file
+        assert "smp: raster bands ok" in out, out        # V1: the picture by bands equals the picture by one core
+        assert "smp: jobs ok" in out and "jobs on workers)" in out and "0 jobs on workers" not in out, out   # V2: a job on a worker gives the answer of core 0
+        assert "smp: core 2 FAULT" in out and "smp: core 3 HUNG" in out, out
+        assert "smp: fault test ok" in out, out         # a faulting and a looping job do not stop core 0
+        assert "IRQ on: timer 1000 Hz" in out, out      # core 0 goes on to boot
+    finally:
+        q.close()
+
+
 def test_screen_console(b, opts):
     q = Qemu(os.path.join(b, "kernel.elf"))
     try:
@@ -185,16 +291,16 @@ def test_screen_console(b, opts):
             assert needle in text, f"{needle!r} not on screen:\n{text}"
         # the Dev tab: three square covers a row, the selected one's name on the pill
         # (no Lua on the RGB30's Dev tab: the Pi's only; ` on the serial port opens it)
-        for k, name in (("r", "3D Bench"), ("s", "Input test"), ("d", "Boot log"), ("d", "GPU test"),
-                        ("w", "Display"), ("s", "GPU test")):
-            keys(q, k)
-            text = screen_all(q.screendump())
-            assert name in text and in_menu(text), f"{name!r} not selected on the Dev tab:\n{text}"
+        # (the bm SDK alone: the benchmarks and tests are Settings rows, D52)
+        keys(q, "r")
+        text = screen_all(q.screendump())
+        assert "bm SDK" in text and in_menu(text), f"bm SDK not selected on the Dev tab:\n{text}"
+        for gone in ("3D Bench", "Render bench", "Input test", "Boot log", "Display"):
+            assert gone not in text, f"{gone!r} is not a Dev item:\n{text}"
         keys(q, "r")                            # Settings: its panel, the Pi's sections (settings.c)
         text = screen_all(q.screendump())
-        for needle in ("Controllers", "WiFi and network", "Screen and sound", "Updates", "Reports", "System"):
+        for needle in ("Controllers", "WiFi and network", "Screen", "Sound", "Updates"):   # Reports and System are below the sixth row
             assert needle in text, f"{needle!r} not in Settings:\n{text}"
-        assert "none waiting" in text, text    # no reports waiting
         keys(q, "w")                            # up from the first row: round to the last
         text = screen_all(q.screendump())
         assert "Turns the console off" in text, text    # Shut down, then Restart (2026-10-04)
@@ -213,16 +319,60 @@ def test_screen_console(b, opts):
         assert "Version, memory, the log" in screen_all(q.screendump())
         keys(q, "\x7f")                        # back: out of Settings, to Dev
         text = screen_all(q.screendump())
-        assert "GPU test" in text and "Screen and sound" not in text, text
+        assert "bm SDK" in text and "Updates" not in text, text
         keys(q, "l")                            # L1: Games
         assert "No games yet" in screen_all(q.screendump())
     finally:
         q.close()
 
 
+def test_sd_map(b, opts):
+    """Settings > System > SD map: the scan runs in the menu's free time, the
+    panel shows the bar, the legend, the folders and the files the menu cannot show."""
+    tmp = tempfile.mkdtemp(prefix="bm64sd-")
+    big = bytes(3 << 19)                        # 1.5 MB: wide enough to show in the bar on a 64 MB card
+    sd = make_sd(tmp, {"bm/racer.b16": b"B16" + bytes(100), "bme/PROJ.BME": big,
+                       "bm/DATA.DAT": big, "bm/NOTES.TXT": b"x" * 3000})
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+
+    def until(words, keyname, tries=16):
+        text = ""
+        for _ in range(tries):
+            text = screen_all(q.screendump())
+            if all(w in text for w in words):
+                return text
+            keys(q, keyname)
+        raise AssertionError(f"{words!r} not on the screen:\n{text}")
+
+    try:
+        boot(q)
+        time.sleep(0.5)
+        keys(q, "rr")                           # Settings
+        keys(q, "www")                          # System: round up from the first row
+        keys(q, "\r")
+        until(["What is on the card"], "s")     # the SD map row
+        keys(q, "\r")
+        text = until(["Settings > System > SD map", "Kernel", "bm (games)", "bme (projects)", "glb (models)", "bmm (models)"], "s", tries=1)
+        until(["Scan", "done"], "s", tries=60)  # the scan ends in the menu's free time
+        text = until(["/bm", "/bme", "files"], "s")
+        until(["Kernel", "bm (games)", "glb (models)"], "w", tries=20)    # back up to the bar
+        img = q.screendump()
+        w, h, px = img
+        seen = {tuple(px[i:i + 3]) for i in range(0, w * h * 3, 3)}
+        for name, c in (("bm", (0x61, 0xAF, 0xEF)), ("bme", (0x98, 0xC3, 0x79)), ("free", (0x4A, 0x50, 0x60))):
+            assert any(all(abs(a - b2) <= 8 for a, b2 in zip(c, got)) for got in seen),                 f"bar colour {name} {c} not on the screen"
+        until(["Files the menu cannot show"], "s", tries=20)
+        keys(q, "\r")
+        until(["Settings > System > SD map > Other", "DATA.DAT"], "s", tries=1)
+        until(["NOTES.TXT", "2 KB"], "s", tries=6)
+    finally:
+        q.close()
+
+
 def test_el2_image_relocation(b, opts):
     """kernel8.img as U-Boot's booti would start it: EL2, x0 = device tree,
-    loaded below the link address (start.S moves it and drops to EL1)."""
+    loaded away from the link address (QEMU: above it, at 0x40200000;
+    start.S moves it and drops to EL1)."""
     q = Qemu(os.path.join(b, "kernel8.img"), machine="virt,gic-version=3,virtualization=on")
     try:
         out = boot(q)
@@ -253,48 +403,37 @@ def test_lua_repl(b, opts):
         q.close()
 
 
-def test_menu_games_and_hidden_bm(b, opts):
-    """.b16 files in bm/ are the games; the .bm cartridges are listed too,
-    for testing, unless show_bm=0 in bm/config.txt (then the Games tab says
-    how many are hidden)."""
-    tmp = tempfile.mkdtemp(prefix="bm64sd-")
+def test_menu_games_bm_and_b16(b, opts):
+    """The Games tab lists the .bm cartridges and the old .b16 ones in bm/; no key hides any of them
+    (show_bm is gone). With no game it says where to put them."""
+    tmp = mktmp(prefix="bm64sd-")
     sd = make_sd(tmp, {"bm/racer.b16": b"B16" + bytes(100), "bm/pong.bm": b"BMCART" + bytes(64),
-                       "bm/notes.txt": b"hello", "bm/config.txt": b"show_bm=0\n"})
+                       "bm/notes.txt": b"hello"})
     q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
     try:
         out = boot(q)
         assert "SD: FAT32" in out and "ramdisk" in out, out
-        assert "cartridge menu: 1 games" in out, out
+        assert "cartridge menu: 2 games" in out, out
         time.sleep(0.5)
         text = screen_all(q.screendump())
-        assert "racer.b16" in text.lower(), text
-        assert "pong" not in text.lower(), text
-        out = q.expect("\n", timeout=5).decode(errors="replace")
-        assert "(1 .bm hidden by show_bm=0" in out, out
+        first = ("racer.b16" in text.lower(), "pong" in text.lower())
+        assert first.count(True) == 1, text         # the carousel shows one title: the first game
+        keys(q, "d")
+        time.sleep(0.5)
+        text2 = screen_all(q.screendump())
+        assert ("racer.b16" in text2.lower(), "pong" in text2.lower()) == first[::-1], text2   # the other one
         keys(q, "rr")                           # R1 twice: Settings, its panel over the covers
         text = screen_all(q.screendump())
         assert "Controllers" in text and "WiFi and network" in text and "racer" not in text.lower(), text
     finally:
         q.close()
-    sd = make_sd(tmp, {"bm/pong.bm": b"BMCART" + bytes(64), "bm/config.txt": b"show_bm=0\n"})
+    sd = make_sd(tmp, {"bm/notes.txt": b"hello"})
     q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
     try:
         boot(q)
         time.sleep(0.5)
         text = screen_all(q.screendump())
-        assert "No games yet" in text and "1 Pi cartridge (.bm) hidden by show_bm=0" in text, text
-    finally:
-        q.close()
-    sd = make_sd(tmp, {"bm/racer.b16": b"B16" + bytes(100), "bm/pong.bm": b"BMCART" + bytes(64)})
-    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
-    try:
-        out = boot(q)
-        assert "cartridge menu: 2 games" in out, out
-        time.sleep(0.5)
-        text = screen_all(q.screendump())
-        keys(q, "d")                            # the other cover
-        text += screen_all(q.screendump())
-        assert "pong.bm" in text.lower() and "racer.b16" in text.lower(), text
+        assert "No games yet" in text and "put .bm games in bm/" in text, text
     finally:
         q.close()
 
@@ -302,7 +441,7 @@ def test_menu_games_and_hidden_bm(b, opts):
 def test_bootlog_on_sd(b, opts):
     """The boot log goes to bm/bootlog.txt on the SD card (read back from
     the RAM disk with mtools: the FAT stays valid)."""
-    tmp = tempfile.mkdtemp(prefix="bm64sd-")
+    tmp = mktmp(prefix="bm64sd-")
     sd = make_sd(tmp, {"bm/racer.b16": b"B16" + bytes(100)})
     size = os.path.getsize(sd)
     q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
@@ -336,7 +475,7 @@ def test_update_from_sd(b, opts):
     bm/backup, the new one written last (read back from the RAM disk with
     mtools before the restart, which reloads it), and the console restarts.
     Both in the menu's background: the panel stays on the screen."""
-    tmp = tempfile.mkdtemp(prefix="bm64up-")
+    tmp = mktmp(prefix="bm64up-")
     key, pub = os.path.join(tmp, "key.pem"), os.path.join(tmp, "pub.pem")
     subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256",
                     "-out", key], check=True, capture_output=True)
@@ -358,27 +497,25 @@ def test_update_from_sd(b, opts):
     q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
     try:
         boot(q)
-        keys(q, "rrsss")                        # Settings: Controllers, WiFi, Screen, Updates
-        q.send("\r")
-        time.sleep(0.5)
-        keys(q, "s")                            # Check for updates
-        q.send("\r")
-        out = q.expect("can be installed", timeout=30).decode(errors="replace")
+        press(q, "r", ["bm SDK"])        # the Dev tab
+        press(q, "r", ["Controllers", "built in"])      # the Settings tab
+        press(q, "s", ["The link, the address"])        # WiFi
+        press(q, "s", ["Screen modes, 3D Bench"])       # Screen
+        press(q, "s", ["The latest bm from GitHub"])    # Updates
+        press(q, "\r", ["Settings > Updates"])
+        press(q, "s", ["The latest release on GitHub"])  # Check for updates
+        out = press_serial(q, "\r", "releases: ")      # the check starts (the line is printed before the list)
+        out += q.expect("can be installed", timeout=60).decode(errors="replace")
         for want in ("releases: sd:/release/", "v9.9.9", "commit abc1234, signed: good"):
             assert want in out, out
         # a build of the sources, or a later commit than a tag (git describe)
         assert "newer than this kernel" in out or "a build of the sources" in out, out
         lines = {l.split()[0]: l for l in out.splitlines() if l.strip().startswith("/")}
         assert lines["/kernel8.img"].endswith("changed") and lines["/bm/ca.pem"].endswith("changed"), lines
-        time.sleep(0.8)                         # the panel stayed: Install the update under Check
-        keys(q, "s")
-        text = screen_all(q.screendump())
-        assert "Install the update" in text and "v9.9.9" in text, text
-        q.send("\r")                           # the question
-        time.sleep(0.5)
-        assert "Install bm v9.9.9?" in screen_all(q.screendump())
-        q.send("\r")                           # confirm: install
-        out = q.expect("Restarting in 1", timeout=60).decode(errors="replace")
+        press(q, "s", ["Install the update", "v9.9.9", "Keeps the old kernels"])   # the panel stayed
+        press(q, "\r", ["Install bm v9.9.9?"])   # the question
+        out = press_serial(q, "\r", "installing v9.9.9")   # confirm: install
+        out += q.expect("Restarting in 1", timeout=120).decode(errors="replace")
         assert "Restarting in 3" in out, out    # counted down
         dump = os.path.join(tmp, "after.img")
         q.monitor(f'pmemsave {RAMDISK:#x} {size} "{dump}"',
@@ -401,6 +538,45 @@ def test_update_from_sd(b, opts):
     assert read("/bm/ca.pem") == open(ca, "rb").read(), "the certificates"
 
 
+def test_crash_report(b, opts):
+    """A crash becomes a report, as on the Pi (tests/qemu_test.py): the red
+    screen, after 60 s (and 20 s of uptime) the board restarts with its RAM
+    kept, and the next boot files the crash as a report with the lines
+    printed before it (src/kernel/crumbs.c). crash() on the serial prompt
+    is a BRK. The kernel starts from kernel8.img: QEMU's ELF loader writes
+    zeros over .noinit (NOBITS inside the one PT_LOAD) at every reset and the
+    crash record would be lost; the raw Image leaves it. So QEMU does not prove
+    that the RK3566 keeps its DRAM across the PSCI reset: a check on the
+    hardware is still due."""
+    tmp = tempfile.mkdtemp(prefix="bm64crash-")
+    sd = make_sd(tmp, {"bm/config.txt": b"report_upload=0\n"})
+    size = os.path.getsize(sd)
+    q = Qemu(os.path.join(b, "kernel8.img"), sd=sd)
+    try:
+        boot(q)
+        time.sleep(21)                          # past the first 20 s of the boot
+        lua_prompt(q)
+        q.send("crash()\r")
+        q.expect("*** EXCEPTION: synchronous exception - BRK (breakpoint) ***", timeout=10)
+        q.expect("Restarting in 60 s", timeout=20)
+        q.expect("the last run ended in a crash: saved as a report", timeout=120)
+        q.expect("rpt00001.txt", timeout=30)
+        dump = os.path.join(tmp, "after.img")
+        q.monitor(f'pmemsave {RAMDISK:#x} {size} "{dump}"',
+                  until=lambda: os.path.exists(dump) and os.path.getsize(dump) == size)
+    finally:
+        q.close()
+    env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    part = f"{dump}@@{1024 * 1024}"
+    rep = subprocess.run(["mtype", "-i", part, "::/bm/reports/rpt00001.txt"], capture_output=True, text=True,
+                         env=env).stdout
+    shutil.rmtree(tmp, ignore_errors=True)
+    head, body = rep.split("\n\n", 1)
+    assert "kind: crash" in head.splitlines(), rep[:600]
+    assert body.startswith("a crash (the red screen) while:"), body[:300]
+    assert "--- the last lines printed ---" in body and "*** EXCEPTION" in body, body[-1500:]
+
+
 def test_bluetooth_page_without_chip(b, opts):
     """Settings > Controllers > Pair a new controller starts the stack; QEMU
     has no chip: it says so and B goes back to the menu."""
@@ -412,7 +588,9 @@ def test_bluetooth_page_without_chip(b, opts):
         time.sleep(0.5)
         text = screen_all(q.screendump())
         assert "Settings > Controllers" in text and "Player 1" in text and "built in" in text, text
-        keys(q, "ssss")                         # Pair a new controller
+        # D03: the Pi's slots, the built-in pad is player 1 and the Bluetooth pads are players 2 to 4
+        assert "Player 2" in text and "Player 3" in text and "Player 4" in text and "Player 5" not in text, text
+        keys(q, "sssssss")                      # Pair a new controller
         q.send("\r")
         q.expect("no Bluetooth controller in QEMU", timeout=10)
         time.sleep(0.5)
@@ -426,36 +604,61 @@ def test_bluetooth_page_without_chip(b, opts):
         q.close()
 
 
+def test_y_goes_back(b, opts):
+    """Y goes back like A (the back button): a Settings page opened with
+    Enter closes with Y, in both confirm settings (the serial port's y is the
+    Y button)."""
+    for config in (b"layout=us\n", b"confirm=a\n"):
+        tmp = tempfile.mkdtemp(prefix="bm64sd-")
+        sd = make_sd(tmp, {"bm/config.txt": config})
+        q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+        try:
+            boot(q)
+            for _ in range(6):                  # to the Settings tab
+                if "Controllers" in screen_all(q.screendump()):
+                    break
+                keys(q, "r", 0.5)
+            q.send("\r")                        # Controllers
+            time.sleep(0.5)
+            text = screen_all(q.screendump())
+            assert "Settings > Controllers" in text, text
+            q.send("y")                         # back, as A
+            time.sleep(0.6)
+            text = screen_all(q.screendump())
+            assert in_menu(text) and "Settings > Controllers" not in text, (config, text)
+        finally:
+            q.close()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_wifi_page_without_chip(b, opts):
     """Settings > WiFi and network > Connect to a network starts the chip;
     QEMU has none: it says so, B goes back."""
     q = Qemu(os.path.join(b, "kernel.elf"))
     try:
         boot(q)
-        keys(q, "rrs")                          # Settings: Controllers, WiFi and network
-        q.send("\r")
-        time.sleep(0.5)
-        keys(q, "ss")                           # Connect to a network, after State
-        q.send("\r")
-        q.expect("no WiFi chip in QEMU", timeout=10)
-        time.sleep(0.5)
-        text = "\n".join(screen_text(q.screendump()))
-        assert "no WiFi chip in QEMU" in text, text
-        q.send("\x7f")
-        time.sleep(0.6)
-        assert in_menu(screen_all(q.screendump()))
+        press(q, "r", ["bm SDK"])                # the Dev tab
+        press(q, "r", ["Controllers", "built in"])      # the Settings tab
+        press(q, "s", ["The link, the address"])        # WiFi and network
+        press(q, "\r", ["Settings > WiFi and network"])
+        press(q, "s", ["The link to the access point"])  # State
+        press(q, "s", ["Lists the networks, joins"])    # Connect to a network
+        press_serial(q, "\r", "no WiFi chip in QEMU")   # the chip starts; the line is printed
+        wait_screen(q, ["no WiFi chip in QEMU"])
+        text = press(q, "\x7f", ["Games", "Dev", "Settings"])    # B: back to the panel
+        assert in_menu(text) and "Settings > WiFi and network" in text, text
     finally:
         q.close()
 
 
 def test_display_modes(b, opts):
-    """The Display page: the modes a game or the GPU can use, each with its
+    """Settings > Screen > Screen modes: the modes a game or the GPU can use, each with its
     test image (QEMU shows the image 1:1: the screen takes its size), the
     GPU's layout (rows of 64 bytes); B goes back to the menu's 360x360."""
     q = Qemu(os.path.join(b, "kernel.elf"))
     try:
         boot(q)
-        keys(q, "rdd")                          # Dev tab: 3D Bench, Render bench, Display
+        open_settings_screen(q)                 # Settings > Screen: Screen modes first
         q.send("\r")
         q.expect("720x720 x1 sharp: on", timeout=10)
         time.sleep(0.5)
@@ -481,25 +684,34 @@ def test_display_modes(b, opts):
 
 
 def test_confirm_button(b, opts):
-    """B (the RGB30's lower face button) confirms and A goes back by
-    default: the hints of the Settings panel say so (Open on one chip,
-    Back on the other, swapped by confirm=a in bm/config.txt) and the
+    """B (the RGB30's lower face button) confirms and Y goes back by
+    default: the hints of the Settings panel say so (Open on the B chip, or
+    the A chip with confirm=a in bm/config.txt, or what mo= and mc= of controls= set;
+    Back on the Y chip) and the
     serial port's Enter presses the confirm button."""
     chips = {}
-    for config, ok, held in ((b"layout=us\n", "B", "00000020"), (b"confirm=a\n", "A", "00000010")):
-        tmp = tempfile.mkdtemp(prefix="bm64sd-")
+    for config, ok, held in ((b"layout=us\n", "B", "00000020"), (b"confirm=a\n", "A", "00000010"),
+                             (b"controls=mo:x mc:a\n", "X", "00000040")):
+        tmp = mktmp(prefix="bm64sd-")
         sd = make_sd(tmp, {"bm/config.txt": config})     # no games: Dev is one tab away
         q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
         try:
             boot(q)
             time.sleep(0.4)
-            keys(q, "rr")                      # the Settings panel: Open and Back
+            for _ in range(6):                 # to the Settings tab
+                if "Controllers" in screen_all(q.screendump()):
+                    break
+                keys(q, "r", 0.5)
+            keys(q, "s")
+            keys(q, "w")                       # the Settings panel: Open and Back
             img = q.screendump()
             rows = screen_text(img)
             assert "Open" in rows[21] and "Back" in rows[21], "\n".join(rows)
             chips[ok] = (hint_chip(img, rows, "Open"), hint_chip(img, rows, "Back"))
             assert chips[ok][0] != chips[ok][1], "the same chip for Open and Back"
-            keys(q, "\x7fs")                   # back to Dev; down a row: Input test
+            # (the sections again, the first row selected: Controllers)
+            press(q, "\r", ["Settings > Controllers"])
+            down_until(q, ["Every button and both sticks"])     # Test the buttons
             q.send("\r")                       # confirm
             time.sleep(0.6)
             q.send("\r")                       # Enter: the confirm button, held
@@ -508,7 +720,9 @@ def test_confirm_button(b, opts):
             assert "Input test" in text and f"held: {held}" in text, text
         finally:
             q.close()
-    assert chips["B"] == chips["A"][::-1], "confirm=a does not swap the chips of Open and Back"
+    assert chips["B"][0] != chips["A"][0], "confirm=a does not change the chip of Open"
+    assert chips["B"][1] == chips["A"][1], "the chip of Back (Y) is the same in both settings"
+    assert chips["X"][0] != chips["B"][0] and chips["X"][1] != chips["B"][1], "controls=mo:x mc:a: the chips of Open (X) and Back (A) change"
 
 
 PI_CART = r"""
@@ -530,14 +744,14 @@ def test_bm_cartridge(b, opts):
     RGB565, runs on the AArch64 kernel (QEMU shows its screen 1:1, widened to
     32 bits); its screen, then A reaches the game; 'q' leaves with the frame
     statistics and the menu's 360x360 comes back."""
-    tmp = tempfile.mkdtemp(prefix="bm64sd-")
+    tmp = mktmp(prefix="bm64sd-")
     sd = make_sd(tmp, {"bm/picart.bm": mkbm.pack(PI_CART.encode(), title="Pi cart", author="tests",
                                                  res=(360, 360))})
     q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
     try:
         boot(q)
         time.sleep(0.4)
-        assert "picart.bm" in screen_all(q.screendump())
+        assert "Pi cart" in screen_all(q.screendump())
         q.send("\r")                            # confirm: play
         q.expect("play: /bm/picart.bm", timeout=10)
         q.expect("bm: loaded", timeout=30)      # the system's splash, then the game
@@ -550,9 +764,10 @@ def test_bm_cartridge(b, opts):
         q.expect("pi cart started", timeout=10)
         time.sleep(2)
         q.send("q")
-        out = q.expect("fps", timeout=10).decode(errors="replace")
-        frames = int(out.split('"Pi cart" ')[1].split()[0])
-        assert frames > 100, out
+        # q suspends the game (2026-10-12, as on the Pi): the frame statistics
+        # come when it is closed, not here
+        out = q.expect("suspended", timeout=10).decode(errors="replace")
+        assert '"Pi cart"' in out, out
         time.sleep(1)
         img = q.screendump()
         assert img[0] == SCREEN and img[1] == SCREEN, f"screen {img[0]}x{img[1]}"
@@ -561,18 +776,265 @@ def test_bm_cartridge(b, opts):
         q.close()
 
 
+def test_grey_cart_and_confirm(b, opts):
+    """A cartridge that is not made for the RGB30 (an old .bm, or a header that lists the Pi only) is not hidden:
+    its cover is faded (no pill, no info row), and the start asks first: the reason is the question
+    ('This edition is for the Pi'), with OK and Cancel; back cancels, OK starts it (the development notes).
+    A cartridge made for both starts with no question."""
+    tmp = mktmp(prefix="bm64grey-")
+    old = mkbm.pack(PI_CART.encode(), title="Old Pi cart", author="tests", res=(360, 360))
+    both = mkbm.pack(PI_CART.encode(), title="Both", author="tests", res=(360, 360))
+    pi_only = mkbm.pack(PI_CART.encode(), title="Pi only", author="tests", res=(360, 360))
+    sd = make_sd(tmp, {"bm/old.bm": old, "bm/both.bm": mkbm.mark_compat(both, 3),
+                       "bm/pionly.bm": mkbm.mark_compat(pi_only, 1)}, declare=False)
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+    try:
+        boot(q)
+        text = wait_screen(q, ["Both"])                     # sorted by title: Both, Old Pi cart, Pi only
+        assert "Not here" not in text, text                 # no pill on any cover
+        keys(q, "d")                                        # Old Pi cart: an old .bm is for the Pi only
+        text = wait_screen(q, ["Old Pi cart"])
+        keys(q, "x")                                        # X: the options have no 'Not here' row
+        text = wait_screen(q, ["Play", "Author"])
+        assert "Not here" not in text, text
+        keys(q, "y")                                        # back: the covers
+        text = wait_screen(q, ["Old Pi cart"])
+        assert "Author" not in text, text
+        keys(q, "\r")                                       # confirm: the question, the game does not start
+        text = wait_screen(q, ["This edition is for the Pi", "OK"])
+        assert b"play: /bm/old.bm" not in q.buf, "it started before the answer"
+        keys(q, "y")                                        # back: no
+        text = wait_screen(q, ["Old Pi cart"])
+        assert "This edition is for the Pi" not in text, text
+        assert b"play: /bm/old.bm" not in q.buf, "back must not start it"
+        keys(q, "d")                                        # Pi only: the header lists the Pi alone
+        wait_screen(q, ["Pi only"])
+        keys(q, "\r")
+        wait_screen(q, ["This edition is for the Pi"])
+        keys(q, "\r")                                       # OK: it starts (a faded cover is not a lock)
+        q.expect("play: /bm/pionly.bm", timeout=10)
+        q.expect("made for the Pi Zero W only, it may not run well here", timeout=10)   # the load-time message
+        time.sleep(1.5)
+        q.send("q")                                         # Start + Select: back to the menu
+        q.expect("suspended", timeout=10)
+        time.sleep(1.0)                                     # back in the menu, Pi only is frozen (a star on its cover)
+        for _ in range(4):                                  # to Both, a key at a time (one can fall in the return)
+            if "bm/both.bm" in screen_all(q.screendump()):
+                break
+            keys(q, "a", pause=0.6)
+        wait_screen(q, ["Both"])                             # Both: made for the RGB30, so only the question about the frozen game
+        keys(q, "\r")
+        text = wait_screen(q, ["Close Pi only?"])
+        assert "This edition is for" not in text, text
+        keys(q, "\r")
+        q.expect("play: /bm/both.bm", timeout=10)
+    finally:
+        q.close()
+
+
+def test_menu_start_confirms(b, opts):
+    """Start confirms in the menu, as on the Pi (carts.c:1474): one cartridge,
+    Start (space on the serial line) plays it."""
+    tmp = tempfile.mkdtemp(prefix="bm64sd-")
+    sd = make_sd(tmp, {"bm/picart.bm": mkbm.pack(PI_CART.encode(), title="Pi cart", author="tests",
+                                                 res=(360, 360))})
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+    try:
+        boot(q)
+        time.sleep(0.4)
+        q.send(" ")                             # Start
+        q.expect("play: /bm/picart.bm", timeout=10)
+    finally:
+        q.close()
+
+
+def test_menu_tab_keys(b, opts):
+    """D04, the number keys in the menu as on the Pi (carts.c): 1 2 3 4 go to Market, Games,
+    Dev and Settings; 5 is no tab: nothing happens. (Tab goes to the
+    next tab and wraps after the last, from a keyboard only: on the serial line Tab is the Select button, and
+    QEMU has no keyboard. tab_of_key() in src/rgb30/ui.c is the one place that maps both.)"""
+    q = Qemu(os.path.join(b, "kernel.elf"))
+
+    def tab_now():
+        text = screen_all(q.screendump())
+        return ("Settings" if "Controllers" in text and "Updates" in text else
+                "Dev" if "bm SDK" in text else
+                "Games" if "No games yet" in text else
+                "Market" if "Market" in text else "?")
+
+    def key_then(k, want, what):
+        q.send(k)
+        for _ in range(12):
+            time.sleep(0.3)
+            if tab_now() == want:
+                return
+        raise AssertionError(f"{what}: wanted {want}, on {tab_now()}:" + chr(10) + screen_all(q.screendump()))
+    try:
+        boot(q)
+        time.sleep(0.5)
+        assert tab_now() == "Games", tab_now()
+        key_then("3", "Dev", "key 3")
+        key_then("4", "Settings", "key 4")
+        key_then("1", "Market", "key 1")
+        key_then("2", "Games", "key 2")
+        key_then("3", "Dev", "key 3 again")
+        q.send("5")                             # no fifth tab
+        time.sleep(1.0)
+        assert tab_now() == "Dev", "key 5 must do nothing, on " + tab_now()
+    finally:
+        q.close()
+
+
+def test_sdk_template_build(b, opts):
+    """From the bm SDK to the game: Ctrl+N, the last template (3D with models),
+    Ctrl+B and a name build /bm/MYGAME.BM from the project in /bme; its Lua is
+    the template's ('list = models()')."""
+    tmp = mktmp(prefix="bm64sdk-")
+    sd = make_sd(tmp, {"bm/config.txt": b"game_intro=0\n"})
+    size = os.path.getsize(sd)
+    dump = os.path.join(tmp, "after.img")
+
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+    try:
+        boot(q)
+        press(q, "r", ["bm SDK"])        # Dev: the bm SDK, the only item
+        q.buf = b""
+        press_serial(q, "\r", "bm SDK\r\n", tries=3, wait=60.0)
+        # Ctrl+N: new project from a template (sent again until the SDK is ready to read it)
+        press(q, "\x0e", ["new project from a template", "3D with models"], wait=15.0)
+        for desc in ("run and jump", "pick up the coins", "waves of enemies", "punches with",
+                     "two to four consoles", "floor, cubes",
+                     "the models of bm Studio"):  # down (arrow) to the eighth row; each row shows its text
+            press(q, "\x1b[B", [desc], tries=1, wait=90.0)      # the SDK reads text bytes: none is lost,
+        press(q, "\r", ["new project (3D with models)"], tries=1, wait=90.0)     # so none is sent again (a second
+        press(q, "\x02", ["file name", "mygame.bme"], tries=1, wait=90.0)   # arrow would skip a row)
+        press(q, "\r", ["built /bm/mygame.bm"], tries=1, wait=90.0)         # Ctrl+B: Save as, then the name
+        q.monitor(f'pmemsave {RAMDISK:#x} {size} "{dump}"',
+                  until=lambda: os.path.exists(dump) and os.path.getsize(dump) == size)
+        press(q, "\x1c", ["Games", "Dev", "Settings"], wait=10.0)     # Ctrl+\: leave the SDK
+    finally:
+        q.close()
+    env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    part = f"{dump}@@{1024 * 1024}"
+    listing = subprocess.run(["mdir", "-i", part, "-b", "::/BM"], capture_output=True,
+                             env=env, check=True).stdout.decode().upper()
+    projects = subprocess.run(["mdir", "-i", part, "-b", "::/BME"], capture_output=True,
+                              env=env, check=True).stdout.decode().upper()
+    assert "MYGAME.BME" in projects and "MYGAME.BM" in listing, (projects, listing)   # project in /bme, game in /bm
+    game = subprocess.run(["mtype", "-i", part, "::/BM/MYGAME.BM"], capture_output=True,
+                          env=env, check=True).stdout
+    assert game[:8] == b"BMCART\x00\x00", game[:16]
+    lua = next(body for t, body in mkbm.bmmesh.cart_sections(game) if t == 1)
+    assert b"list = models()" in lua, lua[:200]
+
+
+def test_frozen_game_menu(b, opts):
+    """A frozen game in the menu, as on the Pi (D06, D07, D08) and the Games order (D09): the list is sorted by
+    title, not by file name; a frozen game has a star, Resume and 'Close the game' in its options;
+    starting another game asks 'Close <game>?' first (back keeps the frozen one); deleting the frozen game closes
+    it, so the next game starts with no question."""
+    tmp = mktmp(prefix="bm64frozen-")
+    sd = make_sd(tmp, {"bm/a_zulu.bm": mkbm.pack(PI_CART.encode(), title="Zulu", author="tests", res=(360, 360)),
+                       "bm/b_alpha.bm": mkbm.pack(PI_CART.encode(), title="Alpha", author="tests", res=(360, 360))})
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+    try:
+        boot(q)
+        wait_screen(q, ["Alpha"])               # the first cover is Alpha (b_alpha.bm), not a_zulu.bm: sorted by title
+        q.send("\r")                            # the first cover: Alpha
+        q.expect("play: /bm/b_alpha.bm", timeout=10)
+        q.expect("bm: loaded", timeout=30)
+        time.sleep(2)
+        q.send("q")                             # Start + Select: frozen, back in the menu
+        q.expect("suspended", timeout=10)
+        wait_screen(q, ["Resume"])               # Resume for A (the star is on the cover)
+        keys(q, "x")                            # its options
+        wait_screen(q, ["Resume", "Close the game"])
+        keys(q, "y")                            # back
+        keys(q, "d")                            # Zulu
+        wait_screen(q, ["Zulu"])
+        keys(q, "\r")                           # another game while Alpha is frozen: the question
+        wait_screen(q, ["Close Alpha?", "Close it"])
+        keys(q, "y")                            # back: Alpha stays frozen
+        text = wait_screen(q, ["Zulu"])
+        assert "Close it" not in text, text
+        keys(q, "a")                            # Alpha again
+        wait_screen(q, ["Resume"])
+        keys(q, "x")
+        wait_screen(q, ["Resume"])
+        keys(q, "w")                            # up from the first row: the last row, Delete from the SD card
+        wait_screen(q, ["Delete from the SD card"])
+        keys(q, "\r")
+        wait_screen(q, ["Delete Alpha?"])
+        keys(q, "\r")                           # Delete: the frozen copy goes with the file
+        wait_screen(q, ["Zulu"])
+        assert "b_alpha" not in screen_all(q.screendump()), "Alpha is gone"
+        keys(q, "\r")                           # Zulu starts with no question
+        q.expect("play: /bm/a_zulu.bm", timeout=10)
+    finally:
+        q.close()
+
+
+def test_tool_not_a_game(b, opts):
+    """A tool installed from Market > Apps (a file named like a bm tool) is not a game on the RGB30 (D13), as on
+    the Pi (carts.c tool_id_of): bm/studio.b16 stays out of Games, racer.b16 is a game."""
+    tmp = mktmp(prefix="bm64tool-")
+    sd = make_sd(tmp, {"bm/racer.b16": b"B16" + bytes(100), "bm/studio.b16": b"B16" + bytes(100),
+                       "bm/Mesh.BM": b"BMCART" + bytes(64)})
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+    try:
+        out = boot(q)
+        assert "cartridge menu: 1 games" in out, out
+        time.sleep(0.5)
+        text = screen_all(q.screendump()).lower()
+        assert "racer.b16" in text and "studio" not in text and "mesh" not in text, text
+    finally:
+        q.close()
+
+
+def test_cover_details_perf(b, opts):
+    """The bottom bar shows the key chips only (2026-10-25): no author, size or path line under the covers, and no
+    performance note after a game. The speed of the game still goes to the console log."""
+    import shutil
+    tmp = tempfile.mkdtemp(prefix="bm64sd-")
+    sd = make_sd(tmp, {"bm/picart.bm": mkbm.pack(PI_CART.encode(), title="Pi cart", author="tests",
+                                                 res=(360, 360))})
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+    try:
+        boot(q)
+        time.sleep(0.6)
+        text = screen_all(q.screendump())
+        assert "Play" in text, text
+        assert "KB" not in text and "tests   bm" not in text, "no details line under the covers:" + chr(10) + text
+        q.send("\r")
+        q.expect("play: /bm/picart.bm", timeout=10)
+        q.expect("bm: loaded", timeout=30)
+        time.sleep(2)
+        q.send("q")
+        q.expect("suspended", timeout=10)
+        time.sleep(1)
+        text = screen_all(q.screendump())
+        assert "Resume" in text, "the chip says Resume (the game is frozen):" + chr(10) + text
+        assert "fps" not in text and "last:" not in text and "frozen" not in text, \
+            "no note under the covers:" + chr(10) + text
+    finally:
+        q.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_bench3d(b, opts):
-    """The Dev tab's 3D Bench (src/bm/b3d.c) at 640x360: every test on the
+    """Settings > Screen > 3D Bench (src/bm/b3d.c) at 640x360: every test on the
     ARM, the report on the serial port, in bm/bench on the SD card and in
     bm/reports for GitHub; the back button returns to the menu's 360x360."""
-    tmp = tempfile.mkdtemp(prefix="bm64sd-")
+    tmp = mktmp(prefix="bm64sd-")
     sd = make_sd(tmp, {"bm/config.txt": b"layout=us\n"})
     size = os.path.getsize(sd)
     dump = os.path.join(tmp, "after.img")
     q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
     try:
         boot(q)
-        keys(q, "r")                            # Dev tab: 3D Bench
+        open_settings_screen(q)                 # Settings > Screen: 3D Bench is its last row
+        press(q, "s", ["small red battery"])    # Low battery icon
+        press(q, "s", ["every 3D test"])        # 3D Bench
         q.send("\r")
         q.expect("b3d spheres ARM n=1 ", timeout=30)
         img = q.screendump()
@@ -600,55 +1062,140 @@ def test_bench3d(b, opts):
                          capture_output=True, env=env, check=True).stdout.decode(errors="replace")
     assert rep.startswith("bm 3D Bench") and "R,spheres,ARM" in rep and "total " in rep, rep
     # and as a report (src/kernel/reports.c): no token here, it waits on the card
-    rpt = subprocess.run(["mtype", "-i", f"{dump}@@{1024 * 1024}", "::/bm/reports/RPT00001.TXT"],
+    rpt = subprocess.run(["mtype", "-i", f"{dump}@@{1024 * 1024}", "::/bm/reports/rpt00001.txt"],
                          capture_output=True, env=env, check=True).stdout.decode(errors="replace")
     head = rpt.split("\n\n", 1)[0]
     assert rpt.startswith("bm report\nkind: bench3d\n") and "board: QEMU virt" in head, rpt[:400]
     assert "_bench3d_qemu-virt_" in head and "R,spheres,ARM" in rpt, rpt[:400]
 
 
-def test_gpu_test(b, opts):
-    """Dev > GPU test (M41): on QEMU's virt there is no Mali, the page says
-    so and nothing touches the GPU's registers; back returns to the menu."""
-    q = Qemu(os.path.join(b, "kernel.elf"))
-    try:
-        boot(q)
-        keys(q, "r")                            # Dev tab: 3D Bench
-        keys(q, "sdd")                          # the second row's last: GPU test
-        text = screen_all(q.screendump())
-        assert "GPU test" in text and in_menu(text), text
-        q.send("\r")
-        q.expect("no Mali on QEMU virt", timeout=20)
-        time.sleep(0.5)
-        text = screen_all(q.screendump())
-        assert "GPU test" in text and "no Mali on QEMU virt" in text, text
-        q.send("\x7f")                          # A: back
-        time.sleep(1.5)
-        assert in_menu(screen_all(q.screendump()))
-    finally:
-        q.close()
-
-
 def test_menu_input_page(b, opts):
-    """The Dev tab's input test: the serial port presses buttons."""
+    """Settings > Controllers > Test the buttons: the serial port presses buttons."""
     q = Qemu(os.path.join(b, "kernel.elf"))
     try:
         boot(q)
-        keys(q, "rs")                           # Dev tab: down a row: Input test
-        q.send("\r")
-        time.sleep(0.4)
-        q.send("x")                            # X held for a moment
-        time.sleep(0.05)
-        img = q.screendump()
-        text = screen_all(img)
+        press(q, "r", ["bm SDK"])        # Dev tab
+        press(q, "r", ["Controllers", "built in"])      # Settings
+        press(q, "\r", ["Settings > Controllers"])
+        down_until(q, ["Every button and both sticks"])  # Test the buttons
+        press(q, "\r", ["held: "])              # the page
+        for i in range(60):                     # X is held for 120 ms: a screen taken too early or too late
+            q.send("x")                         # misses it (the frame has not read it, or it is let go); send again
+            time.sleep(0.03 + 0.01 * (i % 6))
+            text = screen_all(q.screendump())
+            if "held: 00000040" in text:        # PAD_X
+                break
         assert "Input test" in text, text
-        assert "held: 00000040" in text, text  # PAD_X
-        q.send("\t ")                          # Select + Start: back
-        time.sleep(0.6)
-        text = screen_all(q.screendump())
-        assert in_menu(text) and "Input test" in text, text
+        assert "held: 00000040" in text, text
+        text = press(q, "\t ", ["Games", "Dev", "Settings"])     # Select + Start: back
+        assert in_menu(text) and "Test the buttons" in text, text
     finally:
         q.close()
+
+
+def test_dev_tab_utilities(b, opts):
+    """D52, D53, D15a: the Dev tab holds the bm SDK (and the installed tools), not the benchmarks and tests: the 3D
+    Bench is a row of Settings > Screen, Settings > System > Utilities is hidden now (the Render bench was removed, 28 Oct 2026), and
+    Settings > System has the '3D driver' row (the backend text of bm_port.c)."""
+    q = Qemu(os.path.join(b, "kernel.elf"))
+    try:
+        boot(q)
+        text = press(q, "r", ["bm SDK"])       # the Dev tab
+        for gone in ("3D Bench", "Render bench", "Input test", "Boot log", "Display"):
+            assert gone not in text, f"{gone!r} is not a Dev item:\n{text}"
+        press(q, "r", ["Controllers", "built in"])      # the Settings tab
+        press(q, "s", ["The link, the address"])        # WiFi
+        press(q, "s", ["Screen modes, 3D Bench"])       # Screen
+        text = press(q, "\r", ["Settings > Screen"])
+        assert "3D Bench" in text and "Screen modes" in text, text
+        keys(q, "\x7f")                         # back to the sections: Screen is selected
+        down_until(q, ["Version, memory, the log"])             # System
+        text = press(q, "\r", ["Settings > System"])
+        assert "Benchmarks and tests" not in text, text         # no utility is left: the row is hidden
+        down_until(q, ["3D driver"])
+        text = wait_screen(q, ["3D driver", "ARM"])
+        assert "no GPU driver on the RGB30 yet" in text, text   # its help: gpu3d_status() with mali3d off
+    finally:
+        q.close()
+
+
+QUIT_CART = r"""
+function _init() log("typed cart runs") quit() end
+function _draw() cls(1) end
+"""
+
+
+def test_cart_type_dev(b, opts):
+    """D51, as the Pi (carts.c is_dev): a cartridge whose header says type app is not on the Games tab but in Dev,
+    after the bm SDK, and starts with no splash; a game starts with the splash."""
+    tmp = mktmp(prefix="bm64sd-")
+    app = mkbm.mark_type(mkbm.pack(QUIT_CART.encode(), title="Typed app", author="tests", res=(360, 360)), "app")
+    game = mkbm.pack(QUIT_CART.encode(), title="Typed game", author="tests", res=(360, 360))
+    sd = make_sd(tmp, {"bm/typedapp.bm": app, "bm/typedgame.bm": game})
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+    try:
+        out = boot(q)
+        assert "cartridge menu: 1 games" in out, out        # the app is not counted as a game
+        text = wait_screen(q, ["Typed game"])
+        assert "Typed app" not in text, text
+        q.buf = b""
+        q.send("\r")                            # the game: with the splash
+        line = q.expect("play: /bm/typedgame.bm", timeout=10).decode(errors="replace")
+        line += q.expect("\n", timeout=5).decode(errors="replace")
+        assert "no splash" not in line, line
+        q.expect("typed cart runs", timeout=30)
+        wait_screen(q, ["Typed game", "Games", "Dev"])
+        text = press(q, "r", ["bm SDK"])         # Dev: the SDK first, then the app
+        assert "Typed game" not in text, text
+        text = press(q, "d", ["Typed app", "Play"])    # the app's title on the pill and the Play chip
+        assert "tests   app" not in text and "bm/typedapp.bm" not in text, text   # no details line (bottom bar: chips only)
+        q.buf = b""
+        q.send("\r")
+        line = q.expect("play: /bm/typedapp.bm", timeout=10).decode(errors="replace")
+        line += q.expect("\n", timeout=5).decode(errors="replace")
+        assert "no splash" in line, line
+        q.expect("typed cart runs", timeout=30)
+        wait_screen(q, ["Games", "Dev", "Settings"])
+    finally:
+        q.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_covers_background(b, opts):
+    """D10, as the Pi (carts.c covers_tick): the header read (title, author, compat) stays in the scan, the covers are
+    read by a job in the menu's free time. 40 cartridges with a red cover: the menu is drawn with the titles on labels
+    before all the covers are read; a game starts while they load (the job stops, the game runs and ends); then the
+    job goes on and every cover is read ('covers: all 40 read'); the red covers are on the screen."""
+    n = 40
+    tmp = mktmp(prefix="bm64sd-")
+    red = bytes([220, 20, 20, 255]) * (128 * 80)
+    files = {f"bm/c{i:02d}.bm": mkbm.pack(QUIT_CART.encode(), title=f"Cover {i:02d}", author="tests", res=(360, 360),
+                                          cover=(128, 80, red)) for i in range(n)}
+    sd = make_sd(tmp, files)
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+    try:
+        out = boot(q)
+        assert f"cartridge menu: {n} games" in out, out
+        line = q.expect("first frame, ", timeout=15).decode(errors="replace")
+        line = q.expect("\n", timeout=5).decode(errors="replace")      # "K of 40 covers read"
+        m = re.match(r"(\d+) of (\d+) covers read", line)
+        assert m and int(m.group(2)) == n, line
+        assert int(m.group(1)) < n, "all the covers were read before the first frame: " + line
+        text = wait_screen(q, ["Cover 00", "Games", "Dev"])           # the menu is there, with the titles
+        assert in_menu(text), text
+        q.send("\r")                            # a game starts while the covers load (or just after: they are quick)
+        seen = q.expect("play: /bm/c00.bm", timeout=15).decode(errors="replace")
+        seen += q.expect("typed cart runs", timeout=30).decode(errors="replace")
+        if "covers: all 40 read" not in seen:           # the job goes on after the game
+            q.expect("covers: all 40 read", timeout=90)
+        wait_screen(q, ["Games", "Dev", "Settings"])
+        img = q.screendump()
+        w, px = img[0], img[2]
+        reds = sum(1 for i in range(0, len(px), 3) if px[i] > 150 and px[i + 1] < 80 and px[i + 2] < 80)
+        assert reds > 300, f"{reds} red pixels: the covers are not on the screen"
+    finally:
+        q.close()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 B16_GAME = r"""
@@ -657,14 +1204,8 @@ function _draw() cls(1) print("pocket", 8, 8, 7) end
 """
 
 
-def test_market_b16(b, opts):
-    """The Market tab, as on the Pi (src/kernel/market.c in fibers, the
-    AArch64 ones of src/rgb30/fiber.S), with a catalog on the SD card
-    (market_url=sd:/market/, slowed by market_delay): first, off the screen
-    until it is the tab, nothing loads before; of the catalog only the .b16
-    (the user's choice for the RGB30); one downloads after a question, goes
-    to bm/ as POCKET.B16, plays, and the Games tab has it."""
-    tmp = tempfile.mkdtemp(prefix="bm64mk-")
+def market_sd(tmp, extra=b""):
+    """An SD image with a signed catalog of two games (pocket.b16 and bigpi.bm) at sd:/market/; extra: more lines for bm/config.txt."""
     key, pub = os.path.join(tmp, "key.pem"), os.path.join(tmp, "pub.pem")
     subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256",
                     "-out", key], check=True, capture_output=True)
@@ -680,12 +1221,23 @@ def test_market_b16(b, opts):
     r = subprocess.run([sys.executable, os.path.join(HERE, "..", "..", "scripts", "mkmarket.py"), games,
                         "-o", site, "--key", key, "--serial", "20261005120000"], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
-    files = {"bm/config.txt": b"market_url=sd:/market/\nmarket_delay=100\n", "bm/market.pem": open(pub, "rb").read()}
+    files = {"bm/config.txt": b"market_url=sd:/market/\nmarket_delay=100\n" + extra, "bm/market.pem": open(pub, "rb").read()}
     for dp, _, fs in os.walk(site):
         for f in fs:
             src = os.path.join(dp, f)
             files["market/" + os.path.relpath(src, site).replace(os.sep, "/")] = open(src, "rb").read()
-    sd = make_sd(tmp, files)
+    return make_sd(tmp, files)
+
+
+def test_market_b16(b, opts):
+    """The Market tab, as on the Pi (src/kernel/market.c in fibers, the
+    AArch64 ones of src/rgb30/fiber.S), with a catalog on the SD card
+    (market_url=sd:/market/, slowed by market_delay): first, off the screen
+    until it is the tab, nothing loads before; the catalog lists the .bm (faded cover)
+    and the old .b16; one downloads after a question, goes
+    to bm/ as POCKET.B16, plays, and the Games tab has it."""
+    tmp = mktmp(prefix="bm64mk-")
+    sd = market_sd(tmp)                         # the .bm is listed too, with a faded cover (test_market_lists_bm_and_b16)
     size = os.path.getsize(sd)
     dump = os.path.join(tmp, "after.img")
 
@@ -706,28 +1258,32 @@ def test_market_b16(b, opts):
         assert "Games" in text and "Market" not in text, text      # off the screen at the left
         keys(q, "l")                            # L1 from Games: the Market
         q.expect("market: catalog 20261005120000", timeout=20)
-        text = screen(["Market", "Pocket"])
-        assert "Big Pi Game" not in text, text  # the .bm is for the Pi
+        text = screen(["Market", "Big Pi Game"])   # the carousel shows one cover: the .bm (for the Pi) comes first
+        assert "Not here" not in text, text     # no pill on the faded cover
+        keys(q, "d")                            # right: Pocket
+        screen(["Pocket"], gone=["Big Pi Game"])
         keys(q, "\r")                           # confirm: a question first
         screen(["Download Pocket?", "free, license MIT"])
         keys(q, "\r")
-        q.expect("market: games/pocket/pocket.b16 -> /bm/POCKET.B16", timeout=20)
+        q.expect("market: games/pocket/pocket.b16 -> /bm/pocket.b16", timeout=20)
         q.expect("market: Pocket installed", timeout=5)
-        screen(["Installed", "Play"])
+        screen(["Play"], gone=["Installed"])
         keys(q, "x")                            # X: its details
         screen(["Market > Pocket", "Play", "Version", "1.0", "License", "MIT"])
         keys(q, "\x7f")                         # back: closed
-        screen(["Installed"], gone=["Market > Pocket"])
+        # (an installed game has no pill any more: .badge is NULL when s->path
+        # is set, src/kernel/market.c:886; the Pi test says so too)
+        screen(["Play"], gone=["Market > Pocket", "Installed"])
         keys(q, "\r")                           # confirm: plays it, from the card
-        q.expect("play: /bm/POCKET.B16", timeout=10)
+        q.expect("play: /bm/pocket.b16", timeout=10)
         q.expect("the b16 runs", timeout=30)
         q.expect("bm: loaded", timeout=10)     # the system's splash, then the game
         time.sleep(1.0)
         q.send("q")
         q.expect("fps", timeout=10)
         time.sleep(1.0)
-        keys(q, "r")                            # the Games tab: the new game
-        screen(["Pocket", "Play"])
+        keys(q, "r")                            # the Games tab: the new game (frozen by q: Resume, test_frozen_game_menu)
+        screen(["Pocket", "Resume"])
         q.monitor(f'pmemsave {RAMDISK:#x} {size} "{dump}"',
                   until=lambda: os.path.exists(dump) and os.path.getsize(dump) == size)
         time.sleep(0.3)
@@ -740,7 +1296,33 @@ def test_market_b16(b, opts):
     assert "POCKET.B16" in listing and "BIGPI" not in listing, listing
     owned = subprocess.run(["mtype", "-i", part, "::/bm/market/GAMES.TXT"], capture_output=True,
                            env=env, check=True).stdout.decode()
-    assert owned.startswith("pocket ") and owned.rstrip().endswith(" /bm/POCKET.B16"), owned
+    assert owned.startswith("pocket ") and owned.rstrip().endswith(" /bm/pocket.b16"), owned
+
+
+def test_market_lists_bm_and_b16(b, opts):
+    """The Market of the RGB30 lists the .bm cartridges and the old .b16 ones (D16 closed, 26 Oct 2026): a
+    cartridge for the Pi has a faded cover and no pill; no config key hides it."""
+    tmp = mktmp(prefix="bm64mkbm-")
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=market_sd(tmp))
+    try:
+        boot(q)
+        keys(q, "l")
+        q.expect("market: catalog 20261005120000", timeout=20)
+        for _ in range(40):
+            text = screen_all(q.screendump())
+            if "Big Pi Game" in text:          # the carousel shows one cover: Big Pi Game comes first
+                break
+            time.sleep(0.2)
+        assert "Big Pi Game" in text and "Not here" not in text, text
+        keys(q, "d")
+        for _ in range(40):
+            text = screen_all(q.screendump())
+            if "Pocket" in text:
+                break
+            time.sleep(0.2)
+        assert "Pocket" in text, text
+    finally:
+        q.close()
 
 
 TRY_ME = r"""
@@ -749,14 +1331,11 @@ function _draw() cls(1) print("try me", 8, 8, 7) end
 """
 
 
-def test_sdk_tool(b, opts):
-    """bm SDK (RGB30) (carts/sdk_b16), the tool built into this kernel, as
-    the Pi's SDK in its own (src/kernel/devtool.c): a game's options (X)
-    open it on the game ("Open in bm SDK"); F5 tries it, the console plays
-    it ('q' stops it) and the SDK comes back with the run's numbers;
-    Ctrl+\\ (Ctrl+Esc) leaves it for the menu. The Dev tab has it last; it
-    opens on the file of the last time."""
-    tmp = tempfile.mkdtemp(prefix="bm64sdk-")
+def test_game_send(b, opts):
+    """A game's options (X) have "Send to a nearby console" (D11, as the Pi): it
+    opens the list of the consoles nearby, the shared code of src/kernel/market.c;
+    with no network the list says so; back returns to the options."""
+    tmp = mktmp(prefix="bm64send-")
     sd = make_sd(tmp, {"bm/config.txt": b"game_intro=0\n",
                        "bm/tryme.b16": mkbm.pack(TRY_ME.encode(), title="Try me", author="tests", res=(360, 360))})
 
@@ -772,36 +1351,491 @@ def test_sdk_tool(b, opts):
     try:
         boot(q)
         time.sleep(0.5)
-        screen(["Try me"])                      # Games: the only one
-        keys(q, "x")                            # X: its options
-        screen(["Open in bm SDK", "Play"])
-        keys(q, "s")                            # down: Open in bm SDK
-        q.send("\r")                            # confirm
-        q.expect("bm SDK on /bm/", timeout=10)    # (the name as the card has it)
-        screen(["PROJECT", "Try me", "project", "code"])   # the SDK's project page, its tabs
-        q.send("\x1b[15~")                      # F5: try it (a game: as it is, no copy)
-        q.expect("tryme runs", timeout=30)
-        time.sleep(1.5)
-        q.send("q")                             # the game stops
-        out = q.expect('bm: "Try me"', timeout=20).decode(errors="replace")
-        assert "stopped with an error" not in out, out
-        screen(["back from the game"])          # the SDK again, the run's numbers
-        q.send("\x1c")                          # Ctrl+\ (Ctrl+Esc): leave the SDK
-        text = screen(["Games", "Dev", "Settings"])
-        assert in_menu(text), text
-        keys(q, "r")                            # Dev: 3D Bench
-        keys(q, "ss")                           # the third row: bm SDK, the last
-        text = screen(["bm SDK", "Dev"])
-        assert in_menu(text), text
-        q.buf = b""
-        q.send("\r")
-        q.expect("bm SDK\r\n", timeout=10)      # on no file (page_sdk's line)
-        screen(["PROJECT", "Try me"])           # the file of the last time
-        q.send("\x1c")
-        text = screen(["Games", "Dev", "Settings"])
-        assert in_menu(text), text
+        screen(["Try me"])
+        keys(q, "x")                           # X: its options
+        screen(["Send to a nearby console", "Play"])
+        keys(q, "s")                            # down: Send
+        screen(["Send to a nearby console", "To a console on this network"])
+        q.send("\r")                           # confirm: the consoles nearby
+        screen(["Send > Try me", "This console", "No console nearby yet"])
+        keys(q, "x")                            # back: the options
+        screen(["Send to a nearby console", "Play"])
     finally:
         q.close()
+
+
+def test_games_in_bm_only(b, opts):
+    """The Games tab lists the games of bm/ and not those of /carts (25 Oct 2026: both
+    kernels stop scanning /carts): a cartridge built by the SDK or sent over the network is in
+    bm/; one left in /carts is not listed."""
+    tmp = tempfile.mkdtemp(prefix="bm64carts-")
+    built_bm = mkbm.pack(TRY_ME.encode(), title="Built in bm", author="tests", res=(360, 360))
+    old_bm = mkbm.pack(TRY_ME.encode(), title="Left in carts", author="tests", res=(360, 360))
+    tryme_b16 = mkbm.pack(TRY_ME.encode(), title="Try me", author="tests", res=(360, 360))
+    sd = make_sd(tmp, {"bm/config.txt": b"game_intro=0\n",
+                       "bm/tryme.b16": tryme_b16,
+                       "bm/built.bm": built_bm,
+                       "carts/old.bm": old_bm})
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+    try:
+        out = boot(q)
+        assert "cartridge menu: 2 games" in out, out
+        time.sleep(0.5)
+        text = screen_all(q.screendump())
+        keys(q, "d")
+        time.sleep(0.5)
+        text += screen_all(q.screendump())
+        assert "Built in bm" in text and "Try me" in text and "Left in carts" not in text, text
+    finally:
+        q.close()
+
+
+def sdk_session(b, tmp, files=None):
+    """A QEMU with an SD card for the SDK tests: (qemu, card size); the card is
+    read back with sdk_exit_dump."""
+    sd = make_sd(tmp, {"bm/config.txt": b"game_intro=0\n", **(files or {})})
+    return Qemu(os.path.join(b, "kernel.elf"), sd=sd), os.path.getsize(sd)
+
+
+def sdk_screen(q, want, tries=80):
+    for _ in range(tries):
+        text = screen_all(q.screendump())
+        if all(w in text for w in want):
+            return text
+        time.sleep(0.25)
+    raise AssertionError(f"want {want} on the screen:\n{text}")
+
+
+def sdk_open(q):
+    """Boot and open bm SDK from the Dev tab."""
+    boot(q)
+    time.sleep(1.0)
+    keys(q, "r")                                # Dev
+    text = sdk_screen(q, ["bm SDK", "Dev"])      # the bm SDK, the only item
+    assert in_menu(text), text
+    q.buf = b""
+    q.send("\r")
+    q.expect("bm SDK\r\n", timeout=10)
+    sdk_screen(q, ["PROJECT"])
+    time.sleep(0.5)
+
+
+# In the SDK (it calls keyp(): typing mode) the serial port is a keyboard:
+# the pad cannot be pressed on QEMU virt (plat_buttons() is 0), so these tests
+# do the same actions with keys. F-keys: ESC O P..S (F1..F4).
+F2, F3 = "\x1bOQ", "\x1bOR"
+F7 = "\x1b[18~"                                 # ESC [ 18 ~
+UP, DOWN, RIGHT, LEFT = "\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D"
+
+
+def sdk_new_empty(q):
+    """Ctrl+N, the first row (Empty 2D)."""
+    q.send("\x0e")
+    sdk_screen(q, ["new project from a template", "Empty 2D"])
+    q.send("\r")
+    sdk_screen(q, ["new project (Empty 2D)"])
+    time.sleep(0.3)
+
+
+def sdk_save_default(q):
+    """Ctrl+S, Enter (accepts mygame.bme)."""
+    q.send("\x13")
+    sdk_screen(q, ["file name", "mygame.bme"])
+    q.send("\r")
+    sdk_screen(q, ["saved /bme/mygame.bme"])
+
+
+def sdk_exit_dump(q, tmp, size):
+    """Ctrl+backslash leaves the SDK, then the SD card's RAM disk to a file (its path)."""
+    q.send("\x1c")
+    text = sdk_screen(q, ["Games", "Dev", "Settings"])
+    assert in_menu(text), text
+    dump = os.path.join(tmp, "after.img")
+    q.monitor(f'pmemsave {RAMDISK:#x} {size} "{dump}"',
+              until=lambda: os.path.exists(dump) and os.path.getsize(dump) == size)
+    time.sleep(0.3)
+    return dump
+
+
+def sd_read(dump, path):
+    """A file of the dumped SD card (mtools)."""
+    env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    return subprocess.run(["mtype", "-i", f"{dump}@@{1024 * 1024}", "::" + path],
+                          capture_output=True, env=env, check=True).stdout
+
+
+def cart_secs(data):
+    """{section type: body} of a cartridge or project."""
+    return {t: body for t, body in mkbm.bmmesh.cart_sections(data)}
+
+
+def sdk_kb_run(b, drive, check):
+    """A new Empty 2D project: drive(q), save, leave, check(cart_secs of
+    /bme/mygame.bme)."""
+    tmp = mktmp(prefix="bm64kb-")
+    q, size = sdk_session(b, tmp)
+    try:
+        sdk_open(q)
+        sdk_new_empty(q)
+        drive(q)
+        sdk_save_default(q)
+        dump = sdk_exit_dump(q, tmp, size)
+    finally:
+        q.close()
+    check(cart_secs(sd_read(dump, "/bme/mygame.bme")))
+
+
+def test_sdk_pad_sprite(b, opts):
+    """bm SDK, by keyboard (the serial port): F3 is the sprite editor, space
+    paints pixel (0,0) of cell 0 (white); Ctrl+S, leave: the SHEET of the
+    saved project. (Same Lua action as the pad's ok, P.sprite.act("paint").)"""
+    def drive(q):
+        q.send(F3)
+        sdk_screen(q, ["SPRITES"])
+        time.sleep(0.4)
+        q.send(" ")
+        time.sleep(0.4)
+
+    def check(secs):
+        assert 2 in secs, sorted(secs)
+        assert secs[2][4:8] == b"\xff\xff\xff\xff", secs[2][:16].hex()
+    sdk_kb_run(b, drive, check)
+
+
+def test_sdk_pad_map(b, opts):
+    """By keyboard: F3 F3 is the map editor, space places tile 1 on cell (0,0)
+    of layer 1; the saved project's MAP says so."""
+    def drive(q):
+        q.send(F3)
+        sdk_screen(q, ["SPRITES"])
+        time.sleep(0.4)
+        q.send(F3)                              # again: the other view
+        for _ in range(40):
+            if "SPRITES" not in screen_all(q.screendump()):
+                break
+            time.sleep(0.25)
+        else:
+            raise AssertionError("still on the sprites after the second F3")
+        time.sleep(0.4)
+        q.send(" ")
+        time.sleep(0.4)
+
+    def check(secs):
+        assert 3 in secs, sorted(secs)
+        assert struct.unpack_from("<H", secs[3], 4)[0] == 1, secs[3][:16].hex()
+    sdk_kb_run(b, drive, check)
+
+
+def test_sdk_map3d_roundtrip(b, opts):
+    """APP-2 on the RGB30 SDK: a 3D map is saved and reloaded. A new project,
+    T (the 3D template: floor, height, walls, objects), tiles on the floor and
+    on the height layer, the markers on the objects layer (S start, C crate,
+    O lamp), v (the 3D preview), Ctrl+S. The LAYERS section holds the four
+    layers by name and the cells. Then Ctrl+O opens the project again: the
+    layers are on the map page, the 3D preview opens, and a second save works."""
+    tmp = mktmp(prefix="bm64map3d-")
+    q, size = sdk_session(b, tmp)
+
+    def k(s, gap=0.3):
+        q.send(s)
+        time.sleep(gap)
+    try:
+        sdk_open(q)
+        sdk_new_empty(q)
+        k(F3, 0.5)                                  # the sprites
+        sdk_screen(q, ["SPRITES"])
+        k(F3, 0.5)                                  # the map
+        time.sleep(0.5)
+        k("T")
+        sdk_screen(q, ["3D map template ready"])
+        k(" ")                                      # floor tile at (0, 0)
+        k(RIGHT)
+        k(" ")                                      # (2, 0)
+        k(RIGHT)
+        k(" ")                                      # (4, 0)
+        k("l")
+        sdk_screen(q, ["map layer 2/4: height"])
+        k(" ")                                      # height at (4, 0)
+        k("l")
+        k("l")
+        sdk_screen(q, ["map layer 4/4: objects"])
+        k("O")                                      # lamp at (4, 0)
+        sdk_screen(q, ["lamp placed"])
+        k(LEFT)
+        k("C")                                      # crate at (2, 0)
+        sdk_screen(q, ["crate placed"])
+        k(LEFT)
+        k("S")                                      # start at (0, 0)
+        sdk_screen(q, ["start placed"])
+        k("v", 1)
+        sdk_screen(q, ["3D preview"])
+        k("v", 0.5)
+        sdk_screen(q, ["2D map editor"])
+        sdk_save_default(q)
+        # the project opened again
+        k("\x0f", 1)                                # Ctrl+O
+        sdk_screen(q, ["open a cartridge"])
+        k("\r", 1)
+        sdk_screen(q, ["opened mygame.bme"])
+        k(F3, 0.5)                                  # the map page (the last view of the SDK)
+        time.sleep(0.5)
+        for _ in range(3):
+            k("l")
+        sdk_screen(q, ["map layer 4/4: objects"])
+        k("v", 1)
+        sdk_screen(q, ["3D preview"])
+        k("v", 0.5)
+        k(chr(19), 1)                               # Ctrl+S: the project has its name now
+        sdk_screen(q, ["saved /bme/mygame.bme"])
+        dump = sdk_exit_dump(q, tmp, size)
+    finally:
+        q.close()
+    data = sd_read(dump, "/bme/mygame.bme")
+    secs = cart_secs(data)
+    lay = secs[12]
+    w, h, n = struct.unpack_from("<HHH", lay, 0)
+    assert n == 4, (w, h, n)
+    got = [lay[8 + i * 16:24 + i * 16].rstrip(b"\x00") for i in range(4)]
+    assert got == [b"floor", b"height", b"walls", b"objects"], got
+    base = 8 + 4 * 16
+
+    def cell(layer, x, y):                          # layer 0 is the MAP section, 1.. are in LAYERS
+        if layer == 0:
+            return struct.unpack_from("<H", secs[3], 4 + (y * w + x) * 2)[0]
+        return struct.unpack_from("<H", lay, base + (layer - 1) * w * h * 2 + (y * w + x) * 2)[0]
+
+    def block(layer, x, y):                         # a 16x16 tile is a block of 2x2 cells
+        return [cell(layer, x + i, y + j) for j in (0, 1) for i in (0, 1)]
+    for x in (0, 2, 4):
+        assert any(block(0, x, 0)), f"floor tile at ({x}, 0)"
+    assert any(block(1, 4, 0)), "height at (4, 0)"
+    assert not any(block(1, 0, 0)) and not any(block(1, 2, 0)), "height only where it was drawn"
+    assert all(cell(2, x, 0) == 0 for x in range(8)), "walls stay empty"
+    assert (cell(3, 0, 0), cell(3, 2, 0), cell(3, 4, 0)) == (1024, 1028, 1032), (
+        cell(3, 0, 0), cell(3, 2, 0), cell(3, 4, 0))
+
+
+def test_sdk_pad_code(b, opts):
+    """By keyboard: F2 is the code, 'do end ' is typed at the cursor (the
+    start of the template's Lua); the saved project's LUA has it."""
+    def drive(q):
+        q.send(F2)
+        sdk_screen(q, ["my game"])
+        time.sleep(0.4)
+        for ch in "do end ":
+            q.send(ch)
+            time.sleep(0.2)
+        time.sleep(0.4)
+
+    def check(secs):
+        lua = secs[1]
+        assert lua.startswith(b"do end -- my game"), lua[:60]
+    sdk_kb_run(b, drive, check)
+
+
+def sdk_heard(q, timeout=8.0):
+    """The Hz of the next 'audio: heard N Hz' line of the serial port (the sink
+    of virt_audio.c), or None."""
+    deadline = time.time() + timeout
+    while True:
+        m = re.search(rb"audio: heard (\d+) Hz", q.buf)
+        if m:
+            return int(m.group(1))
+        if time.time() > deadline:
+            return None
+        q.buf += q.port.read(0.1)
+
+
+def test_sdk_pad_sound(b, opts):
+    """By keyboard: F7 is the sounds page, four Right keys take the wave of
+    sound 0 from SQUARE to SINE, Enter plays it; the saved project's AUDIO
+    has it. (The pad's actions are the same Lua, P.snd.act.)"""
+    heard = []
+
+    def drive(q):
+        q.send(F7)
+        sdk_screen(q, ["SOUNDS"])
+        time.sleep(0.4)
+        for _ in range(4):
+            q.send(RIGHT)
+            time.sleep(0.3)
+        sdk_screen(q, ["SINE"])
+        q.buf = b""
+        q.send("\r")
+        # the sink says what it heard once a second; the 350 ms preview falls
+        # across two of its windows, so its pitch is not 440 Hz in either:
+        # that sound reached the sink is what is checked
+        heard.append(sdk_heard(q))
+
+    def check(secs):
+        assert 6 in secs, sorted(secs)
+        bank = bmaudio.unpack(secs[6])
+        assert bank["sounds"][0]["wave"] == "sine", bank["sounds"][:1]
+    sdk_kb_run(b, drive, check)
+    assert heard and heard[0] is not None, "the sink heard nothing of the preview"
+
+
+def test_sdk_pad_lib(b, opts):
+    """By keyboard: F7 is the sounds page, i (the pad's X: Sounds from a file
+    (Lib)...) lists the files of bm/lib with a sound bank, Enter takes
+    kit.bm and its sound BELL into the first empty slot; the saved
+    project's AUDIO has it as sound 0."""
+    kit = mkbm.pack(b"", title="Kit", audio=bmaudio.pack({"sounds": [{"name": "BELL", "wave": "metal"}]}))
+    tmp = mktmp(prefix="bm64kb-")
+    q, size = sdk_session(b, tmp, {"bm/lib/kit.bm": kit})
+    try:
+        sdk_open(q)
+        sdk_new_empty(q)
+        q.send(F7)
+        sdk_screen(q, ["SOUNDS"])
+        time.sleep(0.4)
+        q.send("i")
+        sdk_screen(q, ["sounds from a file"])
+        q.send("\r")                            # the only file: kit.bm
+        sdk_screen(q, ["a sound of", "BELL"])
+        q.send("\r")                            # its sound BELL
+        sdk_screen(q, ["taken from the file"])
+        time.sleep(0.4)
+        sdk_save_default(q)
+        dump = sdk_exit_dump(q, tmp, size)
+    finally:
+        q.close()
+    secs = cart_secs(sd_read(dump, "/bme/mygame.bme"))
+    assert 6 in secs, sorted(secs)
+    sounds = bmaudio.unpack(secs[6])["sounds"]
+    assert sounds[0]["name"] == "BELL" and sounds[0]["wave"] == "metal", sounds[:1]
+
+
+def test_sdk_pad_sfx(b, opts):
+    """By keyboard: F7 F7 is the effects, Enter puts A4 (sound 0, volume 255)
+    on step 0 of effect 0; the saved project's AUDIO has it."""
+    def drive(q):
+        q.send(F7)
+        sdk_screen(q, ["SOUNDS"])
+        time.sleep(0.4)
+        q.send(F7)                              # again: the other view
+        sdk_screen(q, ["EFFECTS"])
+        time.sleep(0.4)
+        q.send("\r")
+        time.sleep(0.6)
+
+    def check(secs):
+        assert 6 in secs, sorted(secs)
+        bank = bmaudio.unpack(secs[6])
+        assert bank["sfx"][0]["steps"][0] == bmaudio.step_text(69, 0, 255, 0), bank["sfx"][:1]
+    sdk_kb_run(b, drive, check)
+
+
+def test_sdk_layers_b16(b, opts):
+    """R11 in the RGB30 bm SDK (as the Pi's test_sdk_layers): a new Platform 2D
+    project (the second template), 4 on the sprite page sets flag 4 of the
+    cell, L on the map page adds a layer and space places a tile on it,
+    Ctrl+S saves the project with its LAYERS and FLAGS sections."""
+    tmp = tempfile.mkdtemp(prefix="bm64kb-")
+    q, size = sdk_session(b, tmp)
+    try:
+        sdk_open(q)
+        q.send("\x0e")                          # Ctrl+N: the templates
+        sdk_screen(q, ["new project from a template", "Platform 2D"])
+        q.send(DOWN)                            # Platform 2D
+        time.sleep(0.4)
+        q.send("\r")
+        sdk_screen(q, ["new project (Platform 2D)"])
+        time.sleep(0.3)
+        q.send(F3)                              # the sprites, on cell 1
+        sdk_screen(q, ["SPRITES"])
+        time.sleep(0.4)
+        q.send("4")
+        sdk_screen(q, ["flag 4 on"])
+        q.send(F3)                              # the map
+        sdk_screen(q, ["L1/1 main"])
+        time.sleep(0.4)
+        q.send("L")
+        sdk_screen(q, ["map layer 2/2: layer2"])
+        time.sleep(0.3)
+        q.send(RIGHT)
+        time.sleep(0.3)
+        q.send(" ")                             # tile 1 at (1, 0) of layer 2
+        time.sleep(0.4)
+        sdk_save_default(q)
+        dump = sdk_exit_dump(q, tmp, size)
+    finally:
+        q.close()
+    secs = cart_secs(sd_read(dump, "/bme/mygame.bme"))
+    lay = secs[12]
+    w, h, n = struct.unpack_from("<HHH", lay, 0)
+    assert n == 2, (w, h, n)
+    assert lay[8:24].rstrip(b"\0") == b"main" and lay[24:40].rstrip(b"\0") == b"layer2", lay[8:40]
+    cells = lay[8 + 2 * 16:]
+    assert struct.unpack_from("<H", cells, 1 * 2)[0] == 1, "tile 1 at (1, 0) of layer 2"
+    per, rows = struct.unpack_from("<HH", secs[13], 0)
+    fl = secs[13][4:]
+    assert per == 32 and fl[1] == 16 and fl[2] == 1 and fl[6] == 2, (per, rows, list(fl[:8]))
+
+
+def test_sdk_pad_build(b, opts):
+    """The whole game with the keyboard (the pad's actions, as the others):
+    a pixel, a tile, 'do end ', a sine, Ctrl+S, Ctrl+B builds MYGAME.BM
+    next to the project; the menu has no Export .b16 any more. The
+    game has the project's LUA, SHEET, MAP and AUDIO."""
+    tmp = mktmp(prefix="bm64kb-")
+    q, size = sdk_session(b, tmp)
+    try:
+        sdk_open(q)
+        sdk_new_empty(q)
+        q.send(F3)                              # the sprites: a white pixel
+        sdk_screen(q, ["SPRITES"])
+        time.sleep(0.4)
+        q.send(" ")
+        time.sleep(0.4)
+        q.send(F3)                              # the map: tile 1 on (0,0)
+        for _ in range(40):
+            if "SPRITES" not in screen_all(q.screendump()):
+                break
+            time.sleep(0.25)
+        else:
+            raise AssertionError("still on the sprites after the second F3")
+        time.sleep(0.4)
+        q.send(" ")
+        time.sleep(0.4)
+        q.send(F2)                              # the code
+        sdk_screen(q, ["my game"])
+        time.sleep(0.4)
+        for ch in "do end ":
+            q.send(ch)
+            time.sleep(0.2)
+        q.send(F7)                              # the sounds: SINE
+        sdk_screen(q, ["SOUNDS"])
+        time.sleep(0.4)
+        for _ in range(4):
+            q.send(RIGHT)
+            time.sleep(0.3)
+        sdk_screen(q, ["SINE"])
+        sdk_save_default(q)
+        q.send("\x02")                         # Ctrl+B: the game next to the project
+        sdk_screen(q, ["built /bm/mygame.bm"])
+        q.send("\x1b")                         # Esc: the menu has Build the game .bm and no Export .b16
+        text = sdk_screen(q, ["Build the game .bm"])
+        assert "Export .b16" not in text, text
+        q.send("\x1b")
+        dump = sdk_exit_dump(q, tmp, size)
+    finally:
+        q.close()
+    project = cart_secs(sd_read(dump, "/bme/mygame.bme"))
+    game_bytes = sd_read(dump, "/bm/MYGAME.BM")
+    game = cart_secs(game_bytes)
+    for t in (1, 2, 3, 6):
+        assert t in project, (t, sorted(project))
+        assert game.get(t) == project[t], f"section {t} of the game is not the project's"
+    assert project[1].startswith(b"do end -- my game"), project[1][:40]
+    assert project[2][4:8] == b"\xff\xff\xff\xff", project[2][:16].hex()
+    assert struct.unpack_from("<H", project[3], 4)[0] == 1, project[3][:16].hex()
+    assert bmaudio.unpack(project[6])["sounds"][0]["wave"] == "sine"
+    assert game_bytes[104:112] != bytes(8), game_bytes[96:120]     # the project's name (cart_build)
+    env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    listing = subprocess.run(["mdir", "-i", f"{dump}@@{1024 * 1024}", "-b", "::/bm"], capture_output=True,
+                             env=env, check=True).stdout.decode().upper()
+    assert "MYGAME.BM" in listing and "MYGAME.B16" not in listing, listing
 
 
 def test_battery_icon(b, opts):
@@ -814,7 +1848,7 @@ def test_battery_icon(b, opts):
     x0, x1, y0 = SCREEN - 16 - 27, SCREEN - 16, 12        # menu_ui.c: status_icons
 
     def look(config, settings=False):
-        tmp = tempfile.mkdtemp(prefix="bm64bat-")
+        tmp = mktmp(prefix="bm64bat-")
         q = Qemu(os.path.join(b, "kernel.elf"), sd=make_sd(tmp, {"bm/config.txt": config}))
         try:
             boot(q)
@@ -843,12 +1877,12 @@ def test_battery_icon(b, opts):
 
     full = look(b"test_battery=4150\n")
     mid = look(b"test_battery=3880\n", settings=True)
-    low = look(b"test_battery=3600\n")
+    low = look(b"test_battery=3500\n")                  # 3%: the curve of 2026-10-27
     plug = look(b"test_battery=3900,1\n")
     assert full[0] > mid[0] > 0 and not full[1] and not mid[1], (full, mid)       # bars
     assert low[1] > 0 and low[0] == 0, low                                         # red, empty
     assert plug[2] > 0 and not full[2] and not mid[2] and not plug[1], plug        # the bolt
-    assert "Battery" in mid[3] and "61%, 3.88 V" in mid[3], mid[3]
+    assert "Battery" in mid[3] and "66%, 3.88 V" in mid[3], mid[3]
 
 
 LOW_CART = r"""
@@ -866,11 +1900,11 @@ def test_battery_low_game(b, opts):
     """The low battery over the games (2026-10-10): battery() gives the
     charge and the charger, battery_low() 20% or less off the charger; while
     low a small red battery top right over the frame, none on the charger,
-    none with battery_icon=0 (Settings > Screen and sound > Low battery
+    none with battery_icon=0 (Settings > Screen > Low battery
     icon), battery_low() still true."""
 
     def run(config):
-        tmp = tempfile.mkdtemp(prefix="bm64low-")
+        tmp = mktmp(prefix="bm64low-")
         sd = make_sd(tmp, {"bm/config.txt": b"game_intro=0\n" + config,
                            "bm/low.bm": mkbm.pack(LOW_CART.encode(), title="Low", author="tests")})
         q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
@@ -889,12 +1923,57 @@ def test_battery_low_game(b, opts):
         finally:
             q.close()
 
-    low = run(b"test_battery=3650\n")                   # 7%
+    low = run(b"test_battery=3650\n")                   # 17%
     plug = run(b"test_battery=3650,1\n")
     off = run(b"test_battery=3650\nbattery_icon=0\n")
-    assert low[0] == "7 false true" and low[1] > 20, low
-    assert plug[0] == "7 true false" and plug[1] == 0, plug
-    assert off[0] == "7 false true" and off[1] == 0, off
+    assert low[0] == "17 false true" and low[1] > 20, low
+    assert plug[0] == "17 true false" and plug[1] == 0, plug
+    assert off[0] == "17 false true" and off[1] == 0, off
+
+
+WIDE_CART = r"""
+local t = 0
+function _init() screen(720, 405) end
+function _update()
+  t = t + 1
+  if t == 30 then
+    local w, h = screen()
+    log("wide " .. w .. "x" .. h)
+  end
+end
+function _draw() cls(0x2040C0) end
+"""
+
+
+def test_screen_wide_mode(b, opts):
+    """screen(720, 405) on the square panel: the 16:9 picture is
+    centred on the 720x720 panel, black above and below. QEMU's ramfb does not scale, so test_panel=1
+    makes plat_virt.c scale and centre the image as rk_display.c window() does on the console."""
+    tmp = mktmp(prefix="bm64wide-")
+    sd = make_sd(tmp, {"bm/config.txt": b"game_intro=0\ntest_panel=1\n",
+                       "bm/wide.bm": mkbm.pack(WIDE_CART.encode(), title="Wide", author="tests", res=(360, 360))})
+    q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
+    try:
+        boot(q)
+        time.sleep(0.5)
+        q.send("\r")                            # Games: the only one
+        q.expect("wide 720x405", timeout=30)
+        time.sleep(0.5)
+        img = q.screendump()
+        w, h, _ = img
+        assert (w, h) == (720, 720), (w, h)
+        top, bottom = (720 - 405) // 2, (720 - 405) // 2 + 405
+        band = pixel(img, 360, 360)
+        assert abs(band[0] - 0x20) < 12 and abs(band[1] - 0x40) < 12 and abs(band[2] - 0xC0) < 12, band
+        for y in range(h):
+            for x in (0, 1, 100, 359, 360, 600, 718, 719):
+                p = pixel(img, x, y)
+                if top <= y < bottom:
+                    assert p == band, f"row {y} x {x}: {p}, the band is {band}"
+                else:
+                    assert p == (0, 0, 0), f"row {y} x {x}: {p}, outside the band must be black"
+    finally:
+        q.close()
 
 
 TONE_CART = r"""
@@ -930,7 +2009,7 @@ function _draw() cls(1) end
 def test_riff(b, opts):
     """riff (require "riff", M46) on the RGB30: a pattern of one A4 a cycle,
     queued with play_at, comes out of the console's output at 440 Hz."""
-    tmp = tempfile.mkdtemp(prefix="bm64riff-")
+    tmp = mktmp(prefix="bm64riff-")
     sd = make_sd(tmp, {"bm/config.txt": b"game_intro=0\n",
                        "bm/riff.bm": mkbm.pack(RIFF_CART.encode(), title="Riff", author="tests")})
     q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
@@ -1000,7 +2079,7 @@ def test_nnet(b, opts):
     lua += ["  log('nnet size ' .. table.concat({net:size()}, ' '))", "end",
             "function _update() t = t + 1 if t == 20 then log('nnet done') quit() end end",
             "function _draw() cls(1) end"]
-    tmp = tempfile.mkdtemp(prefix="bm64nnet-")
+    tmp = mktmp(prefix="bm64nnet-")
     sd = make_sd(tmp, {"bm/config.txt": b"game_intro=0\n",
                        "bm/nnet.bm": mkbm.pack("\n".join(lua).encode(), title="Nnet", author="tests")})
     q = Qemu(os.path.join(b, "kernel.elf"), sd=sd)
@@ -1030,9 +2109,9 @@ def test_sound(b, opts):
     keys (+ and -, here from the serial port) show their bar, bring it to
     5/10 and the same tone comes out at a quarter of the peak (the gain is
     the square of the level); the level is saved in bm/config.txt;
-    Settings > Screen and sound has the Sound, Volume, Bit depth (24-bit by
+    Settings > Sound has the Sound, Volume, Bit depth (24-bit by
     default) and Test the sound rows."""
-    tmp = tempfile.mkdtemp(prefix="bm64snd-")
+    tmp = mktmp(prefix="bm64snd-")
     sd = make_sd(tmp, {"bm/config.txt": b"game_intro=0\n",
                        "bm/tone.bm": mkbm.pack(TONE_CART.encode(), title="Tone", author="tests")})
     size = os.path.getsize(sd)
@@ -1055,23 +2134,32 @@ def test_sound(b, opts):
         assert "audio: QEMU sink, 48 kHz" in out, out
         time.sleep(0.5)
         full = tone()
-        for _ in range(5):
-            keys(q, "-", pause=0.15)            # the volume key, five times
-        q.expect("volume: 5 / 10", timeout=5)
+        # the volume key, five times; each step waits for its printed level. A key
+        # sent while the previous one is still held (PAD_SERIAL_MS, 120 ms) or
+        # between two polls of a loaded guest makes no edge and is lost (6 busy
+        # loops on the host: 4 of 5 steps), so a missing level sends the key again
+        # (a lost key changed nothing: the retry cannot count twice).
+        for level in range(9, 4, -1):
+            for _ in range(5):
+                q.send("-")
+                try:
+                    q.expect(f"volume: {level} / 10", timeout=2)
+                    break
+                except AssertionError:
+                    time.sleep(0.2)             # let the hold end: the next key is an edge
+            else:
+                raise AssertionError(f"the volume did not reach {level} / 10:\n" + q.buf.decode(errors="replace"))
+            time.sleep(0.2)
         text = screen_all(q.screendump())
         assert "Volume" in text and "5 / 10" in text, text      # the bar over the menu
         time.sleep(2.5)                         # the keys at rest: saved
         quarter = tone()
         assert 0.2 * full <= quarter <= 0.3 * full, (full, quarter)
-        keys(q, "rr")                           # Settings; down to Screen and sound
-        keys(q, "ss\r")
-        # its rows longer than the screen since Sound style and 3D on the ARM:
-        # seven down to the last (Bit depth before it), Test the sound, the
-        # list scrolling with it
-        keys(q, "sssssss")
+        keys(q, "rr")                           # Settings; down to Sound
+        keys(q, "ssss\r")
         text = screen_all(q.screendump())
         for want in ("Sound", "Volume", "5 / 10", "Sound style", "Bit depth", "24-bit", "Test the sound"):
-            assert want in text, f"{want!r} not in Screen and sound:\n{text}"
+            assert want in text, f"{want!r} not in Sound:\n{text}"
         q.monitor(f'pmemsave {RAMDISK:#x} {size} "{dump}"',
                   until=lambda: os.path.exists(dump) and os.path.getsize(dump) == size)
         time.sleep(0.3)
@@ -1103,6 +2191,8 @@ def main():
             failed += 1
             print(f"FAIL {t.__name__}")
             traceback.print_exc()
+        finally:
+            rm_tmps()
     print(f"{len(TESTS) - failed if not opts.k else ''} passed, {failed} failed")
     sys.exit(1 if failed else 0)
 

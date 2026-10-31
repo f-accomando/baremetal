@@ -1,5 +1,7 @@
 # riff: music written in patterns
 
+
+
 **riff** is bm's language for writing music in a few lines of Lua, in the style of
 [TidalCycles](https://tidalcycles.org) and [Strudel](https://strudel.cc): rhythms and melodies
 in a string (the *mini-notation*), changed by functions that chain together.

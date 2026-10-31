@@ -15,17 +15,16 @@ footer: manuali bm - api-tools
 
 # Il file cartuccia
 
-Un gioco su bm è un solo file. Lo stesso contenitore ha tre forme, e conta quali strumenti possono modificarlo.
+Un gioco su bm è un solo file. Lo stesso contenitore ha due forme, e conta quali strumenti possono modificarlo.
 
 | Estensione | Che cos'è | Gli strumenti di bm possono modificarlo? |
 |---|---|---|
 | `.bm` | un **gioco**: sta nella scheda Giochi del menu | No. Gli strumenti lo leggono e ne prendono codice e asset |
-| `.b16` | anche un **gioco**: l'edizione a risorse limitate per i portatili | No, come per il `.bm` |
 | `.bme` | un **progetto**: lo stesso contenitore, quello che gli strumenti modificano | Sì |
 
 ## Che cosa fa
 
-Un progetto è un `.bme` con il bit 0 dell'u16 all'offset 18 dell'intestazione acceso. Un `.b16` è segnato con il bit 1 dello stesso u16. Nient'altro nel contenitore cambia. Un progetto produce il suo gioco con una compilazione; un gioco produce una copia modificabile di sé stesso.
+Un progetto è un `.bme` con il bit 0 dell'u16 all'offset 18 dell'intestazione acceso. Nient'altro nel contenitore cambia. Un progetto produce il suo gioco con una compilazione; un gioco produce una copia modificabile di sé stesso.
 
 ## Perché conta
 
@@ -33,28 +32,22 @@ Uno strumento non sovrascrive mai il tuo gioco per sbaglio. Modifichi il progett
 
 ## Da sapere
 
-- Uno strumento che salva un gioco chiede prima: *Save an editable copy: NAME.BME?* La copia va accanto al gioco (`NAME.BME`, oppure `NAME1.BME` se il nome è occupato).
-- Nel menu, *Make an editable copy* è nelle opzioni di un gioco. Il progetto va nella scheda Dev con il badge "Project". A su un progetto lo apre nell'SDK.
+- Uno strumento che salva un gioco chiede prima: *Save an editable copy: name.bme?* La copia va in `/bme` (`/bme/name.bme`, oppure `name1.bme` se il nome è occupato). Un `.bme` accanto al suo gioco su una scheda vecchia si legge ancora e si salva dove sta.
+- Nel menu, *Make an editable copy* è nelle opzioni di un gioco. Il progetto non è nelle schede del menu: aprilo dall'SDK con *Open* (**Ctrl+O**).
 - *Build the game (.bm)* è nelle opzioni di un progetto. Nell'SDK il tasto è **Ctrl+B**.
-- Una compilazione scrive il gioco accanto al progetto, con il nome del progetto salvato all'offset 104 dell'intestazione. La compilazione successiva sostituisce quel gioco e solo quello. Un gioco con lo stesso nome che non è stato compilato dal progetto resta, e il nuovo prende una cifra (`PONG1.BM`).
-- Il `.bm` e il `.b16` sono edizioni separate. Un `.b16` non sostituisce mai il `.bm`, e i sorgenti del `.bm` non vengono mai sovrascritti per fare il `.b16`.
-- Un file `.b16` è limitato a 8 MiB. Il suo schermo è 360x360 (o 720x720, lo dice il profilo), uguale su Pi e su RGB30.
+- Una compilazione di un progetto in `/bme` scrive il gioco nella cartella dei giochi (`/carts` sul Pi, `/bm` sull'RGB30); un progetto accanto al suo gioco compila accanto. Il gioco ha il nome del progetto salvato all'offset 104 dell'intestazione. La compilazione successiva sostituisce quel gioco e solo quello. Un gioco con lo stesso nome che non è stato compilato dal progetto resta, e il nuovo prende una cifra (`pong1.bm`).
+- Un `.bm` gira sul Pi Zero W e sull'RGB30. La sua intestazione dice per quali kernel è fatto (la chiave `targets` di `bm.info`: `pi`, `rgb30`). Il Market accetta fino a 100 MB a file.
 - Le altre cartucce scrivono in `/carts` solo file `.bm` e `.bme`, e solo quelli che hanno creato nella stessa esecuzione.
-
-## Attenzione
-
-- [DA COMPLETARE: stato del profilo `.b16`. `docs/B16.md` dice che il profilo è deciso ma non ancora implementato, e il §3 descrive un contenitore `B16CART` diverso che il §0 sostituisce con il contenitore `.bm`; `src/bm/project.h` e `scripts/mkbm.py` segnano ed esportano già i file `.b16` (bit 1 all'offset 18, controllo degli 8 MiB). Dire quale delle due è quella attuale.]
-- Le voci *Build .bm* ed *Export .b16* dell'SDK chiamano `bm_build_b16`; **Ctrl+Shift+B** nell'SDK di bm esporta sempre un `.b16`.
 
 ## Provalo, passo per passo
 
 1. Sulla console apri la scheda Giochi e seleziona un gioco.
 2. Premi **X** sul pad dell'RGB30 (**C** sul Pi) per aprire le sue opzioni e scegli *Make an editable copy*.
-3. Apri la scheda Dev. Vedi il progetto con il badge "Project".
-4. Premi **A** sul progetto. Si apre nell'SDK.
+3. Apri la scheda Dev e avvia **bm SDK**. La scheda non elenca i progetti.
+4. Nell'SDK premi **Ctrl+O** e scegli il progetto.
 5. Nell'SDK premi **Ctrl+B** (*Build the game .bm*). Il gioco compare nella scheda Giochi.
 
-![Le opzioni di un gioco, con Make an editable copy](shots/api-tools-editable-copy.png)
+!Le opzioni di un gioco, con Make an editable copy
 
 ::: try
 Compila due volte lo stesso progetto. La seconda compilazione sostituisce il primo gioco: non ottieni un secondo file.
@@ -62,15 +55,11 @@ Compila due volte lo stesso progetto. La seconda compilazione sostituisce il pri
 
 ## Dal PC
 
-`mkbm.py` scrive il tipo di file in base all'estensione di `-o`: `.bm`, `.bme` o `.b16`.
+`mkbm.py` scrive il tipo di file in base all'estensione di `-o`: `.bm` o `.bme`.
 
 ::: copy
 python3 scripts/mkbm.py -o ball.bme --lua carts/ball/main.lua --title "Ball" --author "me"
-python3 scripts/mkbm.py --from ball.bm --b16
-:::
-
-::: warn
-Un `.b16` sopra gli 8 MiB viene rifiutato con un messaggio. Con `--from` e `--b16` e senza `-o`, il file viene scritto accanto al sorgente con l'estensione `.b16`.
+python3 scripts/mkbm.py -o ball.bm --lua carts/ball/main.lua --title "Ball" --author "me"
 :::
 
 # Le sezioni di una cartuccia
@@ -85,7 +74,7 @@ Una cartuccia è un'intestazione di 128 byte, una tabella delle sezioni e i corp
 | 12 | u16 larghezza, u16 altezza: 640x360, 480x270, 320x180, 256x256, 360x360 |
 | 16 | u8 formato pixel (1 = RGB565) |
 | 17 | u8 numero di sezioni |
-| 18 | u16 flag: bit 0 progetto, bit 1 `.b16` |
+| 18 | u16 flag: bit 0 progetto |
 | 20 | u32 CRC-32 di tutto ciò che segue l'intestazione |
 | 24 | char[48] titolo |
 | 72 | char[32] autore |
@@ -104,7 +93,7 @@ Una cartuccia è un'intestazione di 128 byte, una tabella delle sezioni e i corp
 | 6 | AUDIO | il banco dei suoni (`BMAU`): suoni, effetti, pattern, brani; suonato da `sfx()` e `music()` |
 | 8 | MESH | modelli 3D, da 1 a 256, con il margine delle texture |
 | 9 | ANIM | scheletri e animazioni dei modelli MESH |
-| 10 | INFO | testo `chiave: valore` di al massimo 16 KiB sul file e le sue parti |
+| 10 | INFO | testo `chiave: valore` di al massimo 16 KB sul file e le sue parti |
 | 11 | SPRITES | zone con nome del foglio (da 1 a 1024), con fotogrammi e velocità |
 | 12 | LAYERS | gli altri livelli della mappa (da 2 a 8, la sezione MAP è il livello 1) |
 | 13 | FLAGS | gli 8 flag di ogni cella 8x8 del foglio |
@@ -119,11 +108,11 @@ Una cartuccia è un'intestazione di 128 byte, una tabella delle sezioni e i corp
 
 # L'API per gli strumenti
 
-Parte dell'API dei giochi. Queste funzioni sono pensate per gli strumenti di sviluppo (gli editor della suite). I giochi non ne hanno bisogno, e il progetto in `docs/B16.md` dice che il profilo `.b16` lascia fuori dalla sandbox le funzioni `cart_*` e `ls`; la console non lo applica ancora.
+Parte dell'API dei giochi. Queste funzioni sono pensate per gli strumenti di sviluppo (gli editor della suite). I giochi non ne hanno bisogno.
 
 ## Giochi e progetti nell'API
 
-`cart_save`, `cart_write` e `cart_put_audio` restituiscono `true` **e il file scritto** quando non è quello richiesto. Succede quando salvi un gioco: lo strumento scrive la copia modificabile e prosegue con quel file. Un nuovo `.bm` diventa un progetto (`"/carts/NEW.BM"` diventa `/carts/NEW.BME`). Un progetto produce il suo gioco con `cart_build`.
+`cart_save`, `cart_write` e `cart_put_audio` restituiscono `true` **e il file scritto** quando non è quello richiesto. Succede quando salvi un gioco: lo strumento scrive la copia modificabile e prosegue con quel file. Un nuovo `.bm` diventa un progetto (`"/carts/new.bm"` diventa `/carts/new.bme`). Un progetto produce il suo gioco con `cart_build`.
 
 ## Tastiera e file
 
@@ -132,6 +121,7 @@ Parte dell'API dei giochi. Queste funzioni sono pensate per gli strumenti di svi
 | `keyheld(name)` | `true` finché il tasto `name` è premuto: da `"f1"` a `"f12"`, `"tab"`, `"space"`, `"enter"`, `"esc"` |
 | `keyp()` | il prossimo tasto digitato: un carattere (`"a"`, `"\n"` Invio, `"\b"` Backspace, `"\t"`), un nome (`"up"`, `"down"`, `"left"`, `"right"`, `"home"`, `"end"`, `"pgup"`, `"pgdn"`, `"del"`, `"esc"`, da `"f1"` a `"f10"`), `"^s"` per Ctrl+S, `"^S"` per Ctrl+Shift+S (anche `"^i"`, `"^m"`); `nil` se non c'è nulla. F11 e F12 sono del sistema e non arrivano mai. Dalla prima chiamata la tastiera scrive e non funziona più come gamepad per `btn()` |
 | `keyhelp(list, [title])` | mostra i tasti della cartuccia sotto quelli del sistema mentre **F12** è premuto. `list` è `{ {"tasti", "che cosa fanno"}, "sottotitolo", ... }`, tasti come in `prompt()` (minuscolo la tastiera, maiuscolo il pad). Restituisce quante voci nominano un tasto che il sistema tiene per sé (F11, F12, Ctrl+Esc, Ctrl+Shift+Esc): sono mostrate in rosso e nel log. `keyhelp(nil)` lo toglie |
+| `showkeys()` | apre l'elenco dei tasti della pagina come F12 tenuto, ma l'elenco resta aperto (per un clic del mouse sul chip F12 keys): un clic, F12 o Esc lo chiude, le frecce girano le pagine, e la cartuccia non riceve altri tasti o pulsanti nel frattempo. Restituisce `true` quando è aperto. `U.keys()` in `bmui` la chiama per il chip fisso delle barre dei suggerimenti |
 | `ls([folder])` | i file della scheda SD: `{ {name=, size=, dir=}, ... }` |
 
 ## Leggere e scrivere cartucce
@@ -141,12 +131,16 @@ Parte dell'API dei giochi. Queste funzioni sono pensate per gli strumenti di svi
 | `cart_load(path)` | apre un `.bm`: il suo foglio di sprite (con flag, zone e box), la mappa (con i livelli) e i modelli 3D (con gli scheletri) prendono il posto di quelli della cartuccia chiamante. Restituisce `{title, author, res, lua, sheet_w, sheet_h, map_w, map_h, layers, [palette]}` |
 | `cart_sheet([w, h])` | la dimensione del foglio di sprite del progetto; con `w` e `h` (multipli di 8, da 8 a 4096) lo ridimensiona: i pixel che ci stanno restano, i nuovi sono trasparenti, i flag restano con il loro tile |
 | `cart_new()` | un foglio di sprite e una mappa vuoti (256x256, un livello), senza flag, zone, box o modelli |
-| `cart_save(path, {title, author, res, lua})` | scrive un `.bm` con il codice dato e il foglio, i flag, le zone, i box, la mappa, i livelli, la copertina, il banco dei suoni, i modelli e gli scheletri correnti. Un nome 8.3, per esempio `"/carts/GAME.BME"`. Restituisce `true` (e il file scritto quando non è `path`), oppure `false` e un messaggio |
-| `cart_build(project)` | compila il gioco di un progetto (`.bme`) in un `.BM` accanto ad esso. Restituisce `true` e il percorso del gioco, oppure `false` e un messaggio |
+| `cart_save(path, {title, author, res, lua})` | scrive un `.bm` con il codice dato e il foglio, i flag, le zone, i box, la mappa, i livelli, la copertina, il banco dei suoni, i modelli e gli scheletri correnti. Un nome 8.3, per esempio `"/bme/game.bme"`. Restituisce `true` (e il file scritto quando non è `path`), oppure `false` e un messaggio |
+| `cart_build(project)` | compila il gioco di un progetto (`.bme`) in un `.BM` nella cartella dei giochi (accanto ad esso per un progetto che non è in `/bme`). Non ha un secondo argomento. Restituisce `true` e il percorso del gioco, oppure `false` e un messaggio |
+| `cart_publish(path)` | per gli strumenti di bm. Esce dallo strumento e apre il pannello Publish sul gioco in `path`. Sull'RGB30 risponde `false` e il motivo |
 | `cart_read(path)` | il codice e l'intestazione di un `.bm`: `{title, author, res, lua, size}`, senza toccare foglio e mappa del chiamante. Per gli editor con più file aperti |
 | `cart_write(path, {[lua, title, author, res, from, sections]})` | cambia solo il codice (e i campi dati) di un `.bm`; foglio, mappa, copertina, banco dei suoni e sezioni sconosciute restano. Senza `lua` il codice resta. `from`: le altre sezioni vengono da un altro file ("salva con nome"); `from = false`: una cartuccia nuova. `sections`: `{[8] = byte MESH, [9] = byte ANIM}` (`false` le toglie), controllati prima. `sheet = true`: il foglio di sprite del progetto prende il posto di quello del file, come SHEET8 se ha al massimo 256 colori, con i colori di `palette` (`{0xRRGGBB, ...}`) per primi. Restituisce come `cart_save` |
 | `cart_data(kind, [bytes])` | le sezioni MESH (`kind` 8), ANIM (9), SPRITES (11) e BOXES (14) del progetto come stringhe nel formato di `src/bm/bm.h`. Senza `bytes` le restituisce (`nil` se non ci sono); con `bytes` le sostituisce (`nil` o `""` le toglie) e restituisce `true`, oppure `false` e il motivo |
 | `cart_config(key, [value])` | il testo di una chiave di `bm/config.txt`, oppure `nil`. Solo chiavi che iniziano con la prima parola del titolo del gioco in minuscolo e `_` (Overbit: `overbit_`); qualsiasi altra cosa è un errore. Con un valore la chiave viene cambiata e salvata (`""` la cancella). Valori fino a 127 caratteri, senza `;` o `,` |
+| `sheet_png(x, y, w, h)` | dà i byte di un file PNG (tipo colore 6, con alpha) di un rettangolo del foglio sprite. Un pixel trasparente sul foglio ha alpha 0. Ogni altro pixel ha alpha 255. La chiamata dà `nil` e il motivo se il rettangolo non è dentro il foglio, se è più largo o più alto di 4096, o se manca la memoria. Scrivi i byte in un file con `doc_write` |
+| `sheet_png({{x, y, w, h}, ...})` | lo stesso per un elenco di 1 a 64 rettangoli. Il PNG li mette affiancati, da sinistra a destra, nell'ordine dell'elenco. Tutti i rettangoli devono avere la stessa altezza. La larghezza totale è al massimo 4096. Altrimenti la chiamata dà `nil` e il motivo. |
+| `sheet_gif({{x, y, w, h}, ...}, delay_cs)` | dà i byte di un file GIF animato (GIF89a) di un elenco di 1 a 64 rettangoli del foglio degli sprite. Ogni rettangolo è un frame, nell'ordine dell'elenco. Tutti i rettangoli devono avere la stessa dimensione. La GIF si ripete per sempre. `delay_cs` è il tempo di ogni frame in centesimi di secondo (da 1 a 65535; se non lo dai, 10). Un pixel trasparente sul foglio resta trasparente. I colori restano esatti quando i frame hanno 255 colori o meno. Con più colori, bm li riduce a 255. La chiamata dà `nil` e il motivo se un rettangolo non è dentro il foglio, se le dimensioni sono diverse, se i frame hanno più di 262144 pixel in tutto, oppure se manca la memoria. Scrivi i byte in un file con `doc_write` |
 
 ## Audio per gli editor
 
@@ -166,6 +160,9 @@ Parte dell'API dei giochi. Queste funzioni sono pensate per gli strumenti di svi
 | `mesh_reduce(record, triangles, [bones, [max_err]])` | meno triangoli per un modello della sezione MESH (collasso degli spigoli con quadriche, nessuna IA). `bones` è l'osso di ogni vertice, `max_err` si ferma prima di un collasso più costoso (0: nessun limite). Restituisce il record, le ossa dei suoi vertici (`nil` senza `bones`) e il numero di triangoli; `nil` e un messaggio se il record è rotto. Sul PC: `tools/bmreduce.py` |
 | `picture3d(action, ...)` | un'immagine diventa un modello 3D tramite un servizio da immagine a 3D. `picture3d("providers")` elenca i servizi; `picture3d("ready", service)` dà `true`, oppure `false` e il perché (manca la chiave); `picture3d("start", picture, {provider=, polycount=})` avvia il lavoro su un `.png`/`.jpg` della SD o su un URL https e dà l'id del lavoro (o `nil` e un messaggio); `picture3d("status", id, service)` dà `"running", progress` oppure `"done", url`; `picture3d("take", url, {name=, faces=, height=})` scarica il `.glb` e lo converte in `{record=, flat=, texture=, nv=, nf=, textured=}`. Il primo servizio è Meshy, con la chiave `meshy_key=...` in `bm/config.txt`. Le chiamate bloccano finché la rete lavora |
 | `cutout3d(picture, {name=, lathe=, height=, depth=, segments=, faces=})` | un modello dal contorno dell'immagine, fatto sulla console senza rete né IA: una sagoma spessa `depth`, oppure con `lathe = true` il mezzo contorno fatto girare attorno all'asse verticale in `segments` passi. `height` in blocchi (2), `faces` triangoli al massimo (1200). Restituisce la stessa tabella di `picture3d("take")`, oppure `nil` e un messaggio |
+| `glb3d(path, {name=, height=, faces=, sheet=})` | un modello da un file `.glb` della scheda SD (gli editor usano `/glb/NAME.glb`), fatto sulla console senza rete né IA. Il file è solo letto. `height` in blocchi (2), `faces` triangoli al massimo (0: tutti), `sheet` il lato della texture (256, da 8 a 1024). Un modello contiene al massimo 65535 vertici e 65535 triangoli: un file con più triangoli dà `nil` e un messaggio, a meno che si imposti `faces`. Un file oltre 16 MB dà `nil` e un messaggio. Restituisce la stessa tabella di `picture3d("take")`, oppure `nil` e un messaggio |
+| `res_write(path, kind, {sections=, name=, author=, replace=})` | solo per gli strumenti di bm. Scrive un file modello (kind 1 o `"model"`) in `/bmm`. `path` è `/bmm/NAME.bmm`: NOME ha da 1 a 8 lettere minuscole, cifre, `_` o `-`. `sections` contiene stringhe: `[8]` la sezione MESH (obbligatoria), `[9]` ANIM, un solo foglio (`[2]` o `[5]`), `[10]` INFO. `name` è il nome mostrato. Un file già presente resta com'è, a meno che `replace` sia true. Restituisce `true`, oppure `nil` e un messaggio |
+| `res_read(path)` | legge un file risorsa (`.bmm`, `.bmi`, ...) dalla scheda SD. Il file è solo letto. Restituisce `{ kind =, name =, author =, sections = { [tipo] = stringa } }`, oppure `nil` e un messaggio. Il kind 1 è un modello |
 
 ## Eseguire, fare il debug e passare da uno strumento all'altro
 
@@ -273,15 +270,15 @@ Un file di risorse usa lo stesso contenitore di un `.bm`, con il magic `BMRES` e
 
 - I nomi sono 8.3: l'estensione è `bm` più una lettera (mai `.bmp`). Il nome vero è dentro il file.
 - Il menu non elenca i file di risorse tra i giochi, e i giochi non li leggono mentre girano. Una risorsa entra in un `.bm` per copia; la cartuccia resta un solo file che funziona da solo.
-- INFO è testo, righe `chiave: valore`: `name`, `desc`, `author`, `license` (un id SPDX come `CC0-1.0`), `version`, `tags` (separati da virgole), `origin` (lo SHA-256 della risorsa da cui è stata copiata), `date` (AAAA-MM-GG). Un blocco `[tipo nome]` dà le chiavi di una parte; i tipi sono `model`, `sprite`, `sound`, `sfx`, `song`, `map`, `palette`. Al massimo 16 KiB; le chiavi sconosciute vengono conservate.
+- INFO è testo, righe `chiave: valore`: `name`, `desc`, `author`, `license` (un id SPDX come `CC0-1.0`), `version`, `tags` (separati da virgole), `origin` (lo SHA-256 della risorsa da cui è stata copiata), `date` (AAAA-MM-GG). Un blocco `[tipo nome]` dà le chiavi di una parte; i tipi sono `model`, `sprite`, `sound`, `sfx`, `song`, `map`, `palette`. Al massimo 16 KB; le chiavi sconosciute vengono conservate.
 - Una zona di sprite si sposta nel foglio intera. In un gioco, `zspr(name, x, y)` la disegna e `zboxes(name, [frame, type])` legge i suoi box.
 - I limiti sono quelli del `.bm`: foglio fino a 4096x4096, 256 modelli, 64 ossa.
 
 ## Attenzione
 
-- La scheda Lib, che elenca le risorse, per ora è nascosta. `lib_tab=1` in `bm/config.txt` la riporta.
-- Le app che aprono i file di risorse non sono ancora pronte: A nella scheda Lib apre solo risorse che stanno dentro un `.bm`.
-- `bmres.py add` con una cartuccia `.bme` e senza `-o` scrive il `.bme` sul posto. Con un `.bm` o un `.b16` e senza `-o` si rifiuta di cambiare il gioco ("is a game, read only") e scrive una copia con lo stesso nome e l'estensione `.bme`. Un'uscita `.bme` è segnata come progetto.
+- Il menu non ha una scheda per i file di risorse (la scheda Lib è stata rimossa). Apri un file di risorse da un editor.
+- Le app che aprono ogni tipo di file di risorse non sono ancora pronte.
+- `bmres.py add` con una cartuccia `.bme` e senza `-o` scrive il `.bme` sul posto. Con un `.bm` e senza `-o` si rifiuta di cambiare il gioco ("is a game, read only") e scrive una copia con lo stesso nome e l'estensione `.bme`. Un'uscita `.bme` è segnata come progetto.
 - [DA COMPLETARE: `docs/RISORSE.md` dice che `mkbm.py --res FILE` integra le risorse in fase di compilazione, ma in `scripts/mkbm.py` l'opzione `--res` sceglie la risoluzione dello schermo. Dire quale strumento fa l'integrazione in compilazione.]
 
 ## Che cosa fa l'integrazione
@@ -382,7 +379,7 @@ carts/<id>/
 
 - Il Makefile cerca prima in `assets/`, poi in `carts/<id>/`, così i giochi vecchi funzionano ancora.
 - Le chiavi sconosciute vengono conservate nella cartuccia. Il formato binario `.bm` non cambia, e un kernel più vecchio ignora INFO.
-- Giochi già spostati: `pong` (`bm.info`), `yharnam` (`bm.info`, `sheet.png` e `map_*.csv` in `assets/`, gli script `mk*.py`, `mapview.py` e `art/` in `build/`) e `hunt` (`bm.info`, `sheet.png` e `map.csv` in `assets/`, `mkassets.py` in `build/`).
+- Giochi già spostati: `pong` (`bm.info`), `yharnam` (`bm.info`, `sheet.png` e `map_*.csv` in `assets/`, gli script `mk*.py`, `mapview.py` e `art/` in `build/`).
 
 ## Attenzione
 
@@ -395,9 +392,9 @@ carts/<id>/
 
 L'esempio sposta un gioco chiamato `ball`, con un foglio e una mappa.
 
-1. Crea `carts/ball/bm.info` con nome, autore e risoluzione del gioco (vedi il blocco sotto).
-2. Crea la cartella `carts/ball/assets/` e spostaci `sheet.png` e `map.csv`.
-3. Se il gioco ha script suoi (`mk*.py`), crea `carts/ball/build/` e spostali lì. Aprili uno per uno e correggi i percorsi verso `main.lua` e `assets/`.
+1. Crea a file that is not in this repository con nome, autore e risoluzione del gioco (vedi il blocco sotto).
+2. Crea la cartella a file that is not in this repository e spostaci `sheet.png` e `map.csv`.
+3. Se il gioco ha script suoi (`mk*.py`), crea a file that is not in this repository e spostali lì. Aprili uno per uno e correggi i percorsi verso `main.lua` e `assets/`.
 4. Togli dal Makefile la riga `title_ball` del gioco, perché ora il titolo viene da `bm.info`.
 5. Compila il gioco.
 6. Confrontalo con il `.bm` che avevi compilato prima dello spostamento. Deve essere identico tranne la sezione INFO.
@@ -426,7 +423,7 @@ Un gioco o un'app salva come PNG sulla scheda SD il fotogramma che sta disegnand
 | Come | Dove |
 |---|---|
 | **Print Screen** sulla tastiera | `bm/shots/` sulla scheda SD |
-| **Select + L1 + R1** insieme su un pad (Share + L1 + R1 su un DS4) | `bm/shots/` sulla scheda SD |
+| **Select** tenuto premuto per 3 secondi su un pad (Share su un DS4) | `bm/shots/` sulla scheda SD |
 | `shot([prefix])` nel tuo codice | `bm/shots/` sulla scheda SD |
 
 ## Che cosa fa
@@ -437,14 +434,16 @@ Un riquadro dice `Screenshot saved` e il nome del file per due secondi. L'immagi
 
 - `shot([prefix])` chiede il fotogramma che si sta disegnando. Viene salvato alla fine di `_draw`, quindi chiamalo in un punto qualsiasi del fotogramma; chiamarlo due volte in un fotogramma dà un solo file.
 - Restituisce il nome che avrà il file, oppure `nil` e un messaggio se i numeri sono finiti. Non chiede nulla al giocatore.
-- Il nome è `<PREFISSO><NNNN>.PNG`, 8.3. Il prefisso è formato dalle prime lettere o cifre del titolo del gioco, fino a 4 (`Pong` da `PONG`, `Hunter's Night` da `HUNT`, `SHOT` se non ce ne sono) oppure dal `prefix` che hai dato.
+- Il nome è `<PREFISSO><NNNN>.PNG`, 8.3. Il prefisso è formato dalle prime lettere o cifre del titolo del gioco, fino a 4 (`Pong` da `PONG`, `Star Shooter` da `STAR`, `SHOT` se non ce ne sono) oppure dal `prefix` che hai dato.
 - Il numero è uno più del più alto di quel prefisso già presente in `bm/shots/`, da 0001 a 9999. Il Pi Zero non ha orologio, quindi non c'è la data.
 - Il formato è PNG, 8 bit RGB, della dimensione dello schermo del gioco (640x360, 360x360...). Non si perde nulla: i colori a 16 bit della console vengono allargati a 8 bit. Non c'è il JPG, perché rovina la pixel art.
+- Dal PC, sul collegamento di rete, `python tools/bm_net.py IP --shot out.png` chiede alla console uno screenshot del gioco in corso (la console chiede la password della Console) e lo salva come `out.png`. `python tools/bm_net.py IP --get bm/shots/pong0007.png out.png` scarica un file già presente in `bm/shots/`. Il gioco deve disegnare fotogrammi: se non ne disegna, la richiesta fallisce dopo 3 secondi. Si possono scaricare solo file di `bm/shots/`. Non è verificato su un RGB30.
+- Dal PC, `python tools/bm_net.py IP --play game.bm` invia un `.bm` alla console e lo avvia subito. La console chiede la password della console. Il file non viene salvato sulla scheda SD. Il menu avvia il gioco quando ha i tasti; se è in corso un aggiornamento o una pubblicazione sul Market, mostra un messaggio e non avvia il gioco. `--send game.bm` salva invece il file sulla scheda SD. Non verificato su un RGB30.
 - Uno schermo piatto occupa pochi KB; il rumore può occupare quanto l'immagine grezza (circa 0,7 MB a 640x360).
 
 ## Attenzione
 
-- [DA COMPLETARE: verificare Select + L1 + R1 sul PowKiddy RGB30, e `shot()` con un gioco 3D sulla GPU; il repository dice che nessuno dei due è stato provato su un Pi o un RGB30.]
+- [DA COMPLETARE: verificare Select tenuto 3 s sul PowKiddy RGB30, e `shot()` con un gioco 3D sulla GPU; il repository dice che nessuno dei due è stato provato su un Pi o un RGB30.]
 
 ## Provalo, passo per passo
 
@@ -453,7 +452,7 @@ Un riquadro dice `Screenshot saved` e il nome del file per due secondi. L'immagi
 3. Aspetta il riquadro che dice `Screenshot saved`.
 4. Metti la scheda SD nel computer e apri la cartella `bm/shots/`. L'immagine è lì.
 
-![Un gioco com'è stato salvato dalla console, in bm/shots/](shots/api-tools-shot-saved.png)
+!Un gioco com'è stato salvato dalla console, in bm/shots/
 
 ::: try
 Chiama `shot("menu")` e `shot()` nello stesso gioco. Il primo file inizia con `MENU`, il secondo con le prime lettere del titolo.

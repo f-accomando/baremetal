@@ -79,7 +79,7 @@ bass  = note "<c2 a1 f1 g1>" :s "acid" :lpf(sine:range(300, 1800):slow(4))
 
 If you make a mistake, the line is marked, the status line says what is wrong, and the music that was playing goes on. Fix the line and press **Ctrl+Enter** again.
 
-![The line of bm Sound with a pattern playing](shots/riff-sound-line.png)
+!The line of bm Sound with a pattern playing
 
 ::: copy
 s "kick*4, ~ snare, hat*8" :gain(.9) :room(.2)

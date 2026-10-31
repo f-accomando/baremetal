@@ -15,8 +15,8 @@
  * 1000; and the triangles a frame at 60 fps of a scene with everything
  * at once (the mix).
  *
- * The sphere and quad scenes are those of the stress test (src/bm/
- * stress.c), at the same 640x360: the numbers the Pi gave with the drivers
+ * The sphere and quad scenes are those of the old stress test (removed
+ * on 24 Oct 2026), at the same 640x360: the numbers the Pi gave with the drivers
  * before (docs/GPU-BENCHMARK-REPORT.md) are their bars of history. The loads go
  * far beyond what the drivers do today, to leave room for the next ones.
  */
@@ -47,33 +47,42 @@ static const char *pmu_name(void)
 
 static r3d_t R;
 static g16_t *g;
+/* the kernels have it (api_shot.c); the host test does not: a null pointer then */
+int bm_shot_page(const uint16_t *px, int stride, int w, int h) __attribute__((weak));
+static void shot_page(void)
+{
+    if (bm_shot_page && g)
+        bm_shot_page(g->px, g->stride, g->w, g->h);
+}
 
 /* ---------------------------------------------------------------- profiles */
 
 enum { PF_ARM, PF_GPU, PF_AA, PF_VS1, PF_VS, PF_VSQ, PF_Q, PF_WC, PF_2D, PF_VSQ2, PF_T16, PF_FS2, PF_VSS, PF_VSF,
-       PF_VSA, PF_ETC1, NPROF };
+       PF_VSA, PF_ETC1, PF_VSAQ, PF_QPU, NPROF };
 #define M_ARM (1u << PF_ARM)
 #define M_GPU (1u << PF_GPU)
 #define M_AA  (1u << PF_AA)
 #define M_VS1 (1u << PF_VS1)
 #define M_VS  (1u << PF_VS)
 #define M_VSQ (1u << PF_VSQ)
-#define M_Q   (1u << PF_Q)              /* the queue without the vertex shader (M35, bm3d 4.4) */
-#define M_WC  (1u << PF_WC)             /* the GPU with the jobs' memory uncached (M35, bm3d 4.5) */
-#define M_2D  (1u << PF_2D)             /* the GPU with the 2D over the 3D in its job (M37, bm3d 4.8) */
-#define M_VSQ2 (1u << PF_VSQ2)          /* GPU+VS+Q with two jobs in flight (M39, bm3d 5.1) */
-#define M_T16 (1u << PF_T16)            /* the GPU with opaque textures in 16 bits (M39, bm3d 5.2) */
-#define M_FS2 (1u << PF_FS2)            /* the GPU with two-thread pixel shaders (M39, bm3d 5.3; every textured one 6.3) */
-#define M_VSS (1u << PF_VSS)            /* GPU+VS with the meshes nearest first (M39, bm3d 5.4) */
-#define M_VSA (1u << PF_VSA)            /* GPU+VS+FS2 with compact attributes (M39, bm3d 7.1) */
-#define M_ETC1 (1u << PF_ETC1)          /* GPU+T16 with the opaque sheets as ETC1 (M39, bm3d 7.3) */
+#define M_Q   (1u << PF_Q)              /* the queue without the vertex shader (bm3d 4.4) */
+#define M_WC  (1u << PF_WC)             /* the GPU with the jobs' memory uncached (bm3d 4.5) */
+#define M_2D  (1u << PF_2D)             /* the GPU with the 2D over the 3D in its job (bm3d 4.8) */
+#define M_VSQ2 (1u << PF_VSQ2)          /* GPU+VS+Q with two jobs in flight (bm3d 5.1) */
+#define M_T16 (1u << PF_T16)            /* the GPU with opaque textures in 16 bits (bm3d 5.2) */
+#define M_FS2 (1u << PF_FS2)            /* the GPU with two-thread pixel shaders (bm3d 5.3; every textured one 6.3) */
+#define M_VSS (1u << PF_VSS)            /* GPU+VS with the meshes nearest first (bm3d 5.4) */
+#define M_VSA (1u << PF_VSA)            /* GPU+VS+FS2 with compact attributes (bm3d 7.1) */
+#define M_VSAQ (1u << PF_VSAQ)          /* GPU+VS+A8 with the frame in the queue (herotris: the development notes) */
+#define M_ETC1 (1u << PF_ETC1)          /* GPU+T16 with the opaque sheets as ETC1 (bm3d 7.3) */
+#define M_QPU (1u << PF_QPU)            /* the ARM with the full-screen fade on the QPUs (gpu3d_qpu=1; the fade test only) */
 #define M_ALL (M_ARM | M_GPU | M_VS1 | M_VS)
 #define M_LIT (M_ARM | M_GPU | M_VS)    /* models lit by the sun: VS1 is the GPU for them */
 
-/* queue (M35): the end of each frame started on the GPU, the ARM's work of
+/* queue (bm3d 4.1): the end of each frame started on the GPU, the ARM's work of
  * the frame (the test's `work`) done meanwhile */
-/* attr (M39): compact attributes (gpu3d_attr), on GPU+VS+FS2: GPU+VS+A8 */
-/* etc1 (M39, bm3d 7.3): the opaque sheets as ETC1 (gpu3d_etc1), on GPU+T16
+/* attr (bm3d 7.1): compact attributes (gpu3d_attr), on GPU+VS+FS2: GPU+VS+A8 */
+/* etc1 (bm3d 7.3): the opaque sheets as ETC1 (gpu3d_etc1), on GPU+T16
  * (the cut-outs stay RGBA5551): GPU+ETC1 against GPU+T16 is ETC1 alone */
 static const struct { const char *name; int gpu, aa, vs, queue, wc, two_d, t16, fs2, sort, attr, etc1; } prof[NPROF] = {
     { "ARM", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, { "GPU", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
@@ -84,7 +93,8 @@ static const struct { const char *name; int gpu, aa, vs, queue, wc, two_d, t16, 
     { "GPU+VS+Q2", 1, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0 }, { "GPU+T16", 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0 },
     { "GPU+FS2", 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0 }, { "GPU+VS+S", 1, 0, 2, 0, 0, 0, 0, 0, 1, 0, 0 },
     { "GPU+VS+FS2", 1, 0, 2, 0, 0, 0, 0, 1, 0, 0, 0 }, { "GPU+VS+A8", 1, 0, 2, 0, 0, 0, 0, 1, 0, 1, 0 },
-    { "GPU+ETC1", 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1 },
+    { "GPU+ETC1", 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1 }, { "GPU+VS+A8+Q", 1, 0, 2, 1, 0, 0, 0, 1, 0, 1, 0 },
+    { "QPU", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
 static const char *prof_version(int p)
@@ -93,7 +103,7 @@ static const char *prof_version(int p)
          : bm3d_mode_q(prof[p].gpu, prof[p].vs, prof[p].queue);
 }
 
-/* M37: the profile draws the 2D over the 3D on the GPU, in its job */
+/* bm3d 4.8: the profile draws the 2D over the 3D on the GPU, in its job */
 static int cur_2d;
 static int keep2d;                      /* the scene draws 3D after its 2D (the depth is kept) */
 
@@ -146,18 +156,23 @@ static uint8_t vbone[16 * 64], vbone_skin[16 * 64];
 static unsigned flags;                  /* r3d flags of the spheres and quads */
 
 /* 128x128 checkers in two colours, one sheet a variant (k) */
-static void make_sheet(g16_sheet_t *s, int k, int holes)
+static void make_sheet_wh(g16_sheet_t *s, int w, int h, int k, int holes)
 {
     static const uint32_t pairs[3][2] = { { 0x2060D0, 0xF0D040 }, { 0xD04030, 0xF0F0F0 }, { 0x30A050, 0x202020 } };
-    g16_sheet_alloc(s, 128, 128);
-    for (int y = 0; y < 128; y++)
-        for (int x = 0; x < 128; x++) {
+    g16_sheet_alloc(s, w, h);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
             const uint32_t c = pairs[k][((x >> 3) ^ (y >> 3)) & 1];
             g16_sheet_set(s, x, y, g16_rgb24(c), !(holes && ((x >> 2) & 3) == 0 && ((y >> 2) & 3) == 0));
         }
-    for (int cy = 0; cy < 16; cy++)
-        for (int cx = 0; cx < 16; cx++)
+    for (int cy = 0; cy < h / 8; cy++)
+        for (int cx = 0; cx < w / 8; cx++)
             g16_sheet_update_cell(s, cx, cy);
+}
+
+static void make_sheet(g16_sheet_t *s, int k, int holes)
+{
+    make_sheet_wh(s, 128, 128, k, holes);
 }
 
 /* baked light at every corner (a "lit" model of a map) */
@@ -387,7 +402,7 @@ static void spheres_shine(int n, int f)
 }
 
 /* the sphere back as made */
-/* M39: big meshes: a model of 10 080 triangles (a smooth sphere, 5112
+/* bm3d 5.0: big meshes: a model of 10 080 triangles (a smooth sphere, 5112
  * vertices: more than the 4096 of a mesh before bm3d 5.0) and a "lit" map
  * of 14 112 (a textured grid, its light baked at each vertex, the same for
  * every face on it, as a real map's) */
@@ -466,7 +481,7 @@ static void q_texscreen(void)
     quad.colors[0] = quad.colors[1] = R3D_TEXTURED | R3D_SCREEN;
 }
 static void q_free(void) { r3d_mesh_free(&quad); flags = 0; }
-/* M37: textured quads filtered by the TMU (bilinear: four texels a pixel) */
+/* bm3d 4.8: textured quads filtered by the TMU (bilinear: four texels a pixel) */
 static void q_bilinear(void) { q_tex(); gpu3d_set_bilinear(1); }
 static void q_bilinear_free(void) { q_free(); gpu3d_set_bilinear(0); }
 
@@ -587,7 +602,7 @@ static void split(int n, int f)
     }
 }
 
-/* M37: n sprites of 16 x 16 and n / 4 lines of text over a few spheres:
+/* bm3d 4.8: n sprites of 16 x 16 and n / 4 lines of text over a few spheres:
  * a HUD, a radar of a game; with GPU+2D in the job, else the ARM after it */
 static void gpu2d_scene(int n, int f)
 {
@@ -697,6 +712,515 @@ static void mix(int n, int f)
         spr2d(&sheet[1], k * 16, 0, 16, 16, W - 140 + 16 * k, H - 28);
 }
 
+/* ------------------------------------------------- herotris (opt-in)
+ * Stage 0 of the development notes: a hero and a map, the load
+ * of a game on the Pi Zero W. `n` is the number of sets. A set is a hero of
+ * 1536 triangles (16 bones, a 64 x 32 texture, lit) with its shadow, and a
+ * map of 100 pieces of 50 triangles (baked light, two 64 x 32 sheets): 6500
+ * triangles a set, 8036 with the shadow. The sets share the map's place
+ * (each 3 mm lower) and the camera sees them all. Over the 3D: two parallax
+ * bands (the top one opaque, the bottom one with holes), a HUD of 20 sprites
+ * and 3 lines of text. After the 3D: 4M instructions of logic (`work`), as
+ * the test `queue`. tris60 of the report: the most triangles a frame of 60
+ * fps holds. */
+
+static g16_sheet_t hsheet[3];           /* the hero, map A, map B: 64 x 32 */
+static r3d_mesh_t hero_h, map_a, map_b;
+
+/* the uv of a mesh made for 128 x 128 texels, in 64 x 32 texels */
+static void uv_small(r3d_mesh_t *m)
+{
+    for (int i = 0; i < m->nfaces * 6; i += 2) {
+        m->uv[i] *= 0.5f;
+        m->uv[i + 1] *= 0.25f;
+    }
+}
+
+static void herotris_setup(void)
+{
+    make_sheet_wh(&hsheet[0], 64, 32, 0, 0);
+    make_sheet_wh(&hsheet[1], 64, 32, 1, 0);
+    make_sheet_wh(&hsheet[2], 64, 32, 2, 0);
+    make_hero(&hero_h, &hsheet[0]);
+    uv_small(&hero_h);
+    make_tile(&map_a, 5, 0x80A060);     /* 50 faces */
+    textured(&map_a, &hsheet[1]);
+    uv_small(&map_a);
+    bake(&map_a, 120);
+    make_tile(&map_b, 5, 0x80A060);
+    textured(&map_b, &hsheet[2]);
+    uv_small(&map_b);
+    bake(&map_b, 100);
+}
+
+static void herotris_free(void)
+{
+    r3d_mesh_free(&hero_h);
+    r3d_mesh_free(&map_a);
+    r3d_mesh_free(&map_b);
+    for (int i = 0; i < 3; i++)
+        g16_sheet_free(&hsheet[i]);
+}
+
+static void herotris_scene(int n, int f)
+{
+    cls3d();
+    r3d_camera(&R, 0.3f * sinf((float)f * 0.02f), 1.7f, -5, 0.05f, -0.12f, 70);
+    shine_light();
+    R.shadow_style = 1;
+    for (int s = 0; s < n; s++) {
+        for (int i = 0; i < 10; i++)
+            for (int j = 0; j < 10; j++)
+                r3d_draw_flags(&R, (i + j) & 1 ? &map_b : &map_a,
+                               (v3_t){ -6.3f + 1.4f * (float)i, -0.003f * (float)s, -1.5f + 1.4f * (float)j }, 0, 0, 0,
+                               1.4f, 0);
+        const float x = -4.2f + 1.2f * (float)(s % 8) + 0.6f * (float)((s / 8) % 2), z = 1.0f + 1.5f * (float)(s / 8);
+        pose((float)f * 0.05f + (float)s);
+        r3d_draw_flags(&R, &hero_h, (v3_t){ x, 0, z }, 0, (float)s, 0, 1, R3D_SHADOW);
+        r3d_draw_flags(&R, &hero_h, (v3_t){ x, 0, z }, 0, (float)s, 0, 1, R3D_SMOOTH);
+    }
+    scene_light();
+}
+
+/* the 2D of the frame, after the 3D has ended (the runner calls it after the job: with the queue the
+ * ARM's logic runs while the GPU draws, then the 2D, as a game's d2 records play after the job) */
+static void herotris_2d(int n, int f)
+{
+    (void)n;
+    /* the parallax bands of 16 x 16 pieces, 40 across: 4 rows at the top, 3 at the bottom */
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 40; c++)
+            spr2d(&sheet[0], ((c + f / 2) % 8) * 16, r * 16, 16, 16, c * 16, r * 16);
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 40; c++)
+            spr2d(&sheet[1], ((c + f) % 8) * 16, (r + 2) * 16, 16, 16, c * 16, H - 48 + r * 16);
+    rect2d(8, H - 84, 180, 20, g16_rgb(20, 30, 40));
+    text2d(12, H - 82, "HUD 250/250", 0xFFFF);
+    text2d(W - 100, 70, "SCORE 12345", 0xFFE0);
+    text2d(W / 2 - 40, 70, "ROUND 3", 0xFFFF);
+    for (int k = 0; k < 20; k++)
+        spr2d(&sheet[1], (k % 8) * 16, 0, 16, 16, 8 + 18 * k, H - 112);
+}
+
+/* One hero alone, lit, drawn once on the profile's path: gl = the triangles the GPU's vertex shader placed
+ * (a whole mesh, 1536, when the mesh path took it; 0 when it fell back to the triangles one by one),
+ * meshes = the meshes it placed. The ramp calls it before the first step. */
+static void herotris_probe(int *gl, int *meshes)
+{
+    gpu3d_stats_t st;
+    cls3d();
+    r3d_camera(&R, 0, 1.7f, -5, 0.05f, -0.12f, 70);
+    shine_light();
+    pose(0);
+    gpu3d_flush(g, 0);
+    gpu3d_take_stats(&st);
+    r3d_draw_flags(&R, &hero_h, (v3_t){ 0, 0, 1 }, 0, 0, 0, 1, R3D_SMOOTH);
+    gpu3d_flush(g, 0);
+    gpu3d_take_stats(&st);
+    *gl = (int)st.gltris;
+    *meshes = (int)st.glmeshes;
+    scene_light();
+}
+
+/* ------------------------------------------------- herotris with the map in pieces (opt-in)
+ * Stage 3 of the development notes (draw merging). The set of herotris, but the 5000
+ * triangles of the map are 100 pieces of 50, 10 of 500 or 1 of 5000: the same area, the same triangles,
+ * 100, 10 or 1 calls a set. The pieces are drawn in two runs by sheet (all of the first sheet, then all
+ * of the second), as a game that sorts its static map by texture. `ht_p100m` and `ht_p10m` are the
+ * same scenes with r3d draw merging on (gpu3d_merge): the Pi shows the cost of a call (the ARM time
+ * `ms - gpu_ms` of 100 against 1) and how much of it merging takes back. A run merges only from 32
+ * pieces of at most 150 faces on average (Pi: 100 of 50 +24%, 10 of 500 -26%), so `ht_p10m` draws
+ * the pieces as `ht_p10` does. */
+
+static r3d_mesh_t slab_a, slab_b;       /* a strip (10) or the whole map (1), on the first and the second sheet */
+
+/* a slab of kx by kz squares of 0.2 (as make_tile's 5 by 5 is 1 by 1), with baked light and a sheet */
+static void make_slab(r3d_mesh_t *m, int kx, int kz, const g16_sheet_t *s, int light)
+{
+    r3d_mesh_alloc(m, (kx + 1) * (kz + 1), 2 * kx * kz);
+    for (int z = 0; z <= kz; z++)
+        for (int x = 0; x <= kx; x++)
+            m->verts[z * (kx + 1) + x] = (v3_t){ (float)x * 0.2f - (float)kx * 0.1f, 0, (float)z * 0.2f - (float)kz * 0.1f };
+    int t = 0;
+    for (int z = 0; z < kz; z++)
+        for (int x = 0; x < kx; x++, t += 2) {
+            const uint16_t a = (uint16_t)(z * (kx + 1) + x), b = (uint16_t)(a + 1), c = (uint16_t)(a + kx + 1),
+                           d = (uint16_t)(c + 1);
+            const uint16_t f[6] = { a, c, b, b, c, d };
+            memcpy(m->faces + t * 3, f, sizeof f);
+            m->colors[t] = m->colors[t + 1] = 0x80A060;
+        }
+    r3d_mesh_normals(m);
+    textured(m, s);
+    uv_small(m);
+    bake(m, light);
+}
+
+static void ht_setup(int pieces, int merge)
+{
+    herotris_setup();
+    if (pieces == 10) {
+        make_slab(&slab_a, 50, 5, &hsheet[1], 120);
+        make_slab(&slab_b, 50, 5, &hsheet[2], 100);
+    } else if (pieces == 1) {
+        make_slab(&slab_a, 50, 50, &hsheet[1], 120);
+    }
+    R.merge = merge;
+}
+
+static void ht_free(void)
+{
+    R.merge = 0;
+    r3d_flush(&R);
+    r3d_mesh_free(&slab_a);
+    r3d_mesh_free(&slab_b);
+    herotris_free();
+}
+
+static void ht_p100_setup(void) { ht_setup(100, 0); }
+static void ht_p100m_setup(void) { ht_setup(100, 1); }
+static void ht_p10_setup(void) { ht_setup(10, 0); }
+static void ht_p10m_setup(void) { ht_setup(10, 1); }
+static void ht_p1_setup(void) { ht_setup(1, 0); }
+
+/* the map of set s in `pieces` pieces: the first sheet's, then the second's */
+static void ht_map(int s, int pieces)
+{
+    const float y = -0.003f * (float)s;
+    if (pieces == 1) {
+        r3d_draw_flags(&R, &slab_a, (v3_t){ 0, y, -1.5f + 1.4f * 4.5f }, 0, 0, 0, 1.4f, 0);
+        return;
+    }
+    for (int sheet = 0; sheet < 2; sheet++) {
+        if (pieces == 10) {
+            for (int j = sheet; j < 10; j += 2)
+                r3d_draw_flags(&R, sheet ? &slab_b : &slab_a, (v3_t){ 0, y, -1.5f + 1.4f * (float)j }, 0, 0, 0, 1.4f, 0);
+        } else {
+            for (int i = 0; i < 10; i++)
+                for (int j = 0; j < 10; j++)
+                    if (((i + j) & 1) == sheet)
+                        r3d_draw_flags(&R, sheet ? &map_b : &map_a,
+                                       (v3_t){ -6.3f + 1.4f * (float)i, y, -1.5f + 1.4f * (float)j }, 0, 0, 0, 1.4f, 0);
+        }
+    }
+}
+
+static void ht_scene(int n, int f, int pieces)
+{
+    cls3d();
+    r3d_camera(&R, 0.3f * sinf((float)f * 0.02f), 1.7f, -5, 0.05f, -0.12f, 70);
+    shine_light();
+    R.shadow_style = 1;
+    for (int s = 0; s < n; s++) {
+        ht_map(s, pieces);
+        const float x = -4.2f + 1.2f * (float)(s % 8) + 0.6f * (float)((s / 8) % 2), z = 1.0f + 1.5f * (float)(s / 8);
+        pose((float)f * 0.05f + (float)s);
+        r3d_draw_flags(&R, &hero_h, (v3_t){ x, 0, z }, 0, (float)s, 0, 1, R3D_SHADOW);
+        r3d_draw_flags(&R, &hero_h, (v3_t){ x, 0, z }, 0, (float)s, 0, 1, R3D_SMOOTH);
+    }
+    scene_light();
+}
+
+static void ht_p100_scene(int n, int f) { ht_scene(n, f, 100); }
+static void ht_p10_scene(int n, int f) { ht_scene(n, f, 10); }
+static void ht_p1_scene(int n, int f) { ht_scene(n, f, 1); }
+
+/* ------------------------------------------------- stress (opt-in)
+ * The load of herotris in finer steps, for the stress test (stress_phase): n is a number of quarter sets. A
+ * quarter set is 25 map pieces; a hero with its shadow is added for every 4 quarters (or part of them). So 4
+ * quarters are one herotris set (8036 triangles), 8 are two. The 2D and the logic are the ones of herotris. */
+
+static void stress_scene(int n, int f)
+{
+    const int pieces = 25 * n, heroes = (n + 3) / 4;
+    cls3d();
+    r3d_camera(&R, 0.3f * sinf((float)f * 0.02f), 1.7f, -5, 0.05f, -0.12f, 70);
+    shine_light();
+    R.shadow_style = 1;
+    for (int s = 0; s < heroes; s++) {
+        for (int p = 100 * s; p < pieces && p < 100 * s + 100; p++) {
+            const int i = p % 100 / 10, j = p % 10;
+            r3d_draw_flags(&R, (i + j) & 1 ? &map_b : &map_a,
+                           (v3_t){ -6.3f + 1.4f * (float)i, -0.003f * (float)s, -1.5f + 1.4f * (float)j }, 0, 0, 0,
+                           1.4f, 0);
+        }
+        const float x = -4.2f + 1.2f * (float)(s % 8) + 0.6f * (float)((s / 8) % 2), z = 1.0f + 1.5f * (float)(s / 8);
+        pose((float)f * 0.05f + (float)s);
+        r3d_draw_flags(&R, &hero_h, (v3_t){ x, 0, z }, 0, (float)s, 0, 1, R3D_SHADOW);
+        r3d_draw_flags(&R, &hero_h, (v3_t){ x, 0, z }, 0, (float)s, 0, 1, R3D_SMOOTH);
+    }
+    scene_light();
+}
+
+/* ------------------------------------------------- cel (opt-in)
+ * Q: what the cel shader costs on top of the lit hero. The scene is `heroes` with the textured hero
+ * (1536 triangles, 16 bones, lit by the sun): n heroes in rows of 8. Five tests, the same scene:
+ * lit or cel (4 bands), with the ARM raster's dither on or off (r3d_dither). The vertex programs
+ * of GPU+VS cut the light (bm3d 7.5); the ARM and the Mali keep the ARM path. `cel_outline` is the lit
+ * hero with the outline: flag R3D_OUTLINE, colour 0x2030A0, width 0.03, the mesh again as an inverted hull.
+ * The report's C lines give the ms of the same n in the five tests. */
+
+static int cel_bands, cel_dither_off, cel_outline;
+
+static void cel_on_(int bands, int dither_off, int outline)
+{
+    cel_bands = bands;
+    cel_dither_off = dither_off;
+    cel_outline = outline;
+    r3d_cel(&R, bands, 0.35f);
+    r3d_dither(!dither_off);
+    R.cel_rgb = outline ? 0x2030A0u : R3D_CEL_NO_OUTLINE;       /* cel3d(0, 0.35, 0x2030A0, 0.03) */
+    R.cel_width = 0.03f;
+}
+
+static void cel_setup_lit(void)  { cel_on_(0, 0, 0); }
+static void cel_setup_cel(void)  { cel_on_(4, 0, 0); }
+static void cel_setup_lit_nd(void) { cel_on_(0, 1, 0); }
+static void cel_setup_cel_nd(void) { cel_on_(4, 1, 0); }
+static void cel_setup_outline(void) { cel_on_(0, 0, 1); }
+
+static void cel_free(void)
+{
+    r3d_cel(&R, 0, 0.35f);
+    r3d_dither(1);
+    R.cel_rgb = R3D_CEL_NO_OUTLINE;
+    R.cel_width = 0.02f;
+    cel_bands = cel_dither_off = cel_outline = 0;
+}
+
+static void cel_scene(int n, int f)
+{
+    cls3d();
+    r3d_camera(&R, 0, 2.2f, -4, 0, -0.18f, 60);
+    shine_light();
+    for (int i = 0; i < n; i++) {
+        const float x = -4.2f + 1.2f * (float)(i % 8) + 0.6f * (float)((i / 8) % 2), z = 1.0f + 1.5f * (float)(i / 8);
+        pose((float)f * 0.05f + (float)i);
+        r3d_draw_flags(&R, &hero_tex, (v3_t){ x, 0, z }, 0, (float)i, 0, 1, R3D_SMOOTH | (cel_bands ? R3D_CEL : 0u) | (cel_outline ? R3D_OUTLINE : 0u));
+    }
+    scene_light();
+}
+
+/* The flat hero (no textures, no smooth shading) with the same lights: a mesh the Mali's vertex shader can light (bm3d 7.24),
+ * lit or with 4 cel bands. Rows ARM, GPU and GPU+VS on the Pi and on the RGB30. */
+static void cel_flat_scene(int n, int f)
+{
+    cls3d();
+    r3d_camera(&R, 0, 2.2f, -4, 0, -0.18f, 60);
+    shine_light();
+    for (int i = 0; i < n; i++) {
+        const float x = -4.2f + 1.2f * (float)(i % 8) + 0.6f * (float)((i / 8) % 2), z = 1.0f + 1.5f * (float)(i / 8);
+        pose((float)f * 0.05f + (float)i);
+        r3d_draw_flags(&R, &hero, (v3_t){ x, 0, z }, 0, (float)i, 0, 1, cel_bands ? R3D_CEL : 0u);
+    }
+    scene_light();
+}
+
+/* ------------------------------------------------- the 2D scenes (opt-in)
+ * Tests to measure 2D work (map, sprites, stacks, fade, light) on the Pi
+ * Zero W. They run only when `tests=` names them (`optin`), so the default
+ * run, the score and the old reports stay as they were. Every scene is fixed:
+ * the positions come from a hash of the item number and the frame number,
+ * never from the time. `n` is the load; fill_px counts the screen pixels the
+ * frame asks to draw (ns_px_frame in the report).
+ *
+ * Hooks, not developed here (they wait for their code in bm-core):
+ *   stackv     the vertical stacks of PR 90 (a test_t "stackv" after "stack")
+ *   particles  the 3D particles of PR 99 (a test_t "particles")
+ * TODO: add them as opt-in tests of this block when those PRs are merged. */
+
+static uint32_t hash2d(uint32_t i)
+{
+    i ^= i >> 16;
+    i *= 0x7FEB352Du;
+    i ^= i >> 15;
+    i *= 0x846CA68Bu;
+    i ^= i >> 16;
+    return i;
+}
+
+#define MAP8_W 96                       /* cells of a layer: 768 x 448 pixels */
+#define MAP8_H 56
+#define MAP8_LAYERS 8
+static g16_map_t map8_layer[MAP8_LAYERS];
+static float map8_cover[MAP8_LAYERS];   /* the part of the screen a layer fills */
+
+static void map8_setup(void)
+{
+    for (int l = 0; l < MAP8_LAYERS; l++) {
+        g16_map_t *m = &map8_layer[l];
+        m->w = MAP8_W;
+        m->h = MAP8_H;
+        m->cells = calloc((size_t)MAP8_W * MAP8_H, sizeof *m->cells);
+        int used = 0;
+        for (int i = 0; m->cells && i < MAP8_W * MAP8_H; i++) {
+            const uint32_t h = hash2d((uint32_t)(l * 100003 + i));
+            /* layers 0-2: every cell, opaque tiles; 3-7: half the cells, tiles with holes (alpha) */
+            if (l < 3 || (h >> 8 & 1)) {
+                m->cells[i] = (uint16_t)(1 + h % 255);
+                used++;
+            }
+        }
+        map8_cover[l] = (float)used / (float)(MAP8_W * MAP8_H);
+    }
+}
+
+static void map8_free(void)
+{
+    for (int l = 0; l < MAP8_LAYERS; l++) {
+        free(map8_layer[l].cells);
+        map8_layer[l].cells = NULL;
+    }
+}
+
+/* n layers (8 = the scene) of map() at 640x360, each scrolling faster than the one below */
+static void map8_scene(int n, int f)
+{
+    g16_cls(g, g16_rgb(10, 10, 30));
+    for (int l = 0; l < n && l < MAP8_LAYERS; l++) {
+        if (!map8_layer[l].cells)
+            continue;
+        const int sx = (f * (l + 1) * 5) % 120, sy = (f * (l + 1)) % 64;
+        g16_map(g, &sheet[l < 3 ? 0 : 1], &map8_layer[l], sx / 8, sy / 8, -(sx % 8), -(sy % 8), W / 8 + 1, H / 8 + 1);
+        fill_px += (float)(W * H) * map8_cover[l];
+    }
+}
+
+/* a sprite of 16 x 16 with flip; the GPU draws it in GPU+2D, else the ARM */
+static void spr2d_flip(const g16_sheet_t *s, int sx, int sy, int x, int y, int fx, int fy)
+{
+    fill_px += 16.0f * 16.0f;
+    if (cur_2d && R.backend && gpu3d_blit2d(g, s, sx, sy, 16, 16, x, y, 1, fx, fy))
+        return;
+    flush2d();
+    g16_sspr(g, s, sx, sy, 16, 16, x, y, fx, fy);
+}
+
+/* n sprites of 16 x 16: half opaque (sheet 0), half with holes (sheet 1), some flipped */
+static void sprites_scene(int n, int f)
+{
+    cls3d();                            /* the page of the GPU too (GPU+2D) */
+    for (int i = 0; i < n; i++) {
+        const uint32_t h = hash2d((uint32_t)i);
+        spr2d_flip(&sheet[i & 1], (int)(h & 7) * 16, (int)(h >> 3 & 7) * 16,
+                   (int)((h >> 6) % (uint32_t)(W - 16) + (uint32_t)(f * (1 + (int)(h >> 29)))) % (W - 16),
+                   (int)((h >> 15) % (uint32_t)(H - 16)), (int)(h >> 26 & 1), (int)(h >> 27 & 1));
+    }
+}
+
+/* n stacks of 8 slices (16 x 16, sheet 1 has holes), turning, in three sizes: a fixed pile */
+static void stack_scene(int n, int f)
+{
+    g16_cls(g, g16_rgb(10, 10, 30));
+    for (int i = 0; i < n; i++) {
+        const uint32_t h = hash2d((uint32_t)i + 77u);
+        const float scale = 1.0f + 0.5f * (float)(i % 3);
+        fill_px += 8.0f * 256.0f * scale * scale;
+        g16_stack(g, &sheet[1], 0, 0, 16, 16, 8, 40 + (int)(h % (uint32_t)(W - 80)),
+                  40 + (int)(h >> 12 & 0xFF) % (H - 80), (float)(h >> 20 & 63) * 0.1f + (float)f * 0.05f, scale, 2.0f);
+    }
+}
+
+/* the background of fade and light: blocks of the colours the fade has tables for */
+static const uint16_t fx_col[4] = { 0xF800, 0x07E0, 0x001F, 0xFFE0 };      /* RGB565 */
+
+static void fx_back(void)
+{
+    g16_cls(g, g16_rgb(40, 40, 60));
+    for (int i = 0; i < 12; i++)
+        g16_rectfill(g, (i % 4) * (W / 4), (i / 4) * (H / 3), W / 4, H / 3, fx_col[(i + i / 4) & 3]);
+    fill_px += (float)(W * H);          /* the pass over the whole screen */
+}
+
+static g16_fade_t fx_fade;
+static g16_light_t fx_light;
+static int fx_ok;
+
+/* the QPU profile: dark_end through P->fade_qpu (the gpu3d_qpu=1 hook), the ARM when it is not there or
+ * the QPUs did not do the frame; the frames of each path are counted for the report */
+static int cur_qpu;
+static int fade_frames_qpu, fade_frames_arm;
+static char fade_line[160];             /* the report's qpufade line; empty when the QPU profile did not run */
+
+static void fade_setup(void)
+{
+    fade_frames_qpu = fade_frames_arm = 0;
+    fx_ok = g16_fade_init(&fx_fade, W, H) == 0;
+    if (!fx_ok)
+        return;
+    g16_fade_reset(&fx_fade, 16);
+    for (int c = 0; c < 4; c++) {       /* the table of each block colour: darker to itself */
+        uint16_t to[16];
+        const uint32_t r = (uint32_t)fx_col[c] >> 11 << 3, gr = (uint32_t)fx_col[c] >> 5 << 2 & 0xFF,
+                       b = (uint32_t)fx_col[c] << 3 & 0xFF;
+        for (int k = 0; k < 16; k++)
+            to[k] = g16_rgb(r * (uint32_t)(k + 1) / 16, gr * (uint32_t)(k + 1) / 16, b * (uint32_t)(k + 1) / 16);
+        g16_fade_colour(&fx_fade, fx_col[c], to);
+    }
+    g16_fade_done(&fx_fade);
+}
+
+static void fade_free(void)
+{
+    if (cur_qpu)
+        ksnprintf(fade_line, sizeof fade_line, "key=%d path=%s frames_qpu=%d frames_arm=%d", P->fade_qpu ? 1 : 0,
+                  fade_frames_qpu && fade_frames_arm ? "mixed" : fade_frames_qpu ? "qpu" : "arm", fade_frames_qpu,
+                  fade_frames_arm);
+    if (fx_ok)
+        g16_fade_free(&fx_fade);
+    fx_ok = 0;
+}
+
+/* n lamps (levels, rings dithered) and the fade over the whole screen, on the ARM */
+static void fade_scene(int n, int f)
+{
+    fx_back();
+    if (!fx_ok)
+        return;
+    g16_fade_clear(&fx_fade, 3);
+    for (int i = 0; i < n; i++) {
+        const uint32_t h = hash2d((uint32_t)i + 5u);
+        g16_fade_glow(&fx_fade, (int)(h % (uint32_t)W) + f, (int)(h >> 12 & 0x1FF) % H, 40 + (int)(h >> 24 & 63), 15,
+                      128);
+    }
+    if (cur_qpu && P->fade_qpu) {       /* the hook does the frame by the ARM itself when the QPUs do not */
+        if (P->fade_qpu(g, &fx_fade))
+            fade_frames_qpu++;
+        else
+            fade_frames_arm++;
+        return;
+    }
+    g16_fade_apply(g, &fx_fade);
+    fade_frames_arm += cur_qpu;
+}
+
+static void light_setup(void)
+{
+    fx_ok = g16_light_init(&fx_light, W, H) == 0;
+}
+
+static void light_free(void)
+{
+    if (fx_ok)
+        g16_light_free(&fx_light);
+    fx_ok = 0;
+}
+
+/* n soft lamps and the light over the whole screen, on the ARM */
+static void light_scene(int n, int f)
+{
+    fx_back();
+    if (!fx_ok)
+        return;
+    g16_light_clear(&fx_light, 0x404040);
+    for (int i = 0; i < n; i++) {
+        const uint32_t h = hash2d((uint32_t)i + 9u);
+        g16_light_add(&fx_light, (float)((int)(h % (uint32_t)W) + f), (float)((int)(h >> 12 & 0x1FF) % H),
+                      40.0f + (float)(h >> 24 & 63), 0xFFE0A0u + (h >> 8 & 0x1F) * 0x10100u, 1.0f);
+    }
+    g16_light_apply(g, &fx_light);
+}
+
 /* ---------------------------------------------------------------- tests */
 
 /* a game's logic between two frames: k thousand steps of a random
@@ -722,19 +1246,24 @@ typedef struct {
                                          * 2D's area): the report gives its cost a pixel (fill_px) */
     int work;                           /* the ARM's work of a frame after its 3D (a game's logic),
                                          * thousands of steps of 3 instructions */
+    int optin;                          /* runs only when `tests=` names it (the 2D scenes) */
+    void (*frame2d)(int n, int f);      /* the frame's 2D, drawn after its 3D job has ended (NULL: the frame has it) */
+    const char *group;                  /* `tests=<group>` runs this test too */
+    void (*probe)(int *gl, int *meshes);    /* one hero alone before the ramp: what the vertex shader placed */
+    int stress;                         /* after the ramp: the frame at 1x and 2x the load of 60 fps (stress_phase) */
 } test_t;
 
 static const test_t tests[] = {
     { "spheres", "spheres, 96 faces, flat", "spheres", 1, 8000, M_LIT | M_AA | M_WC | M_VSS | M_VSA, sp_flat, spheres, sp_undo, NULL, 0, 0 },
     { "spheres_smooth", "spheres, Gouraud", "spheres", 1, 8000, M_LIT, sp_smooth, spheres, sp_undo, NULL, 0, 0 },
-    { "spheres_tex", "spheres, textured", "spheres", 1, 8000, M_ARM | M_GPU | M_T16 | M_ETC1 | M_FS2, sp_tex, spheres, sp_undo, NULL, 0,
+    { "spheres_tex", "spheres, textured", "spheres", 1, 8000, M_ARM | M_GPU | M_VS | M_T16 | M_ETC1 | M_FS2, sp_tex, spheres, sp_undo, NULL, 0,
       0 },
     { "spheres_unlit", "spheres, unlit", "spheres", 1, 8000, M_ALL, sp_unlit, spheres, sp_undo, NULL, 0, 0 },
     { "spheres_baked", "spheres, baked light", "spheres", 1, 8000, M_ALL, sp_baked, spheres, sp_undo, NULL, 0, 0 },
     { "spheres_shine", "spheres, sky, rim, gloss, 4 lamps, fog", "spheres", 1, 8000, M_LIT, sp_shine,
       spheres_shine, sp_undo, NULL, 0, 0 },
-    { "heroes", "heroes: 16 bones, 1536 faces", "heroes", 1, 512, M_LIT | M_WC | M_VSS | M_VSA, NULL, heroes, NULL, NULL, 0, 0 },
-    { "heroes_tex", "heroes, textured", "heroes", 1, 512, M_LIT | M_T16 | M_ETC1 | M_FS2, NULL, heroes_tex, NULL, NULL, 0, 0 },
+    { "heroes", "heroes: 16 bones, 1536 faces", "heroes", 1, 512, M_LIT | M_WC | M_VSS | M_VSA | M_VSQ2, NULL, heroes, NULL, NULL, 0, 0 },
+    { "heroes_tex", "heroes, textured", "heroes", 1, 512, M_LIT | M_T16 | M_ETC1 | M_FS2 | M_VSQ2, NULL, heroes_tex, NULL, NULL, 0, 0 },
     { "heroes_skin", "heroes, textured skins (as the Meshy ones)", "heroes", 1, 512, M_LIT | M_FS2, NULL, heroes_skin, NULL,
       NULL, 0, 0 },
     { "heroes_shadow", "heroes with shadows on a floor", "heroes", 1, 512, M_LIT, NULL, heroes_shadow, NULL, NULL,
@@ -771,6 +1300,47 @@ static const test_t tests[] = {
       2, 0 },
     { "bilinear", "fill: quads, textures filtered (bilinear)", "quads", 1, 4000, M_GPU, q_bilinear, quads,
       q_bilinear_free, NULL, 1, 0 },
+    /* the 2D scenes: only with `tests=` (docs/BENCH3D.md), outside the score */
+    { "map8", "2D: 8 layers of map(), parallax", "layers", 1, MAP8_LAYERS, M_ARM, map8_setup, map8_scene, map8_free, NULL, 2,
+      0, 1 },
+    { "sprites", "2D: sprites, flip, alpha", "sprites", 16, 4000, M_ARM | M_2D, NULL, sprites_scene, NULL, NULL, 2, 0, 1 },
+    { "stack", "2D: sprite stacks (stack)", "stacks", 1, 600, M_ARM, NULL, stack_scene, NULL, NULL, 2, 0, 1 },
+    { "fade", "2D: full-screen fade (dark_end), ARM and QPU", "lamps", 1, 64, M_ARM | M_QPU, fade_setup, fade_scene,
+      fade_free, NULL, 2, 0, 1 },
+    { "light", "2D: full-screen light, ARM", "lamps", 1, 64, M_ARM, light_setup, light_scene, light_free, NULL, 2, 0, 1 },
+    /* herotris (the development notes): how many triangles a hero and a map hold at 60 fps */
+    { "herotris", "hero + map + parallax + HUD + 4M instr of logic", "sets", 1, 64,
+      M_ARM | M_GPU | M_VS | M_VSQ | M_VSQ2 | M_VSA | M_VSAQ, herotris_setup, herotris_scene, herotris_free, NULL, 0,
+      1300, 1, herotris_2d, NULL, herotris_probe },
+    /* herotris with the map in 100, 10 or 1 pieces (same triangles), and merged by r3d (m): `tests=htmap` runs the five */
+    { "ht_p100", "herotris, map in 100 pieces", "sets", 1, 64, M_ARM | M_GPU | M_VS | M_VSQ, ht_p100_setup, ht_p100_scene,
+      ht_free, NULL, 0, 1300, 1, herotris_2d, "htmap" },
+    { "ht_p100m", "herotris, map in 100 pieces, merged", "sets", 1, 64, M_ARM | M_GPU | M_VS | M_VSQ, ht_p100m_setup,
+      ht_p100_scene, ht_free, NULL, 0, 1300, 1, herotris_2d, "htmap" },
+    { "ht_p10", "herotris, map in 10 pieces", "sets", 1, 64, M_ARM | M_GPU | M_VS | M_VSQ, ht_p10_setup, ht_p10_scene,
+      ht_free, NULL, 0, 1300, 1, herotris_2d, "htmap" },
+    { "ht_p10m", "herotris, map in 10 pieces, merged", "sets", 1, 64, M_ARM | M_GPU | M_VS | M_VSQ, ht_p10m_setup,
+      ht_p10_scene, ht_free, NULL, 0, 1300, 1, herotris_2d, "htmap" },
+    { "ht_p1", "herotris, map in 1 piece", "sets", 1, 64, M_ARM | M_GPU | M_VS | M_VSQ, ht_p1_setup, ht_p1_scene, ht_free,
+      NULL, 0, 1300, 1, herotris_2d, "htmap" },
+    /* stress: the ramp of herotris in quarter sets on the default path, then the frame at 1x and 2x the load of 60 fps */
+    { "stress", "stress: herotris at 1x and 2x the load of 60 fps", "quarters", 1, 256, M_VSQ, herotris_setup,
+      stress_scene, herotris_free, NULL, 0, 1300, 1, herotris_2d, NULL, NULL, 1 },
+    /* cel (Q2): the lit hero against the cel hero, the dither on or off; `tests=cel` runs the four */
+    { "cel_lit", "cel: lit hero (reference)", "heroes", 1, 64, M_ARM | M_VS, cel_setup_lit, cel_scene, cel_free, NULL, 0, 0, 1,
+      NULL, "cel" },
+    { "cel", "cel: 4 bands, dither on", "heroes", 1, 64, M_ARM | M_VS, cel_setup_cel, cel_scene, cel_free, NULL, 0, 0, 1, NULL,
+      "cel" },
+    { "cel_lit_nd", "cel: lit hero, dither off", "heroes", 1, 64, M_ARM | M_VS, cel_setup_lit_nd, cel_scene, cel_free, NULL, 0,
+      0, 1, NULL, "cel" },
+    { "cel_nd", "cel: 4 bands, dither off", "heroes", 1, 64, M_ARM | M_VS, cel_setup_cel_nd, cel_scene, cel_free, NULL, 0, 0, 1,
+      NULL, "cel" },
+    { "cel_flat_lit", "cel: flat hero, lit (reference)", "heroes", 1, 64, M_LIT, cel_setup_lit, cel_flat_scene, cel_free, NULL, 0, 0, 1,
+      NULL, "cel" },
+    { "cel_flat", "cel: flat hero, 4 bands", "heroes", 1, 64, M_LIT, cel_setup_cel, cel_flat_scene, cel_free, NULL, 0, 0, 1, NULL,
+      "cel" },
+    { "cel_outline", "cel: lit hero with the outline (inverted hull)", "heroes", 1, 64, M_ARM | M_VS, cel_setup_outline, cel_scene,
+      cel_free, NULL, 0, 0, 1, NULL, "cel" },
 };
 #define NTESTS ((int)(sizeof tests / sizeof tests[0]))
 
@@ -823,8 +1393,13 @@ typedef struct {
     float ms, worst;                    /* a frame, with the copy to the screen */
     float gpu_ms, wait_ms;              /* the V3D's work; the ARM waiting for it */
     float jobs;
+    float b1_us, b2_us, b3_us;
+    float sort_us, build_us, jobs_us;
+    float draws, mesh_us, flush_us, resolve_us;     /* the Mali backend: draws a frame, the ARM's time in it (us a frame) */
+    float bin_us, rnd_us;               /* the binner's and the renderer's time of the jobs, a frame */
     float instr, wait_instr, dmiss, cycles;  /* the ARM's counters, a frame */
     float tris_in, tris, verts, pixels, gltris;
+    float sync_ms;                      /* the ARM inside gpu3d_sync() waiting for the job, a frame (queue only) */
     float fill;                         /* the pixels the frame asked to fill (fill_px) */
     uint32_t core_mhz, gpu_mhz;         /* measured after the step's frames (0: unknown) */
     float clean_kcyc, inval_kcyc;       /* the ARM's whole-cache upkeep around the jobs, a frame */
@@ -844,6 +1419,21 @@ typedef struct {
      * time and of the frame, and the GPU's time with no pixel (the line's
      * intercept: binning, clear, tile stores of 640x360) */
     float ns_gpu, ns_ms, gpu0_ms;
+    /* queue 2 only: the same ramp if the frame were shown a frame later (the bench has one page, so it is
+     * a model): a frame costs the larger of the ARM's side (ms less the wait in gpu3d_sync) and the GPU's */
+    int later;
+    float tris60_l, drawn60_l;
+    /* the steps n = 1..4 (-1: not run): the median ms and the triangles given, for the same-n comparisons */
+    float ms_n[4], tris_n[4];
+    /* the vertex shader's mesh path on one hero alone (a test with a probe): the triangles and meshes it placed */
+    int probed, probe_gl, probe_meshes, vs_probe;
+    /* G1 pixel check (a Mali row): the first frame of the ramp drawn by the GPU and again by the ARM; pixels of the page,
+     * pixels that differ, pixels that differ by more than 2 steps of a channel (RGB565), the largest step */
+    int chk, chk_px, chk_diff, chk_big, chk_max;
+    int chk_ink_gpu, chk_ink_arm;       /* pixels that differ from the corner pixel: a blank frame proves nothing */
+    int chk_box[4];                     /* the box of the pixels that differ: x0 y0 x1 y1 */
+    uint16_t chk_gpu[5], chk_arm[5];
+    uint16_t chk_grid[2][8][16];        /* [0] GPU, [1] ARM: every 40th pixel of every 45th row */    /* five pixels: the first that differs, and the box's centre, corners... */
 } result_t;
 
 static result_t res[NTESTS][NPROF];
@@ -917,6 +1507,8 @@ float b3d_slope(const float *x, const float *y, int count, float *at0)
     return (float)b;
 }
 
+static char qpu_line[256];              /* the QPU row (bm3d 7.x); empty without the key */
+
 /* the user stopped the run (P->stop): the ramps end, nothing is saved */
 static int halted;
 
@@ -927,44 +1519,153 @@ static int stopping(void)
     return halted;
 }
 
-static void ramp(int ti, int pf)
+/* the profile's switches on the driver; -1: the profile cannot run here (no row). *colour_only: the backend is
+ * the Mali's (flat colours) */
+static int prof_on(int pf, int *colour_only)
 {
-    const test_t *t = &tests[ti];
-    result_t *r = &res[ti][pf];
-    static sample_t s[64];
-    int ns = 0;
+    *colour_only = 0;
     if (prof[pf].gpu) {
         if (gpu3d_init() != 0 || !gpu3d_backend())
-            return;
+            return -1;
         if ((prof[pf].aa && !gpu3d_msaa()) || (prof[pf].vs > gpu3d_vshader()) ||
             (prof[pf].queue && !gpu3d_queue_ok()))
-            return;                     /* not on this GPU: no row */
+            return -1;                  /* not on this GPU: no row */
         R.backend = gpu3d_backend();
+        *colour_only = R.backend->colour_only;
         gpu3d_drop();
         gpu3d_set_msaa(prof[pf].aa);
         gpu3d_set_vshader(prof[pf].vs);
         gpu3d_set_wc(prof[pf].wc);
         if (prof[pf].wc && !gpu3d_wc())
-            return;                     /* the MMU did not change it: no row */
+            return -1;                  /* the MMU did not change it: no row */
         gpu3d_set_tex16(prof[pf].t16);
         if (prof[pf].t16 && !gpu3d_tex16())
-            return;                     /* the probe did not learn the layout: no row */
+            return -1;                  /* the probe did not learn the layout: no row */
         gpu3d_set_etc1(prof[pf].etc1);
         if (prof[pf].etc1 && !gpu3d_etc1())
-            return;                     /* the probe did not learn ETC1's layout: no row */
+            return -1;                  /* the probe did not learn ETC1's layout: no row */
         gpu3d_set_fs2(prof[pf].fs2);
         if (prof[pf].fs2 && !gpu3d_fs2())
-            return;                     /* the probe saw them differ: no row */
+            return -1;                  /* the probe saw them differ: no row */
         gpu3d_set_sort(prof[pf].sort);
         gpu3d_set_attr(prof[pf].attr);
         if (prof[pf].attr && !gpu3d_attr())
-            return;                     /* the probe saw them differ: no row */
+            return -1;                  /* the probe saw them differ: no row */
     } else {
         R.backend = NULL;
     }
+    return 0;
+}
+
+static void prof_off(void)
+{
+    gpu3d_set_msaa(0);
+    gpu3d_set_vshader(0);
+    gpu3d_set_wc(0);
+    gpu3d_set_tex16(0);
+    gpu3d_set_etc1(0);
+    gpu3d_set_fs2(0);
+    gpu3d_set_sort(0);
+    gpu3d_set_attr(0);
+}
+
+/* the page after the GPU's frame against the ARM's frame of the same scene (the page was drawn by the GPU just now) */
+static void pixel_check_once(const test_t *t, int n, result_t *r)
+{
+    const size_t np = (size_t)g->w * (size_t)g->h;
+    uint16_t *a = malloc(np * 2);
+    if (!a)
+        return;
+    for (int y = 0; y < g->h; y++)
+        memcpy(a + (size_t)y * g->w, g->px + (size_t)y * g->stride, (size_t)g->w * 2);
+    const r3d_backend_t *be = R.backend;
+    gpu3d_drop();
+    R.backend = NULL;
+    t->frame(n, 0);
+    R.backend = be;
+    r->chk = 1;
+    r->chk_px = (int)np;
+    r->chk_box[0] = r->chk_box[1] = 1 << 20;
+    r->chk_box[2] = r->chk_box[3] = -1;
+    for (int y = 0; y < g->h; y++)
+        for (int x = 0; x < g->w; x++) {
+            const uint16_t p = a[(size_t)y * g->w + x], q = g->px[(size_t)y * g->stride + x];
+            r->chk_ink_gpu += p != a[0];
+            r->chk_ink_arm += q != g->px[0];
+            if (p == q)
+                continue;
+            int d = abs((p >> 11) - (q >> 11));
+            const int dg = abs(((p >> 5) & 63) - ((q >> 5) & 63)) / 2, db = abs((p & 31) - (q & 31));
+            if (dg > d) d = dg;
+            if (db > d) d = db;
+            if (!r->chk_diff) {
+                r->chk_gpu[0] = p;
+                r->chk_arm[0] = q;
+            }
+            r->chk_diff++;
+            if (x < r->chk_box[0]) r->chk_box[0] = x;
+            if (y < r->chk_box[1]) r->chk_box[1] = y;
+            if (x > r->chk_box[2]) r->chk_box[2] = x;
+            if (y > r->chk_box[3]) r->chk_box[3] = y;
+            if (d > 2)
+                r->chk_big++;
+            if (d > r->chk_max)
+                r->chk_max = d;
+        }
+    for (int gy = 0; gy < 8; gy++)
+        for (int gx = 0; gx < 16; gx++) {
+            const int x = gx * (g->w / 16) + g->w / 32, y = gy * (g->h / 8) + g->h / 16;
+            r->chk_grid[0][gy][gx] = a[(size_t)y * g->w + x];
+            r->chk_grid[1][gy][gx] = g->px[(size_t)y * g->stride + x];
+        }
+    if (r->chk_diff) {                  /* the box's centre and three of its points, both renders */
+        const int px[4][2] = { { (r->chk_box[0] + r->chk_box[2]) / 2, (r->chk_box[1] + r->chk_box[3]) / 2 },
+                               { r->chk_box[0], r->chk_box[1] }, { r->chk_box[2], r->chk_box[3] },
+                               { (r->chk_box[0] + r->chk_box[2]) / 2, r->chk_box[1] } };
+        for (int k = 0; k < 4; k++) {
+            r->chk_gpu[k + 1] = a[(size_t)px[k][1] * g->w + px[k][0]];
+            r->chk_arm[k + 1] = g->px[(size_t)px[k][1] * g->stride + px[k][0]];
+        }
+    }
+    free(a);
+    t->frame(n, 0);                     /* the GPU's frame again, as the ramp expects */
+    gpu3d_flush(g, 0);
+}
+
+/* a first frame with nothing in it (a hero alone is off the screen) proves nothing: try again with four times the load */
+static void pixel_check(const test_t *t, int n, result_t *r)
+{
+    for (int tries = 0; tries < 4; tries++) {
+        r->chk_diff = r->chk_big = r->chk_max = 0;
+        r->chk_ink_gpu = r->chk_ink_arm = 0;
+        pixel_check_once(t, n, r);
+        if (r->chk_ink_gpu || r->chk_ink_arm || n * 4 > t->max)
+            break;
+        n *= 4;
+        t->frame(n, 0);
+        gpu3d_flush(g, 0);
+    }
+}
+
+static void ramp(int ti, int pf)
+{
+    const test_t *t = &tests[ti];
+    result_t *r = &res[ti][pf];
+    static sample_t s[64];
+    int ns = 0, colour_only = 0;        /* colour_only: the backend is the Mali's (flat colours) */
+    if (prof_on(pf, &colour_only))
+        return;
     cur_2d = prof[pf].two_d;
+    cur_qpu = pf == PF_QPU;
     if (t->setup)
         t->setup();
+    for (int k = 0; k < 4; k++)
+        r->ms_n[k] = r->tris_n[k] = -1;
+    if (t->probe && R.backend) {
+        t->probe(&r->probe_gl, &r->probe_meshes);
+        r->probed = 1;
+        r->vs_probe = gpu3d_vshader();
+    }
     const int frames = P->quick ? 1 : 6, max = P->quick ? (t->start + 3 > 8 ? t->start + 3 : 8) : t->max;
     const uint32_t t0 = P->us();
     gpu3d_stats_t st;
@@ -976,6 +1677,10 @@ static void ramp(int ti, int pf)
         t->frame(n, 0);                 /* warm: textures, corners, caches */
         if (R.backend)
             gpu3d_flush(g, 0);
+        if (colour_only && R.backend && !r->chk && !t->frame2d)
+            pixel_check(t, n, r);
+        if (t->frame2d)
+            t->frame2d(n, 0);
         gpu3d_set_queue(prof[pf].queue);
         gpu3d_take_stats(&st);
         fill_px = 0;
@@ -986,14 +1691,20 @@ static void ramp(int ti, int pf)
             const uint32_t u0 = P->us();
             t->frame(n, f);
             if (R.backend && prof[pf].queue) {
-                gpu3d_submit(g, 0);     /* the GPU draws while the ARM works (M35) */
+                gpu3d_submit(g, 0);     /* the GPU draws while the ARM works (bm3d 4.1) */
                 work(t->work);
-                gpu3d_sync();
+                if (!(prof[pf].queue == 2 && gpu3d_pipelined() && !t->frame2d)) {   /* else the next submit waits for this frame */
+                    const uint32_t w0 = P->us();
+                    gpu3d_sync();
+                    a.sync_ms += (float)(P->us() - w0) / 1000.0f;
+                }
             } else {
                 if (R.backend)
                     gpu3d_flush(g, 0);
                 work(t->work);
             }
+            if (t->frame2d)
+                t->frame2d(n, f);       /* the 2D on the page the job has finished */
             counts(&c1);
             const uint32_t u1 = P->us();
             a.tris_in += (float)R.tris_in;
@@ -1002,6 +1713,7 @@ static void ramp(int ti, int pf)
             a.pixels += (float)R.pixels;
             overlay(t, pf, n, a.ms / (float)(f > 1 ? f - 1 : 1), ti);
             const uint32_t show = P->present();
+            shot_page();
             const float ms = (float)(u1 - u0 + show) / 1000.0f;
             a.ms += ms;
             fms[f - 1] = ms;
@@ -1016,18 +1728,38 @@ static void ramp(int ti, int pf)
             if (stopping())
                 break;
         }
+        if (R.backend && prof[pf].queue)
+            gpu3d_sync();               /* the last frame of the step, if it was left in flight */
         gpu3d_set_queue(0);
         if (halted)
             break;                      /* a step not finished: not a sample */
+        if (colour_only && !R.backend) {
+            ns = 0;                     /* the backend handed over to the ARM during the step (r3d to_arm): these are
+                                         * the ARM's numbers, no GPU row */
+            break;
+        }
         gpu3d_take_stats(&st);
         const float k = 1.0f / (float)frames;
         a.ms = b3d_median(fms, frames);     /* the counters below: the mean */
         a.instr *= k; a.wait_instr *= k; a.dmiss *= k; a.cycles *= k;
         a.tris_in *= k; a.tris *= k; a.verts *= k; a.pixels *= k;
         a.fill = fill_px * k;
+        a.sync_ms *= k;
         a.gpu_ms = (float)gpu3d_busy_us(&st) * k / 1000.0f;
         a.wait_ms = a.gpu_ms;           /* the ARM waits for every job (with the queue: at most) */
         a.jobs = (float)st.jobs * k;
+        a.bin_us = (float)st.bin_us * k;
+        a.rnd_us = (float)st.render_us * k;
+        a.draws = (float)st.draws * k;
+        a.mesh_us = (float)st.mesh_us * k;
+        a.b1_us = (float)st.b1_us * k;
+        a.b2_us = (float)st.b2_us * k;
+        a.b3_us = (float)st.b3_us * k;
+        a.sort_us = (float)st.sort_us * k;
+        a.build_us = (float)st.build_us * k;
+        a.jobs_us = (float)st.jobs_us * k;
+        a.flush_us = (float)st.flush_us * k;
+        a.resolve_us = (float)st.resolve_us * k;
         a.gltris = (float)st.gltris * k;
         a.clean_kcyc = (float)st.clean_cyc * k / 1000.0f;
         a.inval_kcyc = (float)st.inval_cyc * k / 1000.0f;
@@ -1037,12 +1769,12 @@ static void ramp(int ti, int pf)
         if (P->clocks)
             P->clocks(&a.core_mhz, &a.gpu_mhz);
         s[ns++] = a;
-        char line[192];
+        char line[224];
         ksnprintf(line, sizeof line, "b3d %s %s n=%d %d.%02d ms worst %d.%02d, %d tri, %d vtx, %lu instr, "
-                  "GPU %d.%02d ms, %d jobs, core %lu GPU %lu MHz", t->id, prof[pf].name, n, (int)a.ms,
+                  "GPU %d.%02d ms, %d jobs, %d draws, %d meshes, core %lu GPU %lu MHz", t->id, prof[pf].name, n, (int)a.ms,
                   (int)(a.ms * 100) % 100, (int)a.worst, (int)(a.worst * 100) % 100, (int)a.tris, (int)a.verts,
                   (unsigned long)a.instr, (int)a.gpu_ms, (int)(a.gpu_ms * 100) % 100, (int)a.jobs,
-                  (unsigned long)a.core_mhz, (unsigned long)a.gpu_mhz);
+                  (int)((float)st.draws * k + 0.5f), (int)((float)st.glmeshes * k + 0.5f), (unsigned long)a.core_mhz, (unsigned long)a.gpu_mhz);
         if (P->log)
             P->log(line);
         if (a.ms > LIMIT_MS || P->us() - t0 > RAMP_US || (R.backend && gpu3d_failed()))
@@ -1051,14 +1783,7 @@ static void ramp(int ti, int pf)
     }
     if (t->teardown)
         t->teardown();
-    gpu3d_set_msaa(0);
-    gpu3d_set_vshader(0);
-    gpu3d_set_wc(0);
-    gpu3d_set_tex16(0);
-    gpu3d_set_etc1(0);
-    gpu3d_set_fs2(0);
-    gpu3d_set_sort(0);
-    gpu3d_set_attr(0);
+    prof_off();
     cur_2d = 0;
     r->ran = ns > 0;
     r->nsamples = ns;
@@ -1107,6 +1832,137 @@ static void ramp(int ti, int pf)
     for (int i = 0; i < ns; i++)
         if (s[i].ms <= MS60)
             r->at = s[i];
+    for (int i = 0; i < ns; i++)
+        if (s[i].n >= 1 && s[i].n <= 4) {
+            r->ms_n[s[i].n - 1] = s[i].ms;
+            r->tris_n[s[i].n - 1] = s[i].tris_in;
+        }
+    if (prof[pf].queue == 2) {
+        float sl[64];
+        for (int i = 0; i < ns; i++) {
+            const float arm = s[i].ms - s[i].sync_ms;
+            sl[i] = arm > s[i].gpu_ms ? arm : s[i].gpu_ms;
+        }
+        r->later = 1;
+        r->tris60_l = b3d_load_at(stri, sl, ns, MS60);
+        r->drawn60_l = b3d_load_at(sdrawn, sl, ns, MS60);
+        if (b3d_load_at(sn, sl, ns, MS60) < 0) {
+            const float k = sl[0] > 0 ? MS60 / sl[0] : 0;
+            r->tris60_l = s[0].tris_in * k;
+            r->drawn60_l = s[0].tris * k;
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- the stress test */
+
+#define STRESS_US 3000000u              /* each load runs 3 s (6 frames in the quick run of the PC) */
+
+typedef struct {
+    int ran, n, frames, drops, failed;  /* failed: the driver gave up (V3D hang or timeout) during the load */
+    float secs, tris_in, ms, worst, arm_ms, gpu_ms, jobs;
+    uint32_t pool_kb, ovf_kb, ovf_jobs;
+} stress_t;
+
+static stress_t stress_r[2];            /* 1x, 2x */
+static int stress_pf = -1;              /* the profile of the rows (-1: the test did not run) */
+static float stress_n60;                /* the ramp's load at 60 fps, in quarter sets (-1: below the first step) */
+
+/* the frame of test ti on profile pf with n quarter sets, for STRESS_US: the mean ms, the worst, the frames over
+ * 16.7 ms (drops), the ARM's ms (less the wait for the GPU), the GPU's ms and the binner's memory */
+static void stress_run(int ti, int pf, int n, stress_t *o)
+{
+    const test_t *t = &tests[ti];
+    int colour_only = 0;
+    memset(o, 0, sizeof *o);
+    o->n = n;
+    if (prof_on(pf, &colour_only))
+        return;
+    cur_2d = prof[pf].two_d;
+    cur_qpu = 0;
+    if (t->setup)
+        t->setup();
+    gpu3d_stats_t st;
+    t->frame(n, 0);
+    if (R.backend)
+        gpu3d_flush(g, 0);
+    if (t->frame2d)
+        t->frame2d(n, 0);
+    gpu3d_set_queue(prof[pf].queue);
+    gpu3d_take_stats(&st);
+    fill_px = 0;
+    float sync_ms = 0, sum_ms = 0;
+    const uint32_t t0 = P->us();
+    for (int f = 1; !stopping(); f++) {
+        const uint32_t u0 = P->us();
+        t->frame(n, f);
+        if (R.backend && prof[pf].queue) {
+            gpu3d_submit(g, 0);
+            work(t->work);
+            if (!(prof[pf].queue == 2 && gpu3d_pipelined() && !t->frame2d)) {   /* else the next submit waits for this frame */
+                const uint32_t w0 = P->us();
+                gpu3d_sync();
+                sync_ms += (float)(P->us() - w0) / 1000.0f;
+            }
+        } else {
+            if (R.backend)
+                gpu3d_flush(g, 0);
+            work(t->work);
+        }
+        if (t->frame2d)
+            t->frame2d(n, f);
+        const uint32_t u1 = P->us();
+        o->tris_in += (float)R.tris_in;
+        overlay(t, pf, n, sum_ms / (float)(f > 1 ? f - 1 : 1), ti);
+        const float ms = (float)(u1 - u0 + P->present()) / 1000.0f;
+        shot_page();
+        sum_ms += ms;
+        if (ms > o->worst)
+            o->worst = ms;
+        if (ms > MS60)
+            o->drops++;
+        o->frames = f;
+        if (R.backend && gpu3d_failed()) {
+            o->failed = 1;
+            break;
+        }
+        if (P->quick ? f >= 6 : P->us() - t0 >= STRESS_US)
+            break;
+    }
+    if (R.backend && prof[pf].queue)
+        gpu3d_sync();
+    gpu3d_set_queue(0);
+    gpu3d_take_stats(&st);
+    const float k = o->frames > 0 ? 1.0f / (float)o->frames : 0;
+    o->secs = (float)(P->us() - t0) / 1e6f;
+    o->ms = sum_ms * k;
+    o->tris_in *= k;
+    o->arm_ms = (sum_ms - sync_ms) * k;
+    o->gpu_ms = (float)gpu3d_busy_us(&st) * k / 1000.0f;
+    o->jobs = (float)st.jobs * k;
+    o->pool_kb = (st.pool_max + 1023) / 1024;
+    o->ovf_kb = (st.ovf_max + 1023) / 1024;
+    o->ovf_jobs = st.ovf_jobs;
+    o->ran = o->frames > 0;
+    if (t->teardown)
+        t->teardown();
+    prof_off();
+    cur_2d = 0;
+}
+
+/* after the ramp of the stress test: 1x = the ramp's load at 60 fps (whole quarter sets, at least 1), then 2x.
+ * After a failure of the driver at 1x the 2x load does not run. */
+static void stress_phase(int ti, int pf)
+{
+    const result_t *r = &res[ti][pf];
+    if (!r->ran || halted)
+        return;
+    stress_pf = pf;
+    stress_n60 = r->n60;
+    const int n1 = r->n60 >= 1.0f ? (int)r->n60 : 1;
+    stress_run(ti, pf, n1, &stress_r[0]);
+    if (!stress_r[0].failed && !halted)
+        stress_run(ti, pf, 2 * n1, &stress_r[1]);
 }
 
 /* ---------------------------------------------------------------- the score */
@@ -1300,6 +2156,134 @@ static const char *f2(char *b, float v)
     return b;
 }
 
+static int test_idx(const char *id)
+{
+    for (int ti = 0; ti < NTESTS; ti++)
+        if (!strcmp(tests[ti].id, id))
+            return ti;
+    return -1;
+}
+
+/* the fade test on the QPU profile: which path ran, and its load and time against the ARM */
+static void report_qpufade(void)
+{
+    int ti = 0;
+    while (ti < NTESTS && strcmp(tests[ti].id, "fade"))
+        ti++;
+    if (ti >= NTESTS || !res[ti][PF_QPU].ran)
+        return;
+    const result_t *q = &res[ti][PF_QPU], *a = &res[ti][PF_ARM];
+    char b1[16], b2[16], b3[16], b4[16];
+    put("qpufade %s n60_qpu=%s ms_qpu=%s n60_arm=%s ms_arm=%s (n60: lamps at 60 fps; ms: 1 lamp)\n", fade_line,
+        f1(b1, q->n60), f1(b2, q->ms_n[0]), a->ran ? f1(b3, a->n60) : "NA", a->ran ? f1(b4, a->ms_n[0]) : "NA");
+}
+
+/* Q1, how many hero triangles hold 60 fps: one H line a profile of a test with a probe (herotris).
+ * sets60 = the sets (a hero, its shadow, a map of 100 pieces) a frame of 60 fps holds; hero_tris60 the hero
+ * mesh's triangles in them (1536 a set, without the shadow), hero_shadow_tris60 with the shadow; submitted60
+ * and drawn60 the triangles given to r3d and the ones left after its clip (tris60 and drawn60 of the R line);
+ * mesh: what the vertex shader did with one hero alone (ACCEPTED: 1536 triangles placed by the mesh path;
+ * FALLBACK: 0, the triangles went one by one; PARTIAL; NA: no vertex shader in the profile). arm_ms is ms
+ * less the wait in gpu3d_sync(). The later_ columns (queue 2) are a model, see BENCH3D.md. */
+static void report_hero(void)
+{
+    char a[16], b[16], c[16], d[16], e[16], f[16];
+    int head = 0;
+    for (int ti = 0; ti < NTESTS; ti++) {
+        if (!tests[ti].probe)
+            continue;
+        for (int pf = 0; pf < NPROF; pf++) {
+            const result_t *r = &res[ti][pf];
+            if (!r->ran)
+                continue;
+            if (!head) {
+                put("hero triangles at 60 fps (640x360; a set is a hero of 1536 triangles, its shadow and a map of 5000)\n");
+                put("columns H,test,profile,sets60,hero_tris60,hero_shadow_tris60,submitted60,drawn60,ms,gpu_ms,arm_ms,mesh,"
+                    "probe_gltris,probe_meshes,vs_probe,later_submitted60,later_drawn60\n");
+                head = 1;
+            }
+            const sample_t *s = &r->at;
+            const float per = s->n > 0 && s->tris_in > 0 ? s->tris_in / (float)s->n : 8036.0f;
+            const float sets = r->tris60 / per;
+            const char *mesh = !prof[pf].vs || !r->probed ? "NA" : r->probe_gl >= 1536 ? "ACCEPTED"
+                               : r->probe_gl == 0 ? "FALLBACK" : "PARTIAL";
+            put("H,%s,%s,%s,%d,%d,%d,%d,%s,%s,%s,%s,%d,%d,%d,%s,%s\n", tests[ti].id, prof[pf].name, f2(a, sets),
+                (int)(sets * 1536.0f + 0.5f), (int)(sets * 3072.0f + 0.5f), (int)(r->tris60 + 0.5f),
+                (int)(r->drawn60 + 0.5f), f1(b, s->ms), f1(c, s->gpu_ms), f1(d, s->ms - s->sync_ms), mesh, r->probe_gl,
+                r->probe_meshes, r->vs_probe, r->later ? f1(e, r->tris60_l) : "-", r->later ? f1(f, r->drawn60_l) : "-");
+        }
+    }
+}
+
+/* Q2, the cost of the cel shader: one C line a profile and step n (1 to 4): the ms of the same n heroes in
+ * the five cel tests (lit, cel with 4 bands; dither on, off; outline) and the ratios against the lit hero. */
+static void report_cel(void)
+{
+    static const char *const id[5] = { "cel_lit", "cel", "cel_lit_nd", "cel_nd", "cel_outline" };
+    int ti[5], ok = 1;
+    for (int k = 0; k < 5; k++) {
+        ti[k] = test_idx(id[k]);
+        ok = ok && ti[k] >= 0;
+    }
+    if (!ok)
+        return;
+    int head = 0;
+    for (int pf = 0; pf < NPROF; pf++) {
+        if (!res[ti[0]][pf].ran && !res[ti[1]][pf].ran)
+            continue;
+        for (int n = 1; n <= 4; n++) {
+            float ms[5];
+            for (int k = 0; k < 5; k++)
+                ms[k] = res[ti[k]][pf].ran ? res[ti[k]][pf].ms_n[n - 1] : -1;
+            if (ms[0] < 0 && ms[1] < 0)
+                continue;
+            if (!head) {
+                put("cel cost: the same n heroes (1536 triangles each, lit by the sun), ms a frame; "
+                    "cel = 4 bands, floor 0.35; nd = dither off; outline = hull 0.03, colour 0x2030A0, no bands\n");
+                put("columns C,profile,n,tris,lit,cel,lit_nd,cel_nd,outline,cel_over_lit,cel_nd_over_lit_nd,outline_over_lit\n");
+                head = 1;
+            }
+            char v[5][16], q1[16], q2[16], q3[16];
+            float tr = 0;                       /* the triangles given at this n (the same in the four tests) */
+            for (int k = 0; k < 5; k++) {
+                f2(v[k], ms[k]);
+                if (res[ti[k]][pf].ran && res[ti[k]][pf].tris_n[n - 1] > tr)
+                    tr = res[ti[k]][pf].tris_n[n - 1];
+            }
+            f2(q1, ms[0] > 0 && ms[1] > 0 ? ms[1] / ms[0] : -1);
+            f2(q2, ms[2] > 0 && ms[3] > 0 ? ms[3] / ms[2] : -1);
+            f2(q3, ms[0] > 0 && ms[4] > 0 ? ms[4] / ms[0] : -1);
+            put("C,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s\n", prof[pf].name, n, (int)(tr + 0.5f), v[0], v[1],
+                v[2], v[3], v[4], q1, q2, q3);
+        }
+    }
+}
+
+/* The stress test: the ramp's load at 60 fps (n60, quarter sets) and the frame at 1x and 2x of it. One T line a
+ * load; ms the mean, worst the slowest frame, drops the frames over 16.7 ms, arm_ms the ARM's work less its wait for
+ * the GPU, gpu_ms the V3D's busy time, pool_kb and ovf_kb the binner's memory, v3d_failed 1 if the driver gave up. */
+static void report_stress(void)
+{
+    if (stress_pf < 0)
+        return;
+    char a[16];
+    put("stress path=%s n60=%s (quarter sets: 4 are one herotris set of 8036 triangles) secs=%d each\n",
+        prof[stress_pf].name, f1(a, stress_n60), P->quick ? 0 : (int)(STRESS_US / 1000000u));
+    put("columns T,profile,load,n,tris_in,frames,secs,ms,worst,drops,arm_ms,gpu_ms,jobs,pool_kb,ovf_kb,ovf_jobs,v3d_failed\n");
+    for (int k = 0; k < 2; k++) {
+        const stress_t *o = &stress_r[k];
+        if (!o->ran) {
+            put("T,%s,%dx,not_run\n", prof[stress_pf].name, k + 1);
+            continue;
+        }
+        char b[6][16];
+        put("T,%s,%dx,%d,%d,%d,%s,%s,%s,%d,%s,%s,%s,%lu,%lu,%lu,%d\n", prof[stress_pf].name, k + 1, o->n, (int)o->tris_in,
+            o->frames, f1(b[0], o->secs), f1(b[1], o->ms), f1(b[2], o->worst), o->drops, f1(b[3], o->arm_ms),
+            f1(b[4], o->gpu_ms), f1(b[5], o->jobs), (unsigned long)o->pool_kb, (unsigned long)o->ovf_kb,
+            (unsigned long)o->ovf_jobs, o->failed);
+    }
+}
+
 static void report(void)
 {
     rep_len = 0;
@@ -1310,6 +2294,9 @@ static void report(void)
     put("machine %s\n", P->machine ? P->machine : "?");
     put("gpu %s\n", gpu3d_status());
     put("probes %s\n", gpu3d_probe_log()[0] ? gpu3d_probe_log() : "none");
+    put("size %dx%d (the page and the render; the bench has no other output size: no 720x405 and no 1080p mode)\n", W, H);
+    put("vsprobe gpu3d_vshader=%d (0 none, 1 scenery, 2 heroes) queue_ok=%d queue2=%d\n", gpu3d_vshader(), gpu3d_queue_ok(),
+        gpu3d_queue2());
     put("options %s (at the start; each profile sets its own)\n", opts_start);
     put("counters %s\n",P->counting ? pmu_name() : "none");
     put("previous %s\n", prev_name[0] ? prev_name : "none");
@@ -1318,7 +2305,7 @@ static void report(void)
             P->only_profiles ? P->only_profiles : "all");
     put("columns R,test,profile,version,n60,n30,over,ms,worst,tris_in,tris,verts,pixels,gltris,jobs,gpu_ms,"
         "instr,wait_instr,dmiss,cycles,secs,tris60,drawn60,core_mhz,gpu_mhz,clean_kcyc,inval_kcyc,pool_kb,ovf_kb,"
-        "ovf_jobs,fill_px,ns_px_gpu,ns_px_frame,gpu0_ms\n");
+        "ovf_jobs,fill_px,ns_px_gpu,ns_px_frame,gpu0_ms,bin_us,rnd_us,draws,mesh_us,flush_us,resolve_us,sort_us,build_us,jobs_us,b1_us,b2_us,b3_us\n");
     char a[16], b[16], c[16], d[16], e[16], f[16], g1[16], g2[16];
     for (int ti = 0; ti < NTESTS; ti++) {
         const test_t *t = &tests[ti];
@@ -1333,7 +2320,7 @@ static void report(void)
             const sample_t *s = &r->at;
             char h1[16], h2[16], h3[16];
             put("R,%s,%s,%s,%s,%s,%d,%s,%s,%d,%d,%d,%d,%d,%s,%s,%lu,%lu,%lu,%lu,%d,%d,%d,%lu,%lu,%s,%s,%lu,%lu,%lu,"
-                "%lu,%s,%s,%s\n",
+                "%lu,%s,%s,%s,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
                 t->id, prof[pf].name,
                 prof_version(pf), f1(a, r->n60), f1(b, r->n30), r->over, f1(c, s->ms), f1(d, s->worst),
                 (int)s->tris_in, (int)s->tris, (int)s->verts, (int)s->pixels, (int)s->gltris, f1(e, s->jobs),
@@ -1341,7 +2328,11 @@ static void report(void)
                 (unsigned long)s->cycles, (int)r->secs, (int)(r->tris60 + 0.5f), (int)(r->drawn60 + 0.5f),
                 (unsigned long)s->core_mhz, (unsigned long)s->gpu_mhz, f1(g1, s->clean_kcyc), f1(g2, s->inval_kcyc),
                 (unsigned long)s->pool_kb, (unsigned long)s->ovf_kb, (unsigned long)s->ovf_jobs,
-                (unsigned long)s->fill, f2(h1, r->ns_gpu), f2(h2, r->ns_ms), f2(h3, r->gpu0_ms));
+                (unsigned long)s->fill, f2(h1, r->ns_gpu), f2(h2, r->ns_ms), f2(h3, r->gpu0_ms),
+                (unsigned long)(s->bin_us + 0.5f), (unsigned long)(s->rnd_us + 0.5f), (unsigned long)(s->draws + 0.5f),
+                (unsigned long)(s->mesh_us + 0.5f), (unsigned long)(s->flush_us + 0.5f), (unsigned long)(s->resolve_us + 0.5f),
+                (unsigned long)(s->sort_us + 0.5f), (unsigned long)(s->build_us + 0.5f), (unsigned long)(s->jobs_us + 0.5f),
+                (unsigned long)(s->b1_us + 0.5f), (unsigned long)(s->b2_us + 0.5f), (unsigned long)(s->b3_us + 0.5f));
         }
     }
     /* the cost of a pixel (the fills and the 2D): ns a pixel = ms a Mpixel,
@@ -1369,6 +2360,37 @@ static void report(void)
                 f2(v[1], r->ns_ms), f2(v[2], r->gpu0_ms), v[3], v[4], v[5], v[6], v[7], v[8]);
         }
     }
+    put("pixel check: the first frame of a Mali row drawn by the GPU against the ARM's (RGB565 page; diff: pixels that "
+        "differ, big: by more than 2 steps of a channel, max: the largest step)\n");
+    put("columns K,test,profile,pixels,diff,big,max\n");
+    for (int ti = 0; ti < NTESTS; ti++)
+        for (int pf = 0; pf < NPROF; pf++)
+            if (res[ti][pf].chk)
+            {
+                const result_t *rk = &res[ti][pf];
+                for (int w = 0; w < 2; w++)
+                    for (int gy = 0; gy < 8; gy++) {
+                        put("KG,%s,%s,%s,%d", tests[ti].id, prof[pf].name, w ? "arm" : "gpu", gy);
+                        for (int gx = 0; gx < 16; gx++)
+                            put(" %04x", rk->chk_grid[w][gy][gx]);
+                        put("\n");
+                    }
+                put("KC,%s,%s,%d,%d\n", tests[ti].id, prof[pf].name, rk->chk_ink_gpu, rk->chk_ink_arm);
+                put("K,%s,%s,%d,%d,%d,%d\n", tests[ti].id, prof[pf].name, rk->chk_px, rk->chk_diff, rk->chk_big,
+                    rk->chk_max);
+                if (rk->chk_diff)
+                    put("KD,%s,%s,box %d %d %d %d,gpu/arm first %04x/%04x centre %04x/%04x top-left %04x/%04x "
+                        "bottom-right %04x/%04x top-middle %04x/%04x\n", tests[ti].id, prof[pf].name, rk->chk_box[0],
+                        rk->chk_box[1], rk->chk_box[2], rk->chk_box[3], rk->chk_gpu[0], rk->chk_arm[0], rk->chk_gpu[1],
+                        rk->chk_arm[1], rk->chk_gpu[2], rk->chk_arm[2], rk->chk_gpu[3], rk->chk_arm[3], rk->chk_gpu[4],
+                        rk->chk_arm[4]);
+            }
+    report_hero();
+    report_cel();
+    report_stress();
+    if (qpu_line[0])
+        put("qpu row (gpu3d_qpu=1): %s\n", qpu_line);
+    report_qpufade();
     /* the score (its S lines read by the next run) and the triangles at 60 fps */
     int sc[NDRV], nt[NDRV];
     for (int d = 0; d < NDRV; d++)
@@ -1442,7 +2464,7 @@ static void read_prev(void)
 #define C_HW    g16_rgb(255, 90, 90)
 
 static const uint16_t prof_col[NPROF] = { 0xFC00 /* orange */, 0x2D7F, 0x8C1F, 0x07F0, 0x07E0, 0xFFE0, 0xF81F, 0x7BEF,
-                                         0xFD20, 0xAFE5, 0x5D7F, 0xB5B6, 0x4FFF, 0xFFFF, 0xFBEF, 0xA7F9 };
+                                         0xFD20, 0xAFE5, 0x5D7F, 0xB5B6, 0x4FFF, 0xFFFF, 0xFBEF, 0xA7F9, 0xFE60, 0xF81F };
 
 static void text(int x, int y, uint16_t c, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 static void text(int x, int y, uint16_t c, const char *fmt, ...)
@@ -1499,9 +2521,9 @@ static int pages(void) { return 4 + NTESTS; }     /* the score, the summary in t
 
 /* the profiles' short names, for the summary's columns (a legend under it) */
 static const char *const prof_short[NPROF] = { "ARM", "GPU", "AA", "VS1", "VS", "VSQ", "Q", "WC", "2D", "VSQ2", "T16",
-                                               "FS2", "VSS", "VSF", "VSA", "ETC1" };
+                                               "FS2", "VSS", "VSF", "VSA", "ETC1", "VSAQ", "QPU" };
 #define SX 90                           /* the summary: the profiles' columns from x SX, SW pixels each */
-#define SW 27
+#define SW 25
 #define S_BEST (SX + SW * NPROF + 6)
 #define S_ROWS 15                       /* tests on the summary's first page */
 
@@ -1582,7 +2604,7 @@ static void page_summary(int part)
             k++;
         }
     y += LH * ((k + 5) / 6 > 1 ? (k + 5) / 6 : 1) + 6;
-    text(0, y, C_DIM, "AA VS1 VS VSQ Q WC 2D VSQ2 T16 FS2 VSS VSF VSA ETC1: GPU+AA, GPU+VS1... (the profiles: the next page)");
+    text(0, y, C_DIM, "AA VS1 VS VSQ Q WC 2D VSQ2 T16 FS2 VSS VSF VSA ETC1 QPU: GPU+AA, GPU+VS1... (the profiles: the next page)");
     y += LH;
     if (fut[0])
         text(0, y, C_DIM, "later: %s; %s%s", fut, prev_name[0] ? "against " : "the first report", prev_name);
@@ -1690,19 +2712,19 @@ static void page_info(const char *saved)
          prof_version(PF_ARM), prof_version(PF_GPU), prof_version(PF_AA), prof_version(PF_VS1),
          prof_version(PF_VS));
     y += LH;
-    text(0, y, gpu3d_queue_ok() ? C_TEXT : C_DIM, "GPU+Q, GPU+VS+Q: GPU and GPU+VS with the frame in the queue (M35: "
+    text(0, y, gpu3d_queue_ok() ? C_TEXT : C_DIM, "GPU+Q, GPU+VS+Q: GPU and GPU+VS with the frame in the queue (bm3d 4.1: "
          "the ARM goes on while the GPU draws)%s", gpu3d_queue_ok() ? "" : ", not on this GPU");
     y += LH;
-    text(0, y, C_TEXT, "GPU+WC: jobs' memory uncached (M35, 4.5); GPU+2D: the 2D over the 3D in its job (M37, 4.8)");
+    text(0, y, C_TEXT, "GPU+WC: jobs' memory uncached (4.5); GPU+2D: the 2D over the 3D in its job (4.8)");
     y += LH;
     text(0, y, C_TEXT, "GPU+VS+Q2: two jobs in flight (5.1); GPU+T16: 16-bit textures (5.2); GPU+ETC1: opaque as ETC1 (7.3)");
     y += LH;
-    text(0, y, C_TEXT, "GPU+FS2: textured faces' pixel shaders with two threads (M39, 5.3); GPU+VS+S: meshes "
+    text(0, y, C_TEXT, "GPU+FS2: textured faces' pixel shaders with two threads (5.3); GPU+VS+S: meshes "
                        "nearest first (5.4)");
     y += LH;
     text(0, y, C_TEXT, "GPU+VS+FS2: the vertex shader and the two-thread shaders, the driver as the games get it (6.6)");
     y += LH;
-    text(0, y, C_TEXT, "GPU+VS+A8: the same with compact attributes, colour and light bytes packed (M39, 7.1)");
+    text(0, y, C_TEXT, "GPU+VS+A8: the same with compact attributes, colour and light bytes packed (7.1)");
     y += LH;
     text(0, y, C_DIM, "0.1 and 1.0 no longer run: their bars are the numbers the Pi gave then (docs/GPU-BENCHMARK-REPORT.md)");
     y += LH + 6;
@@ -1737,7 +2759,7 @@ static void page_info(const char *saved)
     y += LH;
     text(0, y, C_DIM, "on the Pi with the drivers before; red line: the hardware's limit (Raspberry Pi: 1 Gpixel/s,");
     y += LH;
-    text(0, y, C_DIM, "1.5 Gtexel/s; the V3D's 3.0 Mtriangles/s measured by the GPU test). Every test goes far beyond");
+    text(0, y, C_DIM, "1.5 Gtexel/s; the V3D's 3.0 Mtriangles/s measured on the Pi). Every test goes far beyond");
     y += LH;
     text(0, y, C_DIM, "today's drivers (up to a frame of 40 ms), so the next ones have room to show.");
 }
@@ -1860,7 +2882,7 @@ static int listed(const char *list, const char *name)
 static int runs(const test_t *t, int pf)
 {
     if (pf == PF_VSF)
-        return (t->profiles & M_GPU) && strcmp(t->id, "bilinear") != 0;
+        return (t->profiles & (M_GPU | M_VS)) && strcmp(t->id, "bilinear") != 0;
     return t->profiles >> pf & 1;
 }
 
@@ -1874,6 +2896,8 @@ int b3d_run(const b3d_platform_t *plat)
     P = plat;
     g = P->g;
     memset(res, 0, sizeof res);
+    memset(stress_r, 0, sizeof stress_r);
+    stress_pf = -1;
     memset(prev, 0, sizeof prev);
     prev_name[0] = 0;
     prev_score = 0;
@@ -1887,11 +2911,22 @@ int b3d_run(const b3d_platform_t *plat)
     const uint32_t t0 = P->us();
     for (int ti = 0; ti < NTESTS && !stopping(); ti++)
         for (int pf = 0; pf < NPROF && !stopping(); pf++)
-            if (!tests[ti].future && runs(&tests[ti], pf) && listed(P->only_tests, tests[ti].id) && prof_listed(pf))
+            if (!tests[ti].future && (!tests[ti].optin || P->only_tests) && runs(&tests[ti], pf) &&
+                (listed(P->only_tests, tests[ti].id) || (tests[ti].group && listed(P->only_tests, tests[ti].group))) &&
+                prof_listed(pf)) {
                 ramp(ti, pf);
+                if (tests[ti].stress)
+                    stress_phase(ti, pf);
+            }
     R.backend = NULL;
     meshes_free();
     r3d_free(&R);
+    qpu_line[0] = 0;
+    if (P->qpu_row && !stopping()) {    /* the QPU row: gpu3d_qpu=1 only */
+        P->qpu_row(qpu_line, sizeof qpu_line);
+        if (P->log && qpu_line[0])
+            P->log(qpu_line);
+    }
     if (stopping()) {                   /* stopped (or the key came with the last frame): no report */
         if (P->log)
             P->log("b3d stopped by the user: no report");

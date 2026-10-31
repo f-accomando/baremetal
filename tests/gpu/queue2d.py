@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-The frame queue's 2D (M35) on the PC: small cartridges run in bmhost-gpu
+The frame queue's 2D (bm3d 4.1) on the PC: small cartridges run in bmhost-gpu
 (the V3D emulated) with the queue off and on, and their frames compared.
 With the queue, the 2D drawn after 3D is recorded while the GPU draws and
 drawn after it, a zclear() between 3D stays inside the GPU's job, and the
@@ -8,7 +8,7 @@ next frame's _update runs while the GPU draws (the 2D it draws goes on the
 next frame's page): the frames must be the same. A cartridge that draws 3D
 in _update gets its _update after the frame again (a line in the log).
 
-M39 (bm3d 6.9): with each frame shown a frame later (gpu3d_later=1, two
+bm3d 6.9: with each frame shown a frame later (gpu3d_later=1, two
 jobs in flight) the frame's job starts at its end and the frame is held
 while the next _update and _draw run on the next page; the held frame gets
 its recorded 2D and is shown at the end of the next one. The first loop
@@ -72,6 +72,10 @@ function _draw()
   spr(1, 150, 120)
   sspr(8, 0, 16, 16, 220, 100, false, false, 2)
   map(0, 0, 0, 160, 4, 1)
+  stack(8, 0, 8, 8, 3, 60, 100, 0.5, 2, 3)         -- sprite stacking: scale and rz
+  camera(4, 3) clip(40, 80, 50, 40)
+  stack(8, 0, 8, 8, 3, 70, 110, 0, 1, 2)           -- with a camera and a clip
+  camera() clip()
   draw3d(cube, 1.5, 0, 0, 0, t * 0.1, 0, 0.5)     -- 3D after the 2D: over it
   draw3d(cube, 0.6, 0.2, -3.0, 0, t * 0.02, 0, 0.2, 64)    -- first person: a zclear inside the job
   rect(150, 20, 200, 60, 0xFFFF00)
@@ -87,11 +91,34 @@ end
 """
 
 
-def run(host, cart, shots, queue, gpu2d=0, later=0):
+MERGE_CART = r"""
+local a, b, t = nil, nil, 0
+function _init()
+  a = mesh_cube(0x3080F0)
+  b = mesh_cube(0xF08030)
+end
+function _update() t = t + 1 end
+function _draw()
+  cls(0x102030)
+  camera3d(0.3 * math.sin(t * 0.05), 3, -9, 0, -0.3, 60)
+  zclear()
+  for i = 0, 5 do
+    for j = 0, 5 do                            -- 36 cubes that stand still, unlit: one run (merges from 32 pieces)
+      draw3d((i + j) %% 2 == 0 and a or b, -5 + 2 * i, 0, 2 * j, 0, 0.3 * i, 0, 0.8, 2)
+    end
+  end
+  draw3d(a, 0, 3, 2, t * 0.05, 0, 0, 1)         -- a lit cube that turns: not held
+  rectfill(10, 10, 60, 20, 0xFF0000)            -- 2D after the 3D: the run is drawn first
+  print("merge " .. t, 4, 160, 0xFFFFFF)
+end
+"""
+
+
+def run(host, cart, shots, queue, gpu2d=0, later=0, extra=""):
     os.makedirs(shots, exist_ok=True)
     for f in os.listdir(shots):
         os.remove(os.path.join(shots, f))
-    env = dict(os.environ, BMHOST_CONFIG=f"gpu3d_vs=2,gpu3d_queue={queue},gpu3d_2d={gpu2d},gpu3d_later={later}",
+    env = dict(os.environ, BMHOST_CONFIG=f"gpu3d_vs=2,gpu3d_queue={queue},gpu3d_2d={gpu2d},gpu3d_later={later}{extra}",
                BMHOST_NONET="1")
     r = subprocess.run([host, cart, "--seconds", "1", "--shots", shots, "--every", "3"], capture_output=True,
                        text=True, env=env)
@@ -143,7 +170,7 @@ def main():
                 differ.append(s)
         check(len(shots) >= 15 and not differ, f"{mode}: {len(shots)} frames, the same with the queue "
               f"({len(differ)} differ: {' '.join(differ[:5])})", logs[0][-500:] + log[-500:])
-        # M39: each frame shown a frame later (two jobs in flight), also with
+        # bm3d 5.1: each frame shown a frame later (two jobs in flight), also with
         # the 2D over the 3D in the GPU's job: the same pictures as without
         # the queue, every one (no _update runs early here). "held" does not
         # read the page at the end of _draw: its last job is still running
@@ -173,7 +200,7 @@ def main():
                   f"{' '.join(differ[:5])})", logl[-800:])
         if mode != "draw":
             continue
-        # M37: the 2D over the 3D drawn by the GPU in its job (gpu3d_2d=1),
+        # bm3d 4.8: the 2D over the 3D drawn by the GPU in its job (gpu3d_2d=1),
         # without and with the queue: the same frames, fewer jobs
         for q in (0, 1):
             d = os.path.join(out, f"{mode}-2d-q{q}")
@@ -188,6 +215,33 @@ def main():
                     differ.append(s)
             check(not differ, f"{mode}, 2D on the GPU, queue {q}: the same frames ({len(differ)} differ: "
                   f"{' '.join(differ[:5])})", log2[-800:])
+    # bm3d 7.6: draw merging (gpu3d_merge, on by default): 36 unlit cubes standing still, drawn in one run (a run merges
+    # from 32 pieces of at most 150 faces), become one mesh from the second frame on; the pictures are the same as
+    # with gpu3d_merge=0 (a pixel or two on an edge may differ: the vertex sums are made in another order), the
+    # vertex shader is given 36 meshes less
+    cart = os.path.join(out, "merge.bm")
+    with open(cart, "wb") as f:
+        f.write(mkbm.pack((MERGE_CART).replace("%%", "%").encode(), title="queue2d merge", author="bm", res=(320, 180)))
+    res = {}
+    for merge, q in ((0, 1), (1, 1), (1, 0)):
+        d = os.path.join(out, f"merge{merge}-q{q}")
+        code, log = run(host, cart, d, q, extra=f",gpu3d_merge={merge}")
+        check(code == 0 and "Lua error" not in log, f"merge {merge}, queue {q}: runs", log)
+        m = [l for l in log.splitlines() if "vertex shader:" in l]
+        res[(merge, q)] = (d, float(m[0].split("shader: ")[1].split()[0]) if m else -1, log)
+    off, on = res[(0, 1)], res[(1, 1)]
+    check(off[1] >= 36 and 0 < on[1] <= 6, f"merge: {off[1]:.0f} meshes a frame without, {on[1]:.0f} with", off[2] + on[2])
+    for key in ((1, 1), (1, 0)):
+        d = res[key][0]
+        shots = sorted(os.listdir(off[0]))
+        worst = 0
+        for s in shots:
+            a = Image.open(os.path.join(off[0], s)).convert("RGB")
+            b = Image.open(os.path.join(d, s)).convert("RGB")
+            diff = ImageChops.difference(a, b).convert("L").point(lambda v: 255 if v else 0)
+            worst = max(worst, sum(diff.getdata()) // 255)
+        check(len(shots) >= 15 and worst <= 12,
+              f"merge, queue {key[1]}: {len(shots)} frames, at most {worst} pixels differ from gpu3d_merge=0", res[key][2][-500:])
     print(f"\nqueue2d: {'all ok' if not fails else f'{fails} failed'}")
     return 1 if fails else 0
 

@@ -1,12 +1,28 @@
-/* M41: the Mali-G52's descriptors for a draw (see mali_desc.h). Places from Mesa's v7.xml (MIT). */
+/* The Mali-G52's descriptors for a draw (see mali_desc.h). Places from Mesa's v7.xml (MIT). */
 #include "mali_desc.h"
+
+typedef uint32_t __attribute__((may_alias)) md_u32;
 
 void md_bits(uint8_t *p, unsigned start, unsigned size, uint64_t v)
 {
-    for (unsigned i = 0; i < size; i++) {
-        const unsigned b = start + i;
-        if (v >> i & 1)
-            p[b >> 3] |= (uint8_t)(1u << (b & 7));
+    /* a field in one or two 32-bit words when it fits and p is word aligned (a descriptor is); else a byte at a time.
+     * The bit loop took 16 us a draw (G3 report of 26 Oct), the byte loop 2.6 us (kernel 1801, b2_us). */
+    const unsigned sh = start & 31;
+    const uint64_t mask = size >= 64 ? ~0ull : (1ull << size) - 1ull;
+    if (((uintptr_t)p & 3) == 0 && sh + size <= 64) {
+        md_u32 *w = (md_u32 *)p + (start >> 5);
+        const uint64_t t = (v & mask) << sh;
+        w[0] |= (uint32_t)t;
+        if (sh + size > 32)
+            w[1] |= (uint32_t)(t >> 32);
+        return;
+    }
+    while (size) {
+        const unsigned off = start & 7, n = size < 8 - off ? size : 8 - off;
+        p[start >> 3] |= (uint8_t)(((uint32_t)v & ((1u << n) - 1u)) << off);
+        v >>= n;
+        start += n;
+        size -= n;
     }
 }
 
@@ -36,6 +52,8 @@ void md_draw(uint8_t *p, const md_draw_t *s)
     /* instance size and instance primitive size: 1, "padded" 1 is stored as 0 */
     A(p, 4, s->position);
     A(p, 6, s->uniform_buffers);
+    A(p, 8, s->textures);
+    A(p, 10, s->samplers);
     A(p, 12, s->push_uniforms);
     A(p, 14, s->state);
     A(p, 16, s->attribute_buffers);
@@ -46,9 +64,23 @@ void md_draw(uint8_t *p, const md_draw_t *s)
     A(p, 28, s->thread_storage);
 }
 
+void md_rs_texture_count(uint8_t *p, uint32_t n)
+{
+    W(p, 2, 16, 16, n);
+}
+
+static int md_msaa;
+
+void md_set_msaa(int on)
+{
+    md_msaa = on != 0;
+}
+
 void md_renderer_state(uint8_t *p, const md_renderer_state_t *s)
 {
     A(p, 0, s->shader);                         /* Shader: address (words 0-1) */
+    W(p, 2, 0, 16, s->sampler_count);
+    W(p, 2, 16, 16, s->texture_count);
     W(p, 3, 0, 16, s->attribute_count);
     W(p, 3, 16, 16, s->varying_count);
     /* Properties */
@@ -63,9 +95,12 @@ void md_renderer_state(uint8_t *p, const md_renderer_state_t *s)
     }
     /* Multisample, Misc: all samples, no depth test (function Always), the depth range as the shader gives it */
     W(p, 8, 0, 16, 0xffff);
+    if (md_msaa)
+        W(p, 8, 16, 1, 1);                      /* multisample enable */
     W(p, 8, 19, 1, 1);                          /* fixed-function depth range fixed */
     W(p, 8, 20, 1, 1);                          /* shader depth range fixed */
-    W(p, 8, 24, 3, 7);                          /* depth function: always */
+    W(p, 8, 24, 3, s->depth_func ? (uint32_t)s->depth_func - 1 : 7);    /* depth function (default: always) */
+    W(p, 8, 27, 1, (uint32_t)(s->depth_write != 0));    /* depth write mask */
     W(p, 8, 28, 1, 1);                          /* fixed-function near discard */
     W(p, 8, 29, 1, 1);                          /* fixed-function far discard */
     W(p, 9, 21, 3, 7);                          /* Stencil Mask, Misc: alpha test function always */
@@ -184,6 +219,7 @@ void md_tiler_job(uint8_t *j, const md_primitive_t *p, uint64_t tiler, const md_
 {
     md_invocation(j + MD_TJ_INVOCATION, p->index_count);
     md_primitive(j + MD_TJ_PRIMITIVE, p);
+    f32(j + MD_TJ_PRIM_SIZE, 0, 1.0f);           /* Primitive Size: Constant = 1.0f (Mesa line_width / point_size) */
     A(j + MD_TJ_TILER, 0, tiler);
     md_draw(j + MD_TJ_DRAW, d);
 }
@@ -193,4 +229,45 @@ void md_vertex_job(uint8_t *j, uint32_t vertices, const md_draw_t *d)
     md_invocation(j + 32, vertices);
     W(j + MD_VJ_PARAMETERS, 0, 26, 4, 5);       /* job task split */
     md_draw(j + MD_VJ_DRAW, d);
+}
+
+void md_texture(uint8_t *p, uint32_t w, uint32_t h, uint32_t format, uint64_t surfaces)
+{
+    W(p, 0, 0, 4, 2);                           /* type */
+    W(p, 0, 4, 2, 2);                           /* dimension: 2D */
+    W(p, 0, 10, 22, format);
+    W(p, 1, 0, 16, w - 1);
+    W(p, 1, 16, 16, h - 1);
+    W(p, 2, 0, 12, 0 | 1 << 3 | 2 << 6 | 3 << 9);   /* swizzle R G B A */
+    W(p, 2, 12, 4, 2);                          /* texel ordering: linear */
+    /* levels 1, minimum level 0, LODs 0, sample count 1, array size 1, depth 1: "minus 1" and log2 store 0 */
+    A(p, 4, surfaces);
+}
+
+void md_surface(uint8_t *p, uint64_t pointer, uint32_t row_stride, uint32_t surface_stride)
+{
+    A(p, 0, pointer);
+    W(p, 2, 0, 32, row_stride);
+    W(p, 3, 0, 32, surface_stride);
+}
+
+void md_sampler_nearest(uint8_t *p)
+{
+    md_sampler(p, 0);
+}
+
+void md_sampler(uint8_t *p, int linear)
+{
+    W(p, 0, 0, 4, 1);                           /* type */
+    W(p, 0, 8, 4, 9);                           /* wrap R, T, S: clamp to edge */
+    W(p, 0, 12, 4, 9);
+    W(p, 0, 16, 4, 9);
+    W(p, 0, 21, 1, 1);                          /* round to nearest even */
+    W(p, 0, 23, 1, 1);                          /* seamless cube map */
+    W(p, 0, 25, 1, 1);                          /* normalised coordinates */
+    W(p, 0, 26, 1, 1);                          /* clamp integer array indices */
+    W(p, 0, 27, 1, linear ? 0 : 1);             /* minify nearest */
+    W(p, 0, 28, 1, linear ? 0 : 1);             /* magnify nearest */
+    W(p, 0, 30, 2, 1);                          /* mipmap mode: none */
+    /* LODs 0, compare function never, LOD bias 0, anisotropy 1 ("minus 1"), isotropic, border colour 0 */
 }

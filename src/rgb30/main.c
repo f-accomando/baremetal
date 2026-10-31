@@ -38,13 +38,24 @@
 #include "bt/bt.h"
 #include "ui.h"
 #include "battery.h"
+#include "smp.h"
+#include "b3d_rgb30.h"
+#include "net/release.h"
+#include "mbedtls/sha256.h"
 #include "pad.h"
 #include "kernel/ledstate.h"
 #include "kernel/splash.h"
 #include "kernel/notice.h"
+#include "kernel/reports.h"
+#include "kernel/sdlog.h"
 #include "bm/runtime.h"
+#include "bm/r3d.h"
+#include "kernel/offload.h"
+#include "kernel/jobs.h"
 #include "audio/audio.h"
 #include "rk_display.h"
+#include "mali_hw.h"
+#include "mali.h"
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -59,12 +70,118 @@ static framebuffer_t fb;
 
 static void heartbeat(uint32_t tick)
 {
+    fiber_tick();                               /* fiber_over: a fiber past its slice (fiber.h) */
     ledstate_tick(tick * (1000 / TICK_HZ));     /* green on, or a slow blink (ledstate.h) */
     if (tick % (TICK_HZ / 10) == 0)
         crumb_tick(tick * (1000 / TICK_HZ));
 }
 
 extern char _start[];
+
+/* the other cores: 4 in QEMU; on the console the key cores=2, 3 or 4 in bm/config.txt gives that many cores, absent gives one (the development notes, V5) */
+#ifdef PLAT_VIRT
+/* M5: release_check_file hashes a big buffer on a worker; a changed byte is still refused */
+static void smp_selftest_offload(void)
+{
+    enum { N = 256 << 10 };
+    uint8_t *buf = malloc(N);
+    if (!buf)
+        return;
+    for (int i = 0; i < N; i++)
+        buf[i] = (uint8_t)(i * 31 + (i >> 8));
+    release_file_t f = { .size = N };
+    mbedtls_sha256(buf, N, f.sha256, 0);
+    int before = smp_offload_count();
+    int good = release_check_file(&f, buf, N);
+    buf[N / 2] ^= 1;
+    int bad = release_check_file(&f, buf, N);
+    kprintf("smp: offload sha256 %s (%d jobs on workers)%s", good == 0 && bad == -1 ? "ok" : "FAILED",
+            smp_offload_count() - before, "\n");
+    free(buf);
+}
+#ifdef PLAT_VIRT
+/* V1: the same scene drawn by one core and by bands on the workers must give the same pixels */
+static void smp_selftest_raster(void)
+{
+    enum { W = 160, H = 120 };
+    uint16_t *px[2] = { malloc(W * H * 2), malloc(W * H * 2) };
+    uint32_t drawn[2] = { 0, 0 };
+    if (!px[0] || !px[1]) {
+        free(px[0]);
+        free(px[1]);
+        return;
+    }
+    r3d_mesh_t m, mt;
+    g16_sheet_t sheet;
+    if (r3d_mesh_sphere(&m, 10, 14, 0xFF8040, 0x40A0FF) != 0 || r3d_mesh_sphere(&mt, 10, 14, 0, 0) != 0 ||
+        r3d_mesh_alloc_uv(&mt) != 0 || g16_sheet_alloc(&sheet, 32, 32) != 0) {
+        free(px[0]);
+        free(px[1]);
+        return;
+    }
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++)
+            g16_sheet_set(&sheet, x, y, (uint16_t)(x * 2000 + y * 31 + ((x ^ y) & 4) * 900), 1);
+    for (int f = 0; f < mt.nfaces; f++) {
+        mt.colors[f] = R3D_TEXTURED;
+        for (int i = 0; i < 3; i++) {
+            mt.uv[f * 6 + i * 2] = (float)((mt.faces[f * 3 + i] * 5) % 32);
+            mt.uv[f * 6 + i * 2 + 1] = (float)((mt.faces[f * 3 + i] * 3) % 32);
+        }
+    }
+    mt.tex = &sheet;
+    for (int pass = 0; pass < 2; pass++) {
+        g16_t g = { .px = px[pass], .stride = W, .w = W, .h = H, .cx0 = 0, .cy0 = 0, .cx1 = W, .cy1 = H };
+        memset(px[pass], 0, W * H * 2);
+        r3d_bands_set(offload_workers, offload_par, pass);       /* pass 0: one core; pass 1: bands */
+        r3d_t r;
+        if (r3d_init(&r, &g) != 0)
+            continue;
+        r3d_camera(&r, 0, 0, -7, 0, 0, 60);
+        for (int i = 0; i < 5; i++) {
+            const v3_t p = { -2.4f + 1.2f * (float)i, 0.8f * (float)((i * 5) % 3 - 1), (float)(i % 2) };
+            r3d_draw_flags(&r, i == 2 ? &mt : &m, p, 0.3f * (float)i, 0.5f, 0, 1.2f, i & 1 ? R3D_SMOOTH : 0);
+        }
+        r3d_flush(&r);
+        drawn[pass] = r.pixels;
+        r3d_free(&r);
+    }
+    r3d_bands_set(offload_workers, offload_par, 1);
+    kprintf("smp: raster bands %s (%lu pixels by one core, %lu by bands)\n",
+            memcmp(px[0], px[1], W * H * 2) == 0 && drawn[0] == drawn[1] && drawn[0] > 0 ? "ok" : "FAILED",
+            (unsigned long)drawn[0], (unsigned long)drawn[1]);
+    r3d_mesh_free(&m);
+    r3d_mesh_free(&mt);
+    g16_sheet_free(&sheet);
+    free(px[0]);
+    free(px[1]);
+}
+#endif
+#endif
+
+static void smp_boot(void)
+{
+#ifdef PLAT_VIRT
+    const int cores = 4;
+#else
+    const char *c = config_get("cores");
+    const int cores = c && c[0] >= '2' && c[0] <= '4' && !c[1] ? c[0] - '0' : 1;
+#endif
+    if (cores < 2)
+        return;
+    if (smp_start(cores) > 0 && smp_selftest() == 0) {
+        const char *rb = config_get("r3d_bands");
+        r3d_bands_set(offload_workers, offload_par, !(rb && rb[0] == '0'));    /* V1: the ARM raster by bands */
+        const char *mp = config_get("mali_par");
+        mali_par_set(offload_workers, (mp && mp[0] == '0') ? NULL : offload_par);    /* the Mali draw build on the cores */
+        jobs_selftest();
+#ifdef PLAT_VIRT
+        smp_selftest_offload();
+        smp_selftest_raster();
+        smp_selftest_faults();              /* QEMU only: it loses two cores on purpose */
+#endif
+    }
+}
 
 static void print_cpu(void)
 {
@@ -75,7 +192,7 @@ static void print_cpu(void)
             (uint32_t)(midr >> 20) & 0xf, (uint32_t)midr & 0xf,
             (uint32_t)(read_sysreg(CurrentEL) >> 2) & 3,
             (uint32_t)read_sysreg(cntfrq_el0));
-    kprintf("RAM: kernel at %08lx, heap %lu MiB, framebuffers at %08lx; device tree at %08lx\n",
+    kprintf("RAM: kernel at %08lx, heap %lu MB, framebuffers at %08lx; device tree at %08lx\n",
             (uint32_t)(uintptr_t)_start,
             (uint32_t)((heap_end() - heap_start()) >> 20), (uint32_t)PLAT_FB_START,
             (uint32_t)a64_dtb);
@@ -105,6 +222,12 @@ static int l_exit(lua_State *L)
     return 0;
 }
 
+static int l_crash(lua_State *L)
+{
+    (void)L;
+    __builtin_trap();
+}
+
 void ui_serial_repl(void)
 {
     char line[256];
@@ -113,6 +236,8 @@ void ui_serial_repl(void)
     if (L) {
         lua_pushcfunction(L, l_exit);
         lua_setglobal(L, "exit");
+        lua_pushcfunction(L, l_crash);      /* a test of the crash report: a BRK */
+        lua_setglobal(L, "crash");
     }
     repl_done = 0;
     kprintf("Lua %s - exit() or Ctrl-D: back to the menu\n> ", LUA_RELEASE + 4);
@@ -139,8 +264,6 @@ void ui_serial_repl(void)
     kprintf("back to the menu\n");
 }
 
-static void save_prev(void);
-
 static void sd_boot(void)
 {
     ledstate_set(LED_NO_SD, 1);         /* until it is read */
@@ -149,87 +272,26 @@ static void sd_boot(void)
         return;
     }
     if (fat_mount() != 0) {
-        kprintf("SD: %lu MiB (%s), %s\n", sd_blocks() / 2048, sd_controller(), fat_error());
+        kprintf("SD: %lu MB (%s), %s\n", sd_blocks() / 2048, sd_controller(), fat_error());
         return;
     }
     ledstate_set(LED_NO_SD, 0);
+    fat_set_clock(net_time);            /* SNTP time for the file dates, when the net has it */
     kprintf("SD: %s (%s)\n", fat_describe(), sd_controller());
     fat_write_tick = fiber_slice_tick;  /* a fiber's long write gives the CPU back (fat.h) */
     config_load();
     pad_config();                       /* confirm= */
-    save_prev();
+    sdlog_prev();
 }
 
 static int booting = 1;                 /* until "ready" */
-
-/* The run before, kept for a post-mortem (2026-10-10, a black screen after
- * an update): bm/bootprev.txt = its bm/bootlog.txt (about to be written
- * again) and the last 4 KiB it printed, as the RAM kept them through the
- * restart (crumbs.c; gone after a power cut). */
-static void save_prev(void)
-{
-    fat_entry_t e;
-    uint8_t *old = NULL;
-    size_t n = 0;
-    if (fat_find("/bm/BOOTLOG.TXT", &e) == 0 && fat_load(&e, &old, &n) != 0) {
-        old = NULL;
-        n = 0;
-    }
-    static char tail[4096 + 1];
-    size_t tn = crumbs_ring_copy(tail, sizeof tail);
-    char head[200];
-    int hn = ksnprintf(head, sizeof head, "\n--- the run before %s; the last lines it printed (RAM) ---\n",
-                       crumbs_prev_state());
-    if (hn < 0 || hn >= (int)sizeof head)
-        hn = (int)strlen(head);
-    char *buf = malloc(n + (size_t)hn + tn + 64);
-    if (!buf) {
-        free(old);
-        return;
-    }
-    size_t len = 0;
-    if (old) {
-        memcpy(buf, old, n);
-        len = n;
-    } else {
-        len = (size_t)ksnprintf(buf, 64, "(no bm/bootlog.txt)\n");
-    }
-    free(old);
-    memcpy(buf + len, head, (size_t)hn);
-    len += (size_t)hn;
-    if (tn) {
-        memcpy(buf + len, tail, tn);
-        len += tn;
-    } else {
-        len += (size_t)ksnprintf(buf + len, 32, "(nothing in RAM)\n");
-    }
-    if (fat_mkdirs("/bm") != 0 || fat_write_file("/bm", "BOOTPREV.TXT", buf, len) != 0)
-        kprintf("boot log: cannot write bm/bootprev.txt (%s)\n", fat_error());
-    free(buf);
-}
-
-/* Everything printed so far goes to bm/bootlog.txt: if the screen stays
- * dark, the SD card read on a PC says how far the boot went. Written
- * before the display starts, after it, and at "ready". */
-static void save_bootlog(int say)
-{
-    if (!sd_blocks())
-        return;
-    const char *log = klog_text();
-    if (fat_mkdirs("/bm") == 0 && fat_write_file("/bm", "BOOTLOG.TXT", log, strlen(log)) == 0) {
-        if (say)
-            kprintf("boot log saved to bm/bootlog.txt\n");
-    } else {
-        kprintf("boot log: cannot write bm/bootlog.txt (%s)\n", fat_error());
-    }
-}
 
 void rgb30_display_stage(const char *what)
 {
     if (!booting)
         return;
     kprintf("display: %s\n", what);
-    save_bootlog(0);
+    sdlog_boot(0);
 }
 
 /* Before a restart or a power off (plat_reset, plat_poweroff, before the
@@ -242,24 +304,7 @@ void rgb30_save_lastrun(void)
     __asm__ volatile("mrs %0, daif" : "=r"(daif));
     if ((daif & (1u << 7)) || fat_writing() || !sd_blocks())
         return;
-    kprintf("restarting: this run's log in bm/lastrun.txt\n");
-    const char *log = klog_text();
-    size_t n = strlen(log);
-    char *buf = NULL;
-    if (n >= 60 * 1024) {                       /* the log is full: its end from the ring */
-        static const char cut[] = "\n--- (the log is full) the last lines printed ---\n";
-        buf = malloc(n + sizeof cut + 4096 + 1);
-        if (buf) {
-            memcpy(buf, log, n);
-            memcpy(buf + n, cut, sizeof cut - 1);
-            n += sizeof cut - 1;
-            n += crumbs_ring_copy(buf + n, 4096 + 1);
-            log = buf;
-        }
-    }
-    if (fat_mkdirs("/bm") != 0 || fat_write_file("/bm", "LASTRUN.TXT", log, n) != 0)
-        kprintf("cannot write bm/lastrun.txt (%s)\n", fat_error());
-    free(buf);
+    sdlog_lastrun();
 }
 
 /* The saved WiFi network is joined at boot, as on the Pi (wifi_boot=0 in
@@ -284,8 +329,9 @@ void kernel_main(uintptr_t dtb)
     /* the SD card before the screen: if the display hangs, bm/bootlog.txt
      * says so (and the LEDs say where, docs/RGB30.md) */
     sd_boot();
+    smp_boot();
     kprintf("display: starting\n");
-    save_bootlog(0);
+    sdlog_boot(0);
 
     int err = fb_init(&fb, SCREEN_W, SCREEN_H, 2);
     if (err == 0) {
@@ -300,7 +346,7 @@ void kernel_main(uintptr_t dtb)
         kprintf_set_sink(console_putc);
     }
     kprintf("display: %s%s\n", plat_display_info(), err ? " - not available" : "");
-    save_bootlog(0);
+    sdlog_boot(0);
 
     irq_init();
     tick_init(TICK_HZ);
@@ -326,10 +372,52 @@ void kernel_main(uintptr_t dtb)
         plat_led(-1, 1);                    /* red stays on: see bm/bootlog.txt */
         ledstate_set(LED_DISPLAY, 1);       /* and the green blinks slowly */
     }
+    {
+        /* the boot before ended in a crash: a report, with the lines printed
+         * before it; a "freeze" record is not one here: no watchdog yet */
+        const char *kind;
+        size_t n;
+        const char *t = crumbs_last(&kind, &n);
+        if (t && !strcmp(kind, "crash"))
+            reports_text(kind, t, n);
+    }
     kprintf("ready\n");
-    save_bootlog(1);
+    sdlog_boot(1);
     booting = 0;
+    if (config_get("mali_probe") && !strcmp(config_get("mali_probe"), "1")) {
+        reports_begin("gpu");
+        rgb30_mali_probe_triangle(&fb);
+        reports_end();
+    }
     wifi_boot();
+    /* bench3d_boot=spheres.draws (set through the bridge: config bench3d_boot=...): one run of those tests at this
+     * boot, the key removed first so a freeze does not loop; the bridge allows no comma in a value, '.' and '-' stand for it */
+    const char *bb = config_get("bench3d_boot");
+    if (bb && bb[0] && err == 0) {
+        static char tests[96];
+        size_t n = 0;
+        for (; bb[n] && n < sizeof tests - 1; n++)
+            tests[n] = (bb[n] == '.' || bb[n] == '-') ? ',' : bb[n];
+        tests[n] = 0;
+        config_unset("bench3d_boot");
+        config_save();
+        kprintf("bench3d_boot: %s\n", tests);
+        fb_show(&fb, 0);
+        console_suspend(0);
+        /* dev mode (dev=1): the bench closes by itself at its end (summary 3 s) and the report goes at once */
+        rgb30_bench3d_part(&fb, strcmp(tests, "all") ? tests : NULL, dev_mode());
+        console_suspend(1);
+        /* the report goes now, not at the menu's next idle: wait for the network (up to 90 s), then send what waits */
+        for (int t = 0; t < 900 && reports_pending() > 0; t++) {
+            net_poll();
+            if (reports_auto_due()) {
+                reports_send_pending();
+                kprintf("report %s\n", reports_last());
+                break;
+            }
+            timer_delay_ms(100);
+        }
+    }
     if (bt_paired() && bt_start() != 0)     /* a paired pad, keyboard or mouse comes back by itself, as on the Pi */
         kprintf("bt: not started: a paired pad will not reconnect (Settings > Controllers starts it)\n");
     bm_set_notice(notice_now);              /* the games show a kernel arriving */

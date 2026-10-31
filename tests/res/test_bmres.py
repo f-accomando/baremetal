@@ -4,7 +4,7 @@ and SPRITES, extraction and integration (the same sections back in an
 empty project; the same pixels under every face, zone and tile in a full
 one), conversions, broken files.
 
-  tests/res/test_bmres.py VILLAGE.bm DEMO.bm SOUND.bm OUTDIR
+  tests/res/test_bmres.py KIT.bm SAMPLE.bm SOUND.bm OUTDIR
 """
 import hashlib
 import json
@@ -96,17 +96,63 @@ def test_info_sprites():
     check(info["file"][0] == ("name", "Knights") and info["items"][0][:2] == ["model", "knight"], "INFO parsed")
     check(bmres.info_parse(bmres.info_dump(info)) == info, "INFO back the same")
     check(bmres.kv_get(info["items"][0][2], "weird key") == "kept", "INFO keeps unknown keys")
-    raises(lambda: bmres.info_parse(b"x: " + b"a" * bmres.INFO_MAX), "INFO over 16 KiB")
+    raises(lambda: bmres.info_parse(b"x: " + b"a" * bmres.INFO_MAX), "INFO over 16 KB")
     zones = [{"name": "hero", "x": 0, "y": 8, "w": 16, "h": 16, "frames": 4, "fps": 8},
              {"name": "coin", "x": 64, "y": 0, "w": 8, "h": 8, "frames": 1, "fps": 0}]
     body = bmres.sprites_encode(zones)
     check(len(body) == 4 + 28 * 2 and bmres.sprites_decode(body) == zones, "SPRITES back the same")
+    stk = [{"name": "tree", "x": 0, "y": 0, "w": 8, "h": 8, "frames": 1, "fps": 0, "slices": 12}]
+    check(bmres.sprites_decode(bmres.sprites_encode(stk)) == stk, "SPRITES keeps the slices of a stack zone")
+    stv = [dict(stk[0], vertical=True)]
+    enc = bmres.sprites_encode(stv)
+    check(bmres.sprites_decode(enc) == stv and enc[4 + 27] == 1,
+          "SPRITES keeps the direction of a stackv zone (bit 0 of byte 27)")
+    check(bmres.zone_rect(stv[0]) == (0, 0, 8, 96), "a stackv zone spans h x slices")
     raises(lambda: bmres.sprites_decode(bmres.sprites_encode(zones + [zones[0]])), "SPRITES with a name twice")
     raises(lambda: bmres.sprites_decode(body[:-1]), "SPRITES cut short")
 
 
-def test_container(village):
-    f = bmres.extract_models(village, ["house"])
+def stack_cart():
+    """a cart with a 96x16 sheet and one stack zone: w=8, 1 frame, 12 slices"""
+    f = empty_cart()
+    rgba = bytearray()
+    for y in range(16):
+        for x in range(96):
+            rgba += bytes((x * 2 + 1, y * 9 + 1, 200, 255))
+    bmres.sheet_set(f, 96, 16, bytes(rgba), seed=())
+    f.sections.append([bmres.SEC_SPRITES, bmres.sprites_encode(
+        [{"name": "tree", "x": 0, "y": 0, "w": 8, "h": 8, "frames": 1, "fps": 0, "slices": 12}])])
+    return f
+
+
+def zones_fit(f):
+    """the same check as format.c: x + w * max(frames, slices) fits the sheet"""
+    sw, sh, _ = bmres.sheet_get(f)
+    return all(z["x"] + z["w"] * max(z["frames"], z["slices"]) <= sw and z["y"] + z["h"] <= sh
+               for z in bmres.sprites_decode(f.get(bmres.SEC_SPRITES)))
+
+
+def test_stack_zone():
+    src = stack_cart()
+    ext = roundtrip(bmres.extract_image(src, sprites=["tree"]))
+    z = bmres.sprites_decode(ext.get(bmres.SEC_SPRITES))[0]
+    check(z["slices"] == 12 and z["w"] == 8, "extract: the stack zone keeps its slices")
+    check(bmres.sheet_get(ext)[0] >= 96, "extract: the sheet keeps the full width of the stack zone")
+    check(zones_fit(ext), "extract: the stack zone fits the sheet")
+    check(block(bmres.sheet_get(ext), z["x"], z["y"], 96, 8) == block(bmres.sheet_get(src), 0, 0, 96, 8),
+          "extract: all 96 pixels of the stack zone")
+    cart = empty_cart()
+    bmres.integrate(cart, ext)
+    cart = roundtrip(cart)
+    z = bmres.sprites_decode(cart.get(bmres.SEC_SPRITES))[0]
+    check(z["slices"] == 12, "merge: the stack zone keeps its slices")
+    check(zones_fit(cart), "merge: the stack zone fits the sheet")
+    check(block(bmres.sheet_get(cart), z["x"], z["y"], 96, 8) == block(bmres.sheet_get(src), 0, 0, 96, 8),
+          "merge: all 96 pixels of the stack zone")
+
+
+def test_container(kit):
+    f = bmres.extract_models(kit, ["house"])
     data = bmres.dump(f)
     check(data[:8] == b"BMRES\0\0\0" and struct.unpack_from("<H", data, 12)[0] == bmres.MODEL, "BMRES header")
     g = bmres.load(data)
@@ -128,12 +174,12 @@ def test_container(village):
     raises(lambda: bmres.dump(broken), "a broken MESH")
 
 
-def test_models(village, demo, out):
-    recs = [n for n, _ in bmres.mesh_parse(village.get(bmres.SEC_MESH))[1]]
-    vsheet = bmres.sheet_get(village)
+def test_models(kit, sample, out):
+    recs = [n for n, _ in bmres.mesh_parse(kit.get(bmres.SEC_MESH))[1]]
+    vsheet = bmres.sheet_get(kit)
     for name in recs:
-        res = roundtrip(bmres.extract_models(village, [name]))
-        check(face_texels(res, name) == face_texels(village, name), f"{name}: the same texels in the .bmm")
+        res = roundtrip(bmres.extract_models(kit, [name]))
+        check(face_texels(res, name) == face_texels(kit, name), f"{name}: the same texels in the .bmm")
         if res.get(bmres.SEC_SHEET8) is not None or res.get(bmres.SEC_SHEET) is not None:
             s = bmres.sheet_get(res)
             check(s[0] * s[1] < vsheet[0] * vsheet[1], f"{name}: only the cells it uses")
@@ -144,13 +190,19 @@ def test_models(village, demo, out):
             check(cart.get(t) == b, f"{name}: {bmres.SEC_NAMES[t]} the same in an empty project")
         again = bmres.extract_models(cart, [name])
         check(sections(again) == sections(res), f"{name}: extracted again, the same")
-    house = roundtrip(bmres.extract_models(village, ["house", "villager"]))
-    check([n for n, _ in bmres.mesh_parse(house.get(bmres.SEC_MESH))[1]] == ["house", "villager"], "two models")
+    house = roundtrip(bmres.extract_models(kit, ["house", "walker"]))
+    check([n for n, _ in bmres.mesh_parse(house.get(bmres.SEC_MESH))[1]] == ["house", "walker"], "two models")
     check(house.get(bmres.SEC_ANIM) is not None, "the skeleton goes with its model")
     bmres.write(os.path.join(out, "HOUSE.bmm"), house)
+    # a picture inside the file (COVER and PREVIEW, scripts/bmpreview.py): the kernel's parser reads it (test_res)
+    import bmpreview  # noqa: E402
+    shown = bmpreview.embed(roundtrip(bmres.extract_models(kit, ["house"])), cover=32, size=24, frames=6)
+    shown.kind = bmres.KIT
+    bmres.write(os.path.join(out, "SHOW.bmk"), shown)
+    check(roundtrip(shown).get(bmres.SEC_COVER) == shown.get(bmres.SEC_COVER), "a picture inside a file: the cover stays")
 
     # into a cartridge with its own sheet and map: nothing of it changes
-    cart = roundtrip(demo)
+    cart = roundtrip(sample)
     before_sheet, before_map = bmres.sheet_get(cart), map_pixels(cart)
     bmres.integrate(cart, house, "x")
     bmres.integrate(cart, house, "y")
@@ -160,15 +212,15 @@ def test_models(village, demo, out):
     check(kept(before_sheet, after), "the old pixels stay")
     check(map_pixels(cart) == before_map, "the map draws the same")
     names = [n for n, _ in bmres.mesh_parse(cart.get(bmres.SEC_MESH))[1]]
-    check(names == ["house", "villager", "house2", "villager2"], f"names made unique: {names}")
-    check([n for n, _ in bmres.anim_parse(cart.get(bmres.SEC_ANIM))] == ["villager", "villager2"],
+    check(names == ["house", "walker", "house2", "walker2"], f"names made unique: {names}")
+    check([n for n, _ in bmres.anim_parse(cart.get(bmres.SEC_ANIM))] == ["walker", "walker2"],
           "skeletons renamed with their models")
     for n, m in (("house", "house"), ("house", "house2")):
         check(face_texels(cart, m) == face_texels(house, n), f"{m}: the same texels in the cartridge")
     info = bmres.info_of(cart)
     it = bmres.info_item(info, "model", "house2")
     check(it is not None and bmres.kv_get(it[2], "origin") == "y", "INFO of the part with its origin")
-    bmres.write(os.path.join(out, "demo_models.bm"), cart)
+    bmres.write(os.path.join(out, "sample_models.bm"), cart)
 
     # a sheet that is full: it grows down, never wider; a piece wider than it does not go in
     def tight():
@@ -185,35 +237,35 @@ def test_models(village, demo, out):
     raises(lambda: bmres.integrate(tight(), wide), "a piece wider than the sheet")
 
 
-def test_image(demo, out):
-    full = roundtrip(bmres.extract_image(demo))
-    check(bmres.sheet_get(full)[2] == bmres.sheet_get(demo)[2], "the whole sheet as an image")
-    zone = roundtrip(bmres.extract_image(demo, rect=(8, 0, 16, 8), name="flag", frames=2, fps=6))
+def test_image(sample, out):
+    full = roundtrip(bmres.extract_image(sample))
+    check(bmres.sheet_get(full)[2] == bmres.sheet_get(sample)[2], "the whole sheet as an image")
+    zone = roundtrip(bmres.extract_image(sample, rect=(8, 0, 16, 8), name="flag", frames=2, fps=6))
     zones = bmres.sprites_decode(zone.get(bmres.SEC_SPRITES))
     check(zones[0]["name"] == "flag" and zones[0]["w"] == 8 and zones[0]["frames"] == 2, "a zone with frames")
     z = zones[0]
-    check(block(bmres.sheet_get(zone), z["x"], z["y"], 16, 8) == block(bmres.sheet_get(demo), 8, 0, 16, 8),
+    check(block(bmres.sheet_get(zone), z["x"], z["y"], 16, 8) == block(bmres.sheet_get(sample), 8, 0, 16, 8),
           "the zone's pixels")
     cart = empty_cart()
     bmres.integrate(cart, zone)
     check(sections(roundtrip(cart), (bmres.SEC_INFO, bmres.SEC_LUA)) == sections(zone), "image: the same in an empty project")
-    cart = roundtrip(demo)
+    cart = roundtrip(sample)
     bmres.integrate(cart, zone)
     bmres.integrate(cart, zone)
     zs = bmres.sprites_decode(cart.get(bmres.SEC_SPRITES))
     check([q["name"] for q in zs] == ["flag", "flag2"], "zones made unique")
     for q in zs:
-        check(block(bmres.sheet_get(cart), q["x"], q["y"], 16, 8) == block(bmres.sheet_get(demo), 8, 0, 16, 8),
+        check(block(bmres.sheet_get(cart), q["x"], q["y"], 16, 8) == block(bmres.sheet_get(sample), 8, 0, 16, 8),
               f"{q['name']}: the same pixels in the cartridge")
     bmres.write(os.path.join(out, "FLAG.bmi"), zone)
     again = bmres.extract_image(roundtrip(cart), sprites=["flag2"])
-    check(block(bmres.sheet_get(again), 0, 0, 16, 8) == block(bmres.sheet_get(demo), 8, 0, 16, 8),
+    check(block(bmres.sheet_get(again), 0, 0, 16, 8) == block(bmres.sheet_get(sample), 8, 0, 16, 8),
           "a named zone extracted")
 
 
-def test_boxes(demo, out):
+def test_boxes(sample, out):
     # zones with their hitboxes and hurtboxes (BOXES): they go with the zones
-    cart = roundtrip(demo)
+    cart = roundtrip(sample)
     zones = [{"name": "hero", "x": 8, "y": 0, "w": 8, "h": 8, "frames": 2, "fps": 4},
              {"name": "coin", "x": 0, "y": 0, "w": 8, "h": 8, "frames": 1, "fps": 0}]
     boxes = [{"zone": "hero", "frame": 0, "kind": 0, "x": 1, "y": 1, "w": 6, "h": 7},
@@ -268,24 +320,24 @@ def test_sounds(sound, out):
     bmres.write(os.path.join(out, "JUMP.bms"), one)
 
 
-def test_map(demo, village, out):
-    res = roundtrip(bmres.extract_map(demo))
-    check(map_pixels(res) == map_pixels(demo), "the map draws the same in the .bmt")
+def test_map(sample, kit, out):
+    res = roundtrip(bmres.extract_map(sample))
+    check(map_pixels(res) == map_pixels(sample), "the map draws the same in the .bmt")
     s = bmres.sheet_get(res)
-    check(s[0] * s[1] <= bmres.sheet_get(demo)[0] * bmres.sheet_get(demo)[1], "only the tiles it uses")
+    check(s[0] * s[1] <= bmres.sheet_get(sample)[0] * bmres.sheet_get(sample)[1], "only the tiles it uses")
     cart = empty_cart()
     bmres.integrate(cart, res)
     check(sections(roundtrip(cart), (bmres.SEC_INFO, bmres.SEC_LUA)) == sections(res), "map: the same in an empty project")
-    cart = roundtrip(village)
+    cart = roundtrip(kit)
     old = bmres.sheet_get(cart)
     bmres.integrate(cart, res)
     cart = roundtrip(cart)
-    check(map_pixels(cart) == map_pixels(demo), "the map draws the same in another cartridge")
+    check(map_pixels(cart) == map_pixels(sample), "the map draws the same in another cartridge")
     check(kept(old, bmres.sheet_get(cart)), "its sheet keeps its pixels")
     for n in ("house", "well"):
-        check(face_texels(cart, n) == face_texels(village, n), f"{n}: its texture stays")
+        check(face_texels(cart, n) == face_texels(kit, n), f"{n}: its texture stays")
     raises(lambda: bmres.integrate(cart, res), "a second map")
-    bmres.write(os.path.join(out, "DEMO.bmt"), res)
+    bmres.write(os.path.join(out, "SAMPLE.bmt"), res)
 
 
 def layer_pixels(f, i):
@@ -311,7 +363,7 @@ def layered_cart():
                                 flags={1: 1, 4: 6, 7: 9}))
 
 
-def test_layers_flags(village, out):
+def test_layers_flags(kit, out):
     src = layered_cart()
     check([n for n, _ in bmres.layers_get(src)] == ["main", "front"], "mkbm: two layers")
     check(bmres.flags_get(src) == {(1, 0): 1, (0, 1): 6, (3, 1): 9}, "mkbm: the flags by the cell's place")
@@ -324,7 +376,7 @@ def test_layers_flags(village, out):
     bmres.integrate(cart, res)
     check(sections(roundtrip(cart), (bmres.SEC_INFO, bmres.SEC_LUA)) == sections(res),
           "layers and flags: the same in an empty project")
-    cart = roundtrip(village)
+    cart = roundtrip(kit)
     bmres.integrate(cart, res)
     cart = roundtrip(cart)
     check(all(layer_pixels(cart, i) == layer_pixels(src, i) for i in (0, 1)),
@@ -344,33 +396,35 @@ def test_layers_flags(village, out):
     raises(lambda: bmres.check(bad), "LAYERS of the wrong size")
 
 
-def test_palette(village, demo, out):
-    pal = roundtrip(bmres.extract_palette(village))
-    cols = [c for c in bmres.sheet8_palette(village.get(bmres.SEC_SHEET8)) if c[3] >= 128]
+def test_palette(kit, sample, out):
+    pal = roundtrip(bmres.extract_palette(kit))
+    cols = [c for c in bmres.sheet8_palette(kit.get(bmres.SEC_SHEET8)) if c[3] >= 128]
     w, h, rgba = bmres.sheet_get(pal)
     check(h == 1 and [bytes(rgba[4 * i:4 * i + 4]) for i in range(w)] == cols, "pixel i is colour i")
     small = bmres.palette_file(cols[:8], "eight")
-    cart = roundtrip(demo)
+    cart = roundtrip(sample)
     before = bmres.sheet_get(cart)
     bmres.integrate(cart, small)
     cart = roundtrip(cart)
     check(bmres.sheet8_palette(cart.get(bmres.SEC_SHEET8))[:8] == cols[:8], "the palette first in the sheet's")
     check(bmres.sheet_get(cart)[2] == before[2], "the pixels stay")
-    raises(lambda: bmres.integrate(roundtrip(demo), pal), "more than 256 colours together")
-    bmres.write(os.path.join(out, "VILLAGE.bmc"), pal)
+    full = empty_cart()                 # a sheet of 250 colours of its own (the kit's do not fit with them)
+    bmres.sheet_set(full, 50, 5, bytearray(b"".join(bytes((i, 255 - i, 7 * i % 256, 255)) for i in range(250))))
+    raises(lambda: bmres.integrate(roundtrip(full), pal), "more than 256 colours together")
+    bmres.write(os.path.join(out, "KIT.bmc"), pal)
 
 
-def test_kit(village):
-    kit = roundtrip(bmres.extract_kit(village))
+def test_kit(src):
+    kit = roundtrip(bmres.extract_kit(src))
     check(set(sections(kit)) == {bmres.SEC_SHEET8, bmres.SEC_MESH, bmres.SEC_ANIM}, "a kit of a game")
     cart = empty_cart()
     bmres.integrate(cart, kit)
     check(sections(roundtrip(cart), (bmres.SEC_INFO, bmres.SEC_LUA)) == sections(kit), "kit: the same in an empty project")
 
 
-def test_convert(demo, sound, out):
+def test_convert(sample, sound, out):
     png = os.path.join(out, "sheet.png")
-    w, h, rgba = bmres.sheet_get(demo)
+    w, h, rgba = bmres.sheet_get(sample)
     bmres.png_write(png, w, h, rgba)
     img = bmres.convert(png, os.path.join(out, "SHEET.bmi"))
     check(bmres.sheet_get(roundtrip(img))[2] == bytearray(b"".join(
@@ -390,17 +444,17 @@ def test_convert(demo, sound, out):
     bmres.write(os.path.join(out, "P.bmc"), pal)
     bmres.convert(os.path.join(out, "P.bmc"), os.path.join(out, "p.gpl"))
     check(bmres.read_gpl(os.path.join(out, "p.gpl")) == [b"\xff\0\0\xff", b"\0\xff\0\xff", b"\0\0\xff\xff"], ".bmc -> .gpl")
-    bmres.write(os.path.join(out, "MAP.bmt"), bmres.extract_map(demo))
+    bmres.write(os.path.join(out, "MAP.bmt"), bmres.extract_map(sample))
     csv = os.path.join(out, "map.csv")
     bmres.convert(os.path.join(out, "MAP.bmt"), csv)
     back = bmres.convert(csv, os.path.join(out, "MAP2.bmt"), tiles=os.path.join(out, "map.png"))
-    check(map_pixels(roundtrip(back)) == map_pixels(demo), ".bmt -> .csv + .png -> .bmt")
+    check(map_pixels(roundtrip(back)) == map_pixels(sample), ".bmt -> .csv + .png -> .bmt")
 
 
-def test_cli(village_path, out):
+def test_cli(kit_path, out):
     bmm = os.path.join(out, "WELL.bmm")
-    check(bmres.main(["extract", village_path, "-o", bmm, "--model", "well", "--license", "CC0-1.0",
-                      "--tags", "village"]) == 0, "bmres extract")
+    check(bmres.main(["extract", kit_path, "-o", bmm, "--model", "well", "--license", "CC0-1.0",
+                      "--tags", "kit"]) == 0, "bmres extract")
     f = bmres.read(bmm)
     check(bmres.kv_get(bmres.info_of(f)["file"], "license") == "CC0-1.0", "the command line writes INFO")
     game = os.path.join(out, "cli.bm")
@@ -410,32 +464,41 @@ def test_cli(village_path, out):
     check(open(game, "rb").read() == mkbm.pack(b"-- cli", title="cli"), "the game stays as it was")
     check(struct.unpack_from("<H", open(cart, "rb").read(), 18)[0] & 1 == 1, "the copy is a project (.bme)")
     check("well" in dict(bmres.mesh_parse(bmres.read(cart).get(bmres.SEC_MESH))[1]), "the model in the cartridge")
+    # a game in the carts/ or bm/ folder of an SD card: its copy goes to bme/ beside it (projects live in /bme)
+    sd = os.path.join(out, "sdcard")
+    os.makedirs(os.path.join(sd, "carts"), exist_ok=True)
+    sdgame = os.path.join(sd, "carts", "sd.bm")
+    open(sdgame, "wb").write(mkbm.pack(b"-- sd", title="sd"))
+    check(bmres.main(["add", sdgame, bmm]) == 0, "bmres add on a game of the SD layout")
+    check(os.path.isfile(os.path.join(sd, "bme", "sd.bme")) and not os.path.exists(os.path.join(sd, "carts", "sd.bme")),
+          "the copy of a game in carts/ is in bme/")
     origin = hashlib.sha256(open(bmm, "rb").read()).hexdigest()
     it = bmres.info_item(bmres.info_of(bmres.read(cart)), "model", "well")
     check(it and bmres.kv_get(it[2], "origin") == origin and bmres.kv_get(it[2], "license") == "CC0-1.0",
           "origin and license follow the model")
     check(bmres.main(["info", bmm, "--item", "model", "well", "--desc", "a well"]) == 0, "bmres info")
-    check(bmres.main(["extract", village_path, "-o", os.path.join(out, "X.bmm"), "--model", "nope"]) == 1,
+    check(bmres.main(["extract", kit_path, "-o", os.path.join(out, "X.bmm"), "--model", "nope"]) == 1,
           "a model that is not there")
     check(bmres.main(["list", bmm, cart]) == 0, "bmres list")
 
 
 def main():
-    village_path, demo_path, sound_path, out = sys.argv[1:5]
+    kit_path, sample_path, sound_path, out = sys.argv[1:5]
     os.makedirs(out, exist_ok=True)
-    village, demo, sound = (bmres.read(p) for p in (village_path, demo_path, sound_path))
+    kit, sample, sound = (bmres.read(p) for p in (kit_path, sample_path, sound_path))
     test_info_sprites()
-    test_container(village)
-    test_models(village, demo, out)
-    test_image(demo, out)
-    test_boxes(demo, out)
+    test_stack_zone()
+    test_container(kit)
+    test_models(kit, sample, out)
+    test_image(sample, out)
+    test_boxes(sample, out)
     test_sounds(sound, out)
-    test_map(demo, village, out)
-    test_layers_flags(village, out)
-    test_palette(village, demo, out)
-    test_kit(village)
-    test_convert(demo, sound, out)
-    test_cli(village_path, out)
+    test_map(sample, kit, out)
+    test_layers_flags(kit, out)
+    test_palette(kit, sample, out)
+    test_kit(kit)
+    test_convert(sample, sound, out)
+    test_cli(kit_path, out)
     print(f"bmres: {checks - len(fails)}/{checks} checks passed")
     return 1 if fails else 0
 

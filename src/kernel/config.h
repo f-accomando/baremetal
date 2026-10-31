@@ -36,6 +36,10 @@ int config_merge(const char *text, size_t len, char *out, size_t out_len);
  * returns the length written (what fits in len). */
 size_t config_list(char *out, size_t len);
 
+/* 1 if bm/config.txt has gpu3d_qpu=1 (default 0). Only then the kernel runs the QPU programs
+ * (the fade hook at boot, the 3D Bench QPU row). */
+int gpu_qpu_key(void);
+
 /* A key whose value never goes out (..._token, _psk, _password, _key) */
 int config_secret(const char *key);
 
@@ -43,8 +47,22 @@ int config_secret(const char *key);
  * "bottom" 2; the old 1, 2, 3 (simple, detailed, functions) are the top */
 int config_perf(const char *v);
 
+/* The bridge gate (bm/bridge.txt: off, on or fast; config.c says who may write it).
+ * dev_mode(): 1 when the bridge is fast (a kernel and a file are written at once). */
+enum { BRIDGE_OFF, BRIDGE_ON, BRIDGE_FAST };
+int bridge_load(void);                      /* config_load calls it; 1 if bm/bridge.txt was there */
+int bridge_mode(void);
+const char *bridge_label(int mode);         /* "off", "on", "fast" */
+int bridge_set(int mode);                   /* Settings only: writes the file; 0, or -1 */
+int bridge_file_name(const char *path);     /* 1 if a path names the bridge file */
+int dev_mode(void);
+
+/* screen recorder: 1 if rec=1 / rec=on in bm/config.txt */
+int rec_mode(void);
+void rec_set_mode(int on);
+
 /* A file of the console on the SD card ("config.txt", "ca.pem",
- * "save/1A2B3C4D.SAV"): in /bm, or in the folder of before the rename
+ * "save/1a2b3c4d.sav"): in /bm, or in the folder of before the rename
  * until make install moves it. Returns 0 and fills e. */
 int config_find_file(const char *name, fat_entry_t *e);
 

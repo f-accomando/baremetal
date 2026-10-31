@@ -16,6 +16,9 @@
  */
 #include "net/netcon.h"
 #include "net/netxfer.h"
+#include "fs/fat.h"
+#include "gfx/console.h"
+#include "drivers/fb.h"
 #include "net/stream.h"
 #include "lib/crc32.h"
 #include "lib/printf.h"
@@ -31,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 /* ---- the kernel functions netcon.c uses */
@@ -38,6 +42,16 @@ const char bm_version_tag[] = "bmVER=test";
 static const char *cfg_pw = "secret";
 static char saved_pw[40];
 const char *config_get(const char *key) { return strcmp(key, "net_password") ? NULL : cfg_pw; }
+int dev_mode(void) { return 0; }                     /* the kernel's dev mode (config.c): off in this test */
+static int test_bridge = 1;                          /* the bridge gate (config.c): 0 off, 1 on, 2 fast */
+int bridge_mode(void) { return test_bridge; }
+int bridge_file_name(const char *p)                  /* config.c has the real one (tests/kernel/test_config.c) */
+{
+    for (const char *c = p; *c; c++)
+        if (strncasecmp(c, "bridge.txt", 10) == 0)
+            return 1;
+    return 0;
+}
 void config_set(const char *key, const char *value) { (void)key; snprintf(saved_pw, sizeof saved_pw, "%s", value); }
 void config_save(void) {}
 /* netxfer's C: the lines it got; "bad" in them is a wrong line */
@@ -53,6 +67,20 @@ int config_merge(const char *text, size_t len, char *out, size_t out_len)
 static uint32_t fake_us;                /* advanced by spin() */
 uint32_t timer_ticks(void) { return fake_us; }
 void timer_delay_ms(uint32_t ms) { fake_us += ms * 1000; }
+int sd_writer_begin(const char *who, void (*pause)(void)) { (void)who; (void)pause; return 0; }
+void sd_writer_end(const char *who) { (void)who; }
+static int rng_fail;                    /* rng_read: 1 = no random numbers */
+int rng_read(void *buf, size_t len)
+{
+    static uint32_t n = 12345;
+    if (rng_fail)
+        return -1;
+    for (size_t i = 0; i < len; i++) {
+        n = n * 1664525u + 1013904223u;
+        ((uint8_t *)buf)[i] = (uint8_t)(n >> 24);
+    }
+    return 0;
+}
 u32_t sys_now(void) { return fake_us / 1000; }
 
 /* the SD card: the last file written */
@@ -85,6 +113,57 @@ int fat_write_file(const char *dir, const char *name, const void *data, size_t l
     return 0;
 }
 const char *fat_error(void) { return "test"; }
+/* G: /bm/shots/*.PNG is a file of 3000 bytes, what a screenshot is here */
+int fat_find(const char *path, fat_entry_t *e)
+{
+    if (strcasecmp(path, "/bm/shots/PONG0001.PNG") && strcasecmp(path, "/bm/config.txt") &&
+        strcasecmp(path, "/bm/BOOTPREV.TXT") && strcasecmp(path, "/bm/CONFIG.TXT") &&
+        strcasecmp(path, "/bm/LASTRUN.TXT") && strcasecmp(path, "/bm/staging/kernel.img") &&
+        strcasecmp(path, "/kernel.img"))
+        return -1;
+    memset(e, 0, sizeof *e);
+    e->size = strcasecmp(path, "/bm/staging/kernel.img") == 0 ? (w_len ? (uint32_t)w_len : 100000u) : 3000;
+    return 0;
+}
+static int load_log;                    /* the next file is a log with the password in it */
+int fat_load(const fat_entry_t *e, uint8_t **data, size_t *len)
+{
+    *len = e->size;
+    *data = malloc(*len);
+    for (size_t i = 0; i < *len; i++)
+        (*data)[i] = (uint8_t)(i * 7 + 1);
+    if (load_log) {                     /* "net_password=secret" in the middle of a log */
+        const char *t = "boot ok net_password=secret wifi up";
+        memcpy(*data, t, strlen(t));
+    }
+    return 0;
+}
+int fat_delete(const char *path) { (void)path; return 0; }
+int fat_replace(const char *path, const void *data, size_t len) { (void)path; (void)data; (void)len; return 0; }
+
+/* kernel/reports.c: the secrets of the console become stars */
+void reports_mask_secrets(char *text, size_t len)
+{
+    for (size_t i = 0; i + 6 <= len; i++)
+        if (memcmp(text + i, "secret", 6) == 0)
+            memset(text + i, '*', 6);
+}
+/* T: the runtime draws a frame only when `frame_in` rounds have passed (-1: no game) */
+static int shot_state, shot_asked, shot_frame;   /* shot_frame: a frame comes at once */
+void bm_shot_ask(void) { shot_asked++; shot_state = shot_frame ? 1 : 2; }
+void bm_shot_cancel(void) { shot_state = 0; }
+int bm_shot_done(char *name, size_t n)
+{
+    if (shot_state == 1)
+        snprintf(name, n, "PONG0001.PNG");
+    return shot_state == 2 ? 0 : shot_state;
+}
+
+/* F: the page on the screen. Two pages of 4x2 pixels in RGB565, rows of 16 bytes (8 of them pixels); page 1 is the one shown */
+static uint8_t fb_mem[2 * 2 * 16];
+static framebuffer_t fake_fb = { .width = 4, .height = 2, .pitch = 16, .is_rgb = 0, .size = sizeof fb_mem,
+                                 .mem = fb_mem, .buffers = 2, .shown = 1, .depth = 16 };
+framebuffer_t *console_framebuffer(void) { return &fake_fb; }
 
 /* the menu's fiber, run straight through (kernel/fiber.c needs the ARM):
  * fiber_job_stop runs it with fiber_cancelled() 1, as the real one */
@@ -108,6 +187,7 @@ int fiber_job_run(fiber_job_t *j, uint32_t until)
     return 0;
 }
 fiber_t *fiber_current(void) { return NULL; }
+void watchdog_progress(void) {}
 void fiber_job_stop(fiber_job_t *j)
 {
     if (!j->busy)
@@ -142,6 +222,17 @@ void wifi_leave(void) { wifi_left++; }
 static int clean_exits, flushed;
 void crumbs_clean_exit(void) { clean_exits++; }
 void uart_flush(void) { flushed += clean_exits; }
+void watchdog_reboot(void);
+/* crumbs.c: the planned restart is these four, in this order */
+void crumbs_restart(int halt)
+{
+    (void)halt;
+    wifi_leave();
+    crumbs_clean_exit();
+    uart_flush();
+    watchdog_reboot();
+    for (;;) {}
+}
 /* the kernel's way (main's argument): no menu, the menu's fiber, the menu
  * gone before it wrote; what had run when the kernel case began */
 enum { K_AT_ONCE, K_MENU, K_GONE };
@@ -218,9 +309,16 @@ static err_t c_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 static void c_err(void *arg, err_t err) { client_t *c = arg; (void)err; c->closed = 1; c->pcb = NULL; }
 static err_t c_conn(void *arg, struct tcp_pcb *pcb, err_t err) { (void)pcb; ((client_t *)arg)->connected = err == ERR_OK; return ERR_OK; }
 
+static client_t *watch_x;               /* V: when this client has `change_at` bytes, a pixel of the shown page changes */
+static size_t change_at;
+
 static void spin(int rounds)
 {
     for (int i = 0; i < rounds; i++) {
+        if (change_at && watch_x && watch_x->len >= change_at) {
+            change_at = 0;
+            fb_mem[2 * 16] ^= 0x55;
+        }
         netif_poll_all();
         sys_check_timeouts();
         netcon_poll();
@@ -293,7 +391,7 @@ static void xfer(client_t *x, char op, const char *pw, const char *path, const u
             tcp_output(x->pcb);
             spin(5);
         }
-    for (int i = 0; i < 600 && x->len < want && !x->closed; i++)
+    for (int i = 0; i < 4000 && x->len < want && !x->closed; i++)   /* (T waits 3 s for a frame) */
         spin(1);
     if (x->pcb && !x->closed) {
         tcp_recv(x->pcb, NULL);
@@ -308,6 +406,22 @@ int main(int argc, char **argv)
 {
     k_way = argc > 1 && !strcmp(argv[1], "menu") ? K_MENU : argc > 1 && !strcmp(argv[1], "gone") ? K_GONE : K_AT_ONCE;
     lwip_init();
+    {   /* the made password: six digits, from the generator or, without it, from the hash */
+        char pw[8], seen[3][8];
+        int digits = 1, differ = 0;
+        for (int mode = 0; mode < 2; mode++) {
+            rng_fail = mode;
+            for (int i = 0; i < 3; i++) {
+                netcon_make_password(pw);
+                snprintf(seen[i], sizeof seen[i], "%s", pw);
+                digits &= strlen(pw) == 6 && strspn(pw, "0123456789") == 6;
+            }
+            differ += strcmp(seen[0], seen[1]) && strcmp(seen[1], seen[2]);
+        }
+        rng_fail = 0;
+        check(digits, "made password: six digits (generator and fallback)");
+        check(differ == 2, "made password: not the same twice (generator and fallback)");
+    }
     check(netcon_start() == 0, "listening on port 3333");
     check(strcmp(netcon_password(), "secret") == 0, "password from the config");
 
@@ -469,8 +583,8 @@ int main(int argc, char **argv)
         w_name[0] = 0;
         xfer(&x, 'S', "secret", "carts/game.bm", a, sizeof a, 0, 4);
         check(strcmp(x.got, "OKQD") == 0 && w_name[0] == 0, "file: QD once checked, nothing written yet");
-        check(netxfer_write_pending() && netxfer_updating("/CARTS/GAME.BM") == NETXFER_QUEUED &&
-              !netxfer_updating("/carts/other.bm"), "  queued: the menu tags that game only");
+        check(netxfer_write_pending() && netxfer_updating("/BM/GAME.BM") == NETXFER_QUEUED &&
+              !netxfer_updating("/bm/other.bm"), "  queued: the menu tags that game only");
         char nm[16];
         uint32_t d = 1, t = 0;
         check(netxfer_file_state(nm, sizeof nm, &d, &t) == NETXFER_QUEUED && strcmp(nm, "game.bm") == 0 &&
@@ -491,9 +605,9 @@ int main(int argc, char **argv)
         check(w_name[0] == 0 && netxfer_write_pending(), "  a write stopped half way: nothing written, still waiting");
         const unsigned before = netxfer_saves();
         netxfer_write_tick(0);
-        check(strcmp(w_dir, "/carts") == 0 && strcmp(w_name, "GAME.BM") == 0 && w_len == sizeof b &&
+        check(strcmp(w_dir, "/bm") == 0 && strcmp(w_name, "GAME.BM") == 0 && w_len == sizeof b &&
               memcmp(w_data, b, sizeof b) == 0 && netxfer_saves() == before + 1 && !netxfer_write_pending() &&
-              !netxfer_updating("/carts/game.bm") && !fat_write_tick,
+              !netxfer_updating("/bm/game.bm") && !fat_write_tick,
               "  written from the menu: the newer copy, counted, the tag gone");
         check(strncmp(flashed, "Updated", 7) == 0, "  a notice says so");
         /* a file for the card's root (bm_net.py --to ""): "/top.bm" */
@@ -501,6 +615,113 @@ int main(int argc, char **argv)
         netxfer_write_tick(0);
         check(strcmp(x.got, "OKQD") == 0 && strcmp(w_dir, "/") == 0 && strcmp(w_name, "top.bm") == 0 &&
               w_len == sizeof a, "  a file for the root: written in /");
+    }
+
+    /* F: the page on the screen now (the shown page, without the pitch's padding) */
+    {
+        client_t x;
+        for (unsigned i = 0; i < sizeof fb_mem; i++)
+            fb_mem[i] = (uint8_t)(0xA0 + i % 7);                /* page 0, and the padding of page 1: not to be sent */
+        for (unsigned y = 0; y < 2; y++)
+            for (unsigned i = 0; i < 8; i++)
+                fb_mem[2 * 16 + y * 16 + i] = (uint8_t)(y * 8 + i + 1);     /* page 1: pixels 1..16 */
+        xfer(&x, 'F', "secret", "", NULL, 0, 0, 10 + 8 + 16);
+        check(x.len == 34 && strncmp(x.got, "OK", 2) == 0 && (uint8_t)x.got[2] == 24 && x.got[3] == 0,
+              "  F: OK and the length (8 + 4x2x2)");
+        const uint8_t *d = (const uint8_t *)x.got + 10;
+        check(x.len == 34 && d[0] == 4 && d[1] == 0 && d[2] == 2 && d[3] == 0 && d[4] == 16 && d[5] == 0 && d[6] == 0 && d[7] == 0,
+              "  F: width, height, depth, is_rgb");
+        int same = x.len == 34;
+        for (unsigned i = 0; same && i < 16; i++)
+            same = d[8 + i] == i + 1;
+        check(same, "  F: the shown page, row by row, no padding");
+        uint32_t c;
+        memcpy(&c, x.got + 6, 4);
+        check(x.len == 34 && c == crc32(d, 24), "  F: the crc of the data");
+        xfer(&x, 'F', "nope", "", NULL, 0, 0, 2);
+        check(strcmp(x.got, "PW") == 0, "  F with a wrong password: PW");
+        static const uint8_t junk[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        xfer(&x, 'F', "secret", "", junk, sizeof junk, 0, 2);
+        check(strcmp(x.got, "BH") == 0, "  F with data: BH");
+    }
+
+    /* V: the stream. 4x2 pixels from the 4x2 page: the first frame has them all (a literal of 8 pixels), then nothing
+     * changes (a frame of length 0 every 2 s), and after a pixel changes only that pixel is sent */
+    {
+        client_t x;
+        for (unsigned y = 0; y < 2; y++)
+            for (unsigned i = 0; i < 8; i++)
+                fb_mem[2 * 16 + y * 16 + i] = (uint8_t)(y * 8 + i + 1);
+        watch_x = &x;
+        change_at = 2 + 8 + 18 + 8;                  /* after the keepalive: OK, the frame, the "nothing changed" */
+        xfer(&x, 'V', "secret", "4x2@40", NULL, 0, 0, 2 + 26 + 8 + 12);
+        watch_x = NULL;
+        const uint8_t *d = (const uint8_t *)x.got;
+        check(x.len >= 2 + 26 + 8 + 12 && strncmp(x.got, "OK", 2) == 0, "  V: OK");
+        check(d[2] == 4 && d[3] == 0 && d[4] == 2 && d[5] == 0 && d[6] == 18 && d[7] == 0 && d[8] == 0 && d[9] == 0,
+              "  V: the first frame: 4x2, 18 bytes of tokens");
+        check(d[10] == 0x08 && d[11] == 0x40 && d[12] == 1 && d[13] == 2 && d[26] == 0x0F && d[27] == 0x10,
+              "  V: one token, 8 literal pixels, the page row by row");
+        check(d[28] == 4 && d[30] == 2 && d[32] == 0 && d[33] == 0 && d[34] == 0 && d[35] == 0,
+              "  V: nothing changed: a frame with no tokens");
+        check(d[36] == 4 && d[38] == 2 && d[40] == 4 && d[41] == 0 && d[42] == 0 && d[43] == 0 && d[44] == 1 && d[45] == 0x40 && d[46] == (1 ^ 0x55) && d[47] == 2,
+              "  V: a pixel changed: a token of one literal pixel, nothing else");
+        static const uint8_t junk8[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        xfer(&x, 'V', "secret", "4x2@40", junk8, sizeof junk8, 0, 2);
+        check(strcmp(x.got, "BH") == 0, "  V with data: BH");
+        xfer(&x, 'V', "secret", "999x2", NULL, 0, 0, 2);
+        check(strcmp(x.got, "BH") == 0, "  V too wide: BH");
+        xfer(&x, 'V', "nope", "4x2", NULL, 0, 0, 2);
+        check(strcmp(x.got, "PW") == 0, "  V with a wrong password: PW");
+    }
+
+    /* T and G (R-NET2): a screenshot of the running game, and the file back */
+    {
+        client_t x;
+        shot_frame = 1;                 /* a frame is drawn at once */
+        xfer(&x, 'T', "secret", "", NULL, 0, 0, 14);
+        printf("DBG len=%zu got=%.20s\n", x.len, x.got);
+        check(strncmp(x.got, "OK", 2) == 0 && x.len == 18 && memcmp(x.got + 6, "PONG0001.PNG", 12) == 0,
+              "  T: OK and the name of the screenshot");
+        shot_frame = 0;                 /* no game: the frame never comes */
+        xfer(&x, 'T', "secret", "", NULL, 0, 0, 2);
+        check(strcmp(x.got, "NG") == 0, "  T without a game: NG after the wait");
+        xfer(&x, 'T', "nope", "", NULL, 0, 0, 2);
+        check(strcmp(x.got, "PW") == 0, "  T with a wrong password: PW");
+        uint8_t want[3000];
+        for (unsigned i = 0; i < sizeof want; i++)
+            want[i] = (uint8_t)(i * 7 + 1);
+        xfer(&x, 'G', "secret", "bm/shots/pong0001.png", NULL, 0, 0, 10 + 3000);
+        check(x.len == 3010 && strncmp(x.got, "OK", 2) == 0 && memcmp(x.got + 10, want, 3000) == 0 &&
+              (uint8_t)x.got[2] == (3000 & 0xFF) && (uint8_t)x.got[3] == (3000 >> 8), "  G: OK, length, data");
+        uint32_t c;
+        memcpy(&c, x.got + 6, 4);
+        check(c == crc32(want, 3000), "  G: the crc of the data");
+        xfer(&x, 'G', "secret", "bm/config.txt", NULL, 0, 0, 2);
+        check(strcmp(x.got, "PA") == 0, "  G outside bm/shots: PA");
+        xfer(&x, 'G', "secret", "bm/shots/../config.txt", NULL, 0, 0, 2);
+        check(strcmp(x.got, "PA") == 0, "  G with ..: PA");
+        xfer(&x, 'G', "secret", "bm/bootprev.txt", NULL, 0, 0, 10 + 3000);
+        check(x.len == 3010 && strncmp(x.got, "OK", 2) == 0, "  G of bm/bootprev.txt: OK");
+        xfer(&x, 'G', "secret", "/bm/LASTRUN.TXT", NULL, 0, 0, 10 + 3000);
+        check(x.len == 3010 && strncmp(x.got, "OK", 2) == 0, "  G of bm/LASTRUN.TXT (a card of before, capitals): OK");
+        load_log = 1;
+        xfer(&x, 'G', "secret", "bm/bootprev.txt", NULL, 0, 0, 10 + 3000);
+        check(x.len == 3010 && memmem(x.got + 10, 3000, "net_password=******", 18) && !memmem(x.got + 10, 3000, "secret", 6),
+              "  G of a log with the password in it: masked");
+        load_log = 0;
+        xfer(&x, 'G', "secret", "bm/bootlog.txt", NULL, 0, 0, 2);
+        check(strcmp(x.got, "NF") == 0, "  G of bm/bootlog.txt: allowed, not on the card here: NF");
+        xfer(&x, 'G', "secret", "bm/config.txt", NULL, 0, 0, 2);
+        check(strcmp(x.got, "PA") == 0, "  G of bm/config.txt: PA");
+        xfer(&x, 'G', "secret", "bm/../x", NULL, 0, 0, 2);
+        check(strcmp(x.got, "PA") == 0, "  G of bm/../x: PA");
+        xfer(&x, 'G', "secret", "bm/bootprev.txt.x", NULL, 0, 0, 2);
+        check(strcmp(x.got, "PA") == 0, "  G of a name that only starts as a log: PA");
+        xfer(&x, 'G', "secret", "bm/shots/NOPE0001.PNG", NULL, 0, 0, 2);
+        check(strcmp(x.got, "NF") == 0, "  G of a file that is not there: NF");
+        xfer(&x, 'G', "nope", "bm/shots/pong0001.png", NULL, 0, 0, 2);
+        check(strcmp(x.got, "PW") == 0, "  G with a wrong password: PW");
     }
 
     /* mark: what start.S puts at +4 of a kernel image (kernel.img or the
@@ -515,7 +736,22 @@ int main(int argc, char **argv)
         { 'K', "secret", "kernel7.img", 0, "OKKA", "the Pi Zero 2 W's kernel refused", "bmK7", 0 },
         { 'K', "secret", "kernel8.img", 0, "OKKA", "the RGB30's kernel refused", "\x10\0\0\x14", 1 },
         { 'K', "secret", "kernel.img", 0, "OKOK", "kernel received", "bmK6", 0 },
+        { 'S', "secret", "bm/bridge.txt", 0, "BF", "the bridge file refused", NULL, 0 },
+        { 'S', "secret", "bm/../BM/Bridge.TXT", 0, "BF", "the bridge file refused (other spelling)", NULL, 0 },
+        { 'S', "secret", "bm/ai.txt", 0, "BF", "the AI settings refused (set on the console)", NULL, 0 },
+        { 'S', "secret", "BM/CA-USER.PEM", 0, "BF", "the user's roots refused (other spelling)", NULL, 0 },
     };
+    test_bridge = 0;                    /* the bridge off: every operation refused, BO */
+    {
+        client_t x;
+        xfer(&x, 'S', "secret", "carts/pong.bm", file, sizeof file, 0, 2);
+        check(strcmp(x.got, "BO") == 0, "  bridge off: S refused (BO)");
+        xfer(&x, 'K', "secret", "kernel.img", file, sizeof file, 0, 2);
+        check(strcmp(x.got, "BO") == 0, "  bridge off: K refused (BO)");
+        xfer(&x, 'T', "secret", "", NULL, 0, 0, 2);
+        check(strcmp(x.got, "BO") == 0, "  bridge off: T refused (BO)");
+    }
+    test_bridge = 1;
     for (unsigned t = 0; t < sizeof cases / sizeof cases[0]; t++) {
         w_name[0] = 0;
         if (cases[t].op == 'K' && strcmp(cases[t].answer, "OKOK") == 0) {
@@ -566,11 +802,15 @@ int main(int argc, char **argv)
         }
         spin(600);
         if (cases[t].op == 'K' && strcmp(cases[t].answer, "OKOK") == 0) {
-            /* the kernel is in: 3 s counted down, then the restart */
+            /* the kernel is in: parked in staging, then applied from settings */
+            check(netxfer_has_staged_kernel(), "  kernel parked in staging");
+            int r = netxfer_apply_staged_kernel();
+            check(r == 0, "  staged kernel applied from settings");
             int secs = -1;
             check(netxfer_kernel_state(NULL, NULL, &secs) == NETXFER_K_RESTART && secs >= 2 && secs <= 3,
                   "  restart counted down from 3 s");
-            spin(3000);
+            for (int i = 0; i < 3500 && !reboots; i++)
+                spin(1);
         }
         if (strcmp(x.got, cases[t].answer) != 0)
             printf("  got \"%s\"\n", x.got);
@@ -578,9 +818,9 @@ int main(int argc, char **argv)
         if (t == 0)
             netxfer_write_tick(0);      /* the menu's next frame */
         if (t == 0)
-            check(strcmp(w_dir, "/carts") == 0 && strcmp(w_name, "pong.bm") == 0 &&
+            check(strcmp(w_dir, "/bm") == 0 && strcmp(w_name, "pong.bm") == 0 &&
                   w_len == sizeof file && memcmp(w_data, file, w_len) == 0 && netxfer_saves() == saves0 + 1,
-                  "  in /carts/pong.bm, same bytes");
+                  "  carts/pong.bm is written in /bm/pong.bm, same bytes");
         if (t == 1 || t == 2 || t == 4)
             check(w_name[0] == 0, "  nothing written");
         if (t == 3) {

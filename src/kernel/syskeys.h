@@ -26,17 +26,15 @@ const syskey_t *syskey(int i);
  * it. The others (Esc, Ctrl+S...) a tool lists when it says what they do there. */
 int syskeys_reserved(const char *keys);
 
-/* The rendering tests (3D Bench, Render bench, Stress test, Texture Room;
+/* The rendering tests (the 3D Bench;
  * 2026-10-10) stop on the keys that leave a game: Start+Select (or
  * Ctrl+Shift+Esc), Ctrl+Esc, the PS button. No key of their own: these.
  * syskeys_test_begin() at the start of a test (reports_begin's callers and
  * the menu do it); syskeys_test_stop() reads the controls, once a frame or
  * a step, and says 1 from the press on; syskeys_test_stopped() says the same
- * without reading them (after the test: its report is dropped). A test that
- * runs a cartridge (bm_play) and sees it left says so with _set_stopped. */
+ * without reading them (after the test: its report is dropped). */
 void syskeys_test_begin(void);
 int syskeys_test_stop(void);
 int syskeys_test_stopped(void);
-void syskeys_test_set_stopped(void);
 
 #endif

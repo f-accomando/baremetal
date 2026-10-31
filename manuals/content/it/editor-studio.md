@@ -25,15 +25,23 @@ bm Studio costruisce modelli 3D con blocchi e tessere, direttamente sulla consol
 - **bm Pixel e lo sprite sheet.** Le texture delle facce sono pezzi dello sprite sheet del progetto. Lo disegna bm Pixel.
 - **bm SDK.** Il centro del progetto. Nella sua pagina F1 l'elenco *OPEN IN* ha bm Studio come numero 3, e il menu di bm Studio ha *Back to bm SDK* quando è stato aperto dall'SDK.
 
+## Quale editor per cosa
+
+- **bm Studio**: modelli statici. Oggetti, props ed edifici, fatti di blocchi e tile. La mappa 3D di un gioco si fa nella pagina mappa di bm SDK.
+- **bm Mesh**: modelli organici. Personaggi ed eroi, e tutta la modifica fine di vertici e triangoli.
+- **bm Animator**: rig e animazioni. Mette uno scheletro in un modello e lo muove. Non costruisce modelli.
+- bm Studio e bm Mesh scrivono la stessa sezione MESH, quindi un modello passa da un editor all'altro.
+
 ## Da sapere
 
 - bm Studio è una cartuccia inclusa nel kernel. La trovi nella scheda **Dev** del menu.
 - Lo usi con la tastiera o con il gamepad (Bluetooth o USB). Anche il mouse funziona, quando ce n'è uno collegato.
-- Tieni premuto **F12**, oppure premi **?**, e sullo schermo compaiono i tasti della pagina in cui sei.
+- In una riga di dialogo (per esempio il nome del file), un clic mette il cursore tra le lettere.
+- Tieni premuto **F12**, oppure premi **?**, e sullo schermo compaiono i tasti della pagina in cui sei. La barra in fondo termina con il chip F12 keys. Fai clic su di esso, oppure tieni premuto F12, per vedere ogni tasto della pagina.
 
 # Aprire un progetto o un gioco
 
-bm Studio modifica **progetti** (`.bme`). Un **gioco** (`.bm` o `.b16`) è solo letto: puoi aprirlo per guardare i suoi modelli, e il primo salvataggio crea una copia modificabile.
+bm Studio modifica **progetti** (`.bme`). Un **gioco** (`.bm`) è solo letto: puoi aprirlo per guardare i suoi modelli, e il primo salvataggio crea una copia modificabile.
 
 ## Modi per iniziare
 
@@ -46,13 +54,14 @@ bm Studio modifica **progetti** (`.bme`). Un **gioco** (`.bm` o `.b16`) è solo 
 
 ## Dentro bm Studio
 
-- Premi **Esc** per arrivare al menu. *Open...* elenca i file `.bm` e `.bme` di `/carts` e della radice della scheda SD. Scorciatoia: **Ctrl+O**.
+- Premi **Esc** per arrivare al menu. *Open...* elenca i progetti `.bme` di `/bme` e i file `.bm` e `.bme` di `/carts` e della radice della scheda SD, e i file di modello `.bmm` di `/bmm` (Save riscrive lo stesso `.bmm`; Save as crea un progetto `.bme`). Scorciatoia: **Ctrl+O**.
+- *Import a model...* (**Ctrl+I**) ed *Export to /bmm...* (**Ctrl+E**) portano un modello da `/bmm` o `/glb` e ne scrivono uno in `/bmm` (vedi "Salvare ed esportare").
 - *New project* (**Ctrl+N**) avvia un progetto vuoto. Porta con sé le tessere iniziali di bm Studio nello sprite sheet.
 - Un nuovo progetto non è ancora salvato: il menu mostra `(not saved yet)` accanto al nome. Salvalo con **Ctrl+S**.
 
 ## Avvertenze
 
-- Aprendo un gioco leggi `a game: saving makes its copy`. Il primo salvataggio chiede `Save an editable copy: NAME.BME?`; da lì in poi lavori sulla copia.
+- Aprendo un gioco leggi `a game: saving makes its copy`. Il primo salvataggio chiede `Save an editable copy: name.bme?`; da lì in poi lavori sulla copia.
 - Un gioco senza modelli può riceverne: costruiscili e salva.
 - Se il menu mostra `*modified*`, ci sono modifiche non salvate. *Open...*, *New project* ed *Exit* chiedono conferma prima di buttarle via.
 
@@ -67,7 +76,7 @@ bm Studio ha due pagine, scelte con i tasti F (o **Y + sinistra/destra** sul gam
 - In basso, i tasti del momento.
 - Il cursore è un riquadro a forma di cella. La griglia sul pavimento è di una unità per quadretto.
 
-![La pagina build: gli strumenti a sinistra, il modello al centro](shots/editor-studio-build.png)
+!La pagina build: gli strumenti a sinistra, il modello al centro
 
 ## I comandi della vista 3D
 
@@ -107,8 +116,29 @@ Un blocco è un cubo di una unità. Due blocchi affiancati non hanno una parete 
 | `PgUp` / `PgDn` | Muovono il cursore di un livello su / giù |
 | `Space` | Mette un blocco |
 | `Backspace` o `Del` | Toglie il blocco |
+| `k` | Cambia il tipo di blocco: cube, ramp, corner, rounded, cylinder, cone, sphere, dome, tube, arch |
+| `n` | Forme morbide: scegli la misura da cambiare: x, y o z |
+| `u` / `j` | Forme morbide: più grande / più piccola su quell'asse (da 1 a 8 celle) |
+| `,` / `.` | Forme morbide: meno / più lati (da 4 a 16) |
 
 Sul gamepad: **A** mette, **B** toglie, **X + su/giù** cambia livello.
+
+### Blocchi rampa, angolo e arrotondato
+
+Premi **k** (con lo strumento block o tile) per cambiare il tipo di blocco che il prossimo **Space** mette: cube, ramp, corner, rounded. Il pannello nomina il tipo quando non è il cubo. Il tipo resta finché non lo cambi.
+
+| Tipo | Forma | Triangoli |
+|---|---|---|
+| cube | il cubo di una unità | 12 |
+| ramp | una salita dal bordo vicino del pavimento al bordo alto lontano, una parete sul lato lontano, due lati triangolari | 8 |
+| corner | una piramide sul pavimento della cella, con la punta nell'angolo alto lontano a destra; i suoi lati inclinati si uniscono a una rampa | 6 |
+| rounded | una colonna a otto lati: i quattro spigoli verticali sono tagliati per 0.3 | 28 |
+
+La rampa e l'angolo salgono **lontano dalla camera**. Gira la vista con **q** ed **e** (45 gradi) per girare il blocco: lontano e destra seguono la vista, a passi di 90 gradi. Ogni faccia prende il pennello (un colore o una tessera). **Backspace** toglie il blocco della cella, di qualunque tipo, e annulla lo riporta. Le pareti di un vicino che guardano dentro la cella restano.
+
+### Forme morbide
+
+I tipi dopo *rounded* sono tondi: **cylinder** (cilindro), **cone**, **sphere** (sfera), **dome** (mezza sfera su una base piana), **tube** (un cilindro con un foro di 0,6 del suo raggio) e **arch** (un mezzo anello su due piedi, lungo l'asse x). Una forma morbida riempie un riquadro che parte dalla cella del cursore. **n** sceglie l'asse (x, y o z), **u** e **j** allungano o accorciano quel lato di una cella (da 1 a 8), **,** e **.** cambiano i lati (da 4 a 16, all'inizio 8). Il riquadro del cursore mostra la misura. Ogni faccia guarda fuori e prende il pennello (un colore o una tessera). **Backspace** toglie una forma morbida intera se la misura sullo schermo è quella con cui l'hai messa. Sul Pi Zero W usa pochi lati: una sfera da 8 lati ha 48 triangoli, un tubo 64, un arco 68.
 
 ## Lo strumento tile
 
@@ -135,7 +165,7 @@ Premi **Tab** (sul gamepad **Y**) per aprire lo sheet.
 - Fuori dallo sheet, **r** ruota il pennello di un quarto di giro solo con gli strumenti 1-2 (con lo strumento 3, selezione, **r** ruota le facce scelte), e **h** specchia il pennello con qualsiasi strumento. **x** prende la tessera o il colore dalla faccia sotto il cursore.
 - Con un colore come pennello, le facce prendono un colore piatto e nessuna texture.
 
-![Il selettore di tessere: lo sheet, la selezione e la tessera ingrandita](shots/editor-studio-tiles.png)
+!Il selettore di tessere: lo sheet, la selezione e la tessera ingrandita
 
 ## Selezionare e spostare
 
@@ -153,7 +183,10 @@ Le frecce portano il puntatore sulla faccia più vicina in quella direzione sull
 | `n` | Mostra l'altro lato della faccia |
 | `Enter` | Mette sulle facce la tessera del pennello |
 | `u` | Ruota la texture |
-| `,` / `.` | Grande la metà / grande il doppio |
+| `,` / `.` | Grande la metà / grande il doppio (sull'asse scelto con `p`) |
+| `p` | Scegli l'asse della scala: tutti, x, y o z |
+| `l` | Copia speculare: le facce scelte si copiano oltre il piano della cella del cursore (simmetria) |
+| `f` | Gira la diagonale di un quadrato (i due triangoli lo tagliano all'altro modo) |
 | `d` | Copia e sposta la copia |
 | `Del` | Cancella le facce |
 | `o` | Sposta le facce in un nuovo modello |
@@ -191,7 +224,7 @@ Con lo strumento **5** (paint) scelto, **Enter** o **Spazio** apre la tessera de
 
 Con il mouse, tieni premuto il tasto sinistro sopra i pixel e trascina.
 
-![Il pannello paint: la tessera di una faccia, pixel per pixel](shots/editor-studio-paint.png)
+!Il pannello paint: la tessera di una faccia, pixel per pixel
 
 # La pagina models e la riduzione delle mesh
 
@@ -210,9 +243,10 @@ Premi **F2**. L'elenco a sinistra contiene i modelli del file. Sopra la vista, t
 | `PgUp` / `PgDn` | Cambia l'ordine |
 | `-` | Riduce i triangoli |
 | `m` | Crea un modello da un'immagine |
+| `c` | Classe mappa del modello: non detta, solid, floor o decor (i flag del modello, per un kit di mappa) |
 | `i` | Margine della texture: 0, 0.125, 0.25, 0.5 pixel |
 
-![La pagina models: l'elenco, i conteggi e il modello che gira](shots/editor-studio-models.png)
+!La pagina models: l'elenco, i conteggi e il modello che gira
 
 ## Ridurre i triangoli
 
@@ -220,7 +254,7 @@ Premi `-`. La finestra chiede i triangoli voluti e propone la metà. Il riduttor
 
 ## Perché conta
 
-La console disegna circa 1200 triangoli in una scena a 60 fps. Oltre, i conteggi diventano un avviso: `heavy for 60 fps (1200 triangles a scene)`.
+Sull'ARM in modalità software, la console disegna circa 1200 triangoli in una scena a 60 fps. Con la GPU VideoCore IV (Vertex Shader + Coda a doppio job), la console arriva fino a **50.000 triangoli a 60 fps** (e 27.400 a 1080p). Se il modello supera la soglia raccomandata (1.200 per ARM o 8.000 per singolo modello su GPU), i conteggi diventano un avviso: `heavy for ...`.
 
 ## Avvertenze
 
@@ -237,7 +271,7 @@ La console disegna circa 1200 triangoli in una scena a 60 fps. Oltre, i conteggi
 | Tasto | Cosa fa |
 |---|---|
 | `Ctrl+S` | Salva sul posto |
-| `Ctrl+Shift+S` | Salva con nome: un nome in forma 8.3, in `/carts`, che finisce in `.BME` |
+| `Ctrl+Shift+S` | Salva con nome: un nome in forma 8.3, in `/bme`, che finisce in `.BME` |
 | `F5` | Salva, poi prova il gioco |
 
 ## Cosa viene salvato
@@ -250,7 +284,21 @@ La console disegna circa 1200 triangoli in una scena a 60 fps. Oltre, i conteggi
 
 Il formato di risorsa per i modelli è `.bmm`: MESH, ANIM se animato e uno sheet con solo le celle usate dalle texture. Sul PC, `scripts/bmres.py extract GAME.bm --model villager -o VILLAGER.bmm` ne ricava uno da un gioco.
 
-[DA COMPLETARE: salvare e aprire file `.bmm` dal bm Studio della console; i documenti sulle risorse dicono che è previsto, il programma salva solo il progetto]
+bm Studio legge e scrive file `.bmm` in `/bmm`. La sezione seguente mostra come.
+
+## Importare un .glb
+
+La scheda SD ha due cartelle per i modelli. `/glb` contiene i file `.glb` che copi lì; bm Studio li legge soltanto. `/bmm` contiene i modelli convertiti (`.bmm`); bm Studio li scrive lì. Tutti i nomi sono in minuscolo.
+
+1. Premi **Ctrl+I**, oppure scegli **Import a model...** nel menu (Esc). Sul pad, premi Y + B per il menu.
+2. L'elenco mostra `/bmm` e `/glb`. Un nome segnato `.glb: converted to /bmm` non ha ancora un `.bmm`.
+3. Scegli un `.bmm` per leggerlo. Scegli un `.glb` per convertirlo: bm Studio scrive `/bmm/NAME.bmm` e aggiunge il modello al progetto.
+4. Se il nome ha più di 8 caratteri, o `/bmm` ha già quel nome, bm Studio chiede un nuovo nome (da 1 a 8 tra a-z, 0-9, `_` e `-`).
+5. La riga di stato mostra i vertici e i triangoli. Se il file non va bene, mostra il messaggio della console, per esempio il limite del formato di 65535 vertici o triangoli.
+
+Un `.glb` dà colori piatti. Un `.bmm` con uno scheletro lo conserva (bm Animator lo anima). La texture di un `.bmm` va sullo sheet del progetto solo quando lo sheet è vuoto; altrimenti le facce che la usavano diventano grigie. Un `.bmm` con più modelli dà il primo.
+
+**Ctrl+S** salva il modello nel progetto, come ogni modello. **Ctrl+E**, o **Export to /bmm...** nel menu, scrive il modello corrente in `/bmm/NAME.bmm` con il suo scheletro; se il file c'è già, bm Studio chiede prima di sostituirlo.
 
 ## Per un gioco costruito dal repository
 
@@ -337,9 +385,9 @@ Se il conteggio supera 1200, la riga dice `heavy for 60 fps`. Riduci finché l'a
 
 # Consigli e limiti
 
-- Circa 1200 triangoli in una scena è ciò che la console disegna a 60 fps. Un modello ridotto è il modo più economico per restare sotto.
+- Su rendering software ARM circa 1200 triangoli in una scena è ciò che la console disegna a 60 fps; con la GPU (fast-path VideoCore IV) il budget sale a 50.000 triangoli a 60 fps (e fino a 8.000 per singolo modello dettagliato). Un modello ridotto con `-` o suddiviso in livelli di dettaglio (LOD) è il modo più efficiente per garantire massime prestazioni.
 - Le celle del cursore vanno da -64 a 63 su ogni asse.
-- Un numero di vertici oltre il limite diventa rosso nel pannello, e oltre il limite il salvataggio fallisce: 4096 vertici (e 16384 triangoli).
+- Il pannello conta vertici e triangoli. Il salvataggio non ha un tetto di dimensione; resta solo il limite del formato di 65535 vertici e 65535 triangoli per mesh. Il contatore dei vertici lo mostra ("of 65535").
 - Le facce con texture richiedono lo sprite sheet: le texture ne sono dei pezzi.
 - Usa spesso **F5**: salva e mostra il modello nel gioco.
 - Un gioco e un progetto non sono la stessa cosa: il menu mostra il percorso del file su cui lavori, quindi controlla che sia la copia `.BME` prima di proseguire.

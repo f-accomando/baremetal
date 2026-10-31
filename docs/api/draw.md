@@ -8,7 +8,11 @@ Part of the game API. Index and basics: [API.md](../API.md).
 |---|---|
 | `rgb(r, g, b)` | the colour integer `0xRRGGBB` of three numbers 0-255 (the colours of the API are 24-bit integers: `0xFFFFFF` is white; a small number such as 7 is nearly black) |
 | `cls([c])` | fills the screen (black if `c` is missing). With the 3D on the GPU the ARM does not fill it: the GPU's job clears the page to that colour (free even at 1080p); if 2D comes before the 3D the ARM fills it as always |
-| `screen(w, h)` | the cartridge's resolution from the next frame: `true`, or `false` if it is not one of these (16:9): 320×180, 384×216, 480×270, 640×360, 960×540, 1280×720, 1920×1080 (on a 1080p TV all at whole pixels but 1280×720). `SCREEN_W` and `SCREEN_H` change when it is done; the z-buffer, the 3D camera and the light buffers follow, the font and `camera()` stay, `clip()` goes back to the whole screen. If the console cannot give it, the one before stays. `screen()` → the width and height now; `screen(i)` → the i-th of the list (from 1), or `nil`. On the **RGB30** (a square panel) the list is the `.b16`'s two sizes instead, 360×360 (shown twice as big) and 720×720, both at whole pixels. A square cartridge (256×256, 360×360) changes as the others (2026-10-10): on the Pi it then fills the TV, and the GPU can draw its 3D there (in the box in the middle the ARM draws it). The ARM's rasteriser pays for every pixel: on the Pi above 640×360 the GPU is needed |
+| `screen(w, h)` | the cartridge's resolution from the next frame: `true`, or `false` if it is not one of these (16:9): 320×180, 384×216, 480×270, 640×360, 960×540, 1280×720, 1920×1080 (on a 1080p TV all at whole pixels but 1280×720). `SCREEN_W` and `SCREEN_H` change when it is done; the z-buffer, the 3D camera and the light buffers follow, the font and `camera()` stay, `clip()` goes back to the whole screen. If the console cannot give it, the one before stays. `screen()` → the width and height now; `screen(i)` → the i-th of the list (from 1), or `nil`. On the **RGB30** (a square panel) the list is different: 1 = 360×360 (shown twice as big), 2 = 720×720 (both at whole pixels) and 3 = 720×405 (16:9, centred, black bars above and below; the order is fixed, so `screen(1)` and `screen(2)` stay as they were). A square cartridge (256×256, 360×360) changes as the others (2026-10-10): on the Pi it then fills the TV, and the GPU can draw its 3D there (in the box in the middle the ARM draws it). The ARM's rasteriser pays for every pixel: on the Pi above 640×360 the GPU is needed |
+| `safe_area()` | `x, y, w, h, dw, dh`: `x, y, w, h` of the part of the screen that has the aspect the cartridge was made for (the size in its header), in the middle. Same aspect: `0, 0, W, H`. The design is wider than the screen: the whole width and the middle of the height. Otherwise: the whole height and the middle of the width (a 360×360 game on 640×360 gives `140, 0, 360, 360`). Lay the HUD and the menus out in this area when the screen can have another shape (`screen()`, the RGB30's 720×405). `dw, dh` are the header size (the design). `lib.view()` and `lib.anchor()` of bmlib use this area |
+| `screen_modes()` | the modes `screen()` takes on this device now, as a table `{ {w, h}, ... }` in the order of `screen(i)`, and a second result: the index of the current mode (`nil` if the size is no mode of the list, for example a 360×360 cartridge on a TV). The TV list has 7 modes, the square panel 3. Use it to build a menu of sizes: no list in the game to keep in step with the kernel |
+| `function _screen(w, h)` | a hook, like `_init`: if the cartridge defines it, the runtime calls it once before `_init` with the first mode (`SCREEN_W` and `SCREEN_H` are set), and once at the start of the frame that follows a size change (`screen(w, h)` took effect), before `_update`, with the new size. The call is not made when `screen()` asks for the size the screen already has. Put the layout that depends on the size here (positions of the HUD, the safe area, the buffers). A game that does not define it is not changed. `lib.layout.poll()` does the same by polling |
+| `aspect()` | the screen's width divided by its height, and `"wide"` (wider than tall), `"square"` or `"tall"`. 640×360 gives `1.777…, "wide"`; 360×360 gives `1, "square"` |
 | `pset(x, y, c)` / `pget(x, y)` | writes / reads a pixel (`pget` gives `0xRRGGBB`, or `nil` off screen) |
 | `line(x0, y0, x1, y1, c)` | a line |
 | `rect(x, y, w, h, c)` / `rectfill(x, y, w, h, c)` | an empty / filled rectangle |
@@ -34,11 +38,15 @@ pixel, decoded at loading (Titan Clash: 2048×3376 pixels in 1.7 MB).
 |---|---|
 | `spr(n, x, y, [w, h, flip_x, flip_y])` | draws cell `n` (w×h cells, default 1×1), mirrored too |
 | `sspr(sx, sy, sw, sh, dx, dy, [flip_x, flip_y, zoom])` | copies any rectangle of the sheet; with `zoom` (default 1) it draws it bigger (`2`, `3`…) or smaller (`0.5`), pixel by pixel: it covers `sw * zoom` × `sh * zoom` pixels |
+| `stack(sx, sy, w, h, n, x, y, [rz, scale, step])` | sprite stacking: draws `n` slices of `w`×`h` pixels that lie side by side on the sheet from `(sx, sy)`, left to right. Slice 1 is the bottom and is drawn first. `(x, y)` is the centre of the bottom slice on the ground. Each slice turns by `rz` radians (default 0) around its centre, is `scale` times bigger (default 1) and sits `step * scale` pixels above the slice below (default `step` 1). Colour 0 is transparent. It reads the sheet each call and keeps no memory. At `rz` 0 and `scale` 1 it equals `n` calls of `sspr`. A slice that is not wholly inside the sheet is skipped. `scale` of 0 or less, or above 64, draws nothing. `rz`, `scale` or `step` that is NaN or infinite draws nothing |
+| `stackv(sx, sy, w, h, n, x, y, [rz, scale, step])` | as `stack`, but the `n` slices lie one under the other on the sheet from `(sx, sy)`, top to bottom: the top one is slice 1, the bottom of the stack. The same drawing, the same limits (a slice that is not wholly inside the sheet is skipped), the same cost |
 | `sget(x, y)` / `sset(x, y, [c])` | reads / writes a pixel of the sheet (`nil` = transparent) |
 | `zspr(name, x, y, [frame, flip_x, flip_y, zoom])` | draws a **named zone** of the sheet (below): `frame` from 1 to the number of frames (beyond it starts again), or `nil`: the one its fps give at `time()`, so the animation runs by itself. Returns the frame drawn. A zone that is not there is an error |
-| `zone(name)` | `x, y, w, h, frames, fps` of the zone (its first frame, in sheet pixels), or `nil` |
+| `zstack(name, x, y, [rz, scale])` | draws a **stack zone** (a zone with slices, below) as `stack` does (as `stackv` for a `stackv` zone), with `step` 1: the slices of the zone, `(x, y)` the centre of the bottom one. A zone without slices (or one that is not there) is an error |
+| `zone(name)` | `x, y, w, h, frames, fps, slices` of the zone (its first frame, in sheet pixels), or `nil`. `slices` is 0 for a plain zone, 2 to 255 for a stack zone |
 | `zones()` | the names of the zones, in order (`{}` if there are none) |
 | `zboxes(name, [frame, kind])` | the **hitboxes and hurtboxes** of the frames of a zone (the BOXES section, 2026-10-04): a list of `{x, y, w, h, kind, frame}`, `x` and `y` from the frame's top left corner (they may stick out), `kind` `"hurt"` (where it can be hit), `"hit"` (where it hurts), `"body"` (the room the body takes) or a number of the game (3–255), `frame` 0 for a box of every frame. With `frame` (from 1; past the last it starts again) its boxes and those of every frame; without, all the zone's. `kind` (a name or a number) keeps one kind. `{}` if there are none; a zone that is not there is an error |
+| `gpu2d_sheet(sx, sy, w, h)` | the GPU's 2D (the V3D, with `gpu2d_only=1` or over 3D) draws only from a sheet up to 2048 x 2048: a window of a bigger sheet (up to 2048 x 2048, on the 8-pixel cells) is a texture of its own, and the `spr`, `sspr` and `map` cells whose source lies inside it go to the GPU, the others stay on the ARM in the same order. Returns true if the window is accepted; `gpu2d_sheet()` ends it. Nothing changes in the picture. Test it with `if gpu2d_sheet then` |
 | `map(mx, my, [x, y, mw, mh, layer, mask])` | draws the map from cell (mx, my), mw×mh cells, at (x, y). `layer`: the number (from 1) or the name of the layer (default 1). `mask`: only the cells whose tile has at least one of those **flags** (`fget`; 0 or missing: all) |
 | `mget(mx, my, [layer])` / `mset(mx, my, n, [layer])` | reads / writes a cell of the map (0 = empty; outside the map `mget` gives 0) |
 | `fget(n, [f])` | the **flags** of tile (sheet cell) `n`: a byte, 8 flags; with `f` (0–7) that flag, `true` or `false` |
@@ -63,7 +71,7 @@ map(0, 0, 0, 0, 80, 45, "front")    -- the tree tops over the hero
 game: wall, water, ladder, danger... Collisions look at the flags instead of the tiles'
 numbers. The convention of [bmlib](bmlib.md#bmlib-the-games-shared-library) (every game can choose
 another): flag 0 **solid** (1), 1 **platform** you can pass through from below (2), 2
-**ladder** (4), 3 **water** (8), 4 **hurts** (16); 5–7 free.
+**ladder** (4), 3 **water** (8), 4 **hurts** (16), 5 **trigger** (32: an area that starts something, a camp fire's warmth, a door, a zone of a scene); 6–7 free.
 
 ```lua
 if fget(mget(cx, cy), 0) then ... end            -- the cell is solid
@@ -82,6 +90,13 @@ zspr("coin", x, y)                     -- the coin's animation, it runs by itsel
 zspr("hero_run", x, y, f, to_the_left)
 local _, _, w, h = zone("hero_run")    -- its size, for collisions
 ```
+
+A **stack zone** names the slices of a sprite stack: in the zones file the line
+`stack name x y w h n` gives `n` slices (2 to 255) of `w`×`h` pixels, side by side from
+`(x, y)`, the bottom slice first. `zstack("tree", x, y, rz, scale)` draws it. The zone has
+one frame; `zone` returns the number of slices as its 7th value. The line
+`stackv name x y w h n` is the same with the slices one under the other, from `(x, y)` down (the
+sheet must hold `h`×`n` pixels below); `zstack` then draws as `stackv`.
 
 **Hitboxes and hurtboxes of the frames.** Under a zone, in the zones file, its boxes:
 `hurt` where the character can be hit, `hit` where its blow hurts, `body` the room it
@@ -106,18 +121,26 @@ end
 `--map name=file.csv` is one more layer (up to 8, in the order given; a CSV smaller than
 the first is filled with empty cells); `--flags flags.csv` the flags (numbers 0–255 for
 cells 0, 1, 2... in order, or `n=flags` for cell `n`); `--sprites zones.txt` the zones (one
-per line: `name x y w h [frames [fps]]`, under a zone its boxes: `hurt`, `hit` or `body
+per line: `name x y w h [frames [fps]]`, or `stack name x y w h n` for a stack zone; under a zone its boxes: `hurt`, `hit` or `body
 frame x y w h`, or `box kind frame x y w h` for a kind of the game; the names `hurt`,
-`hit`, `body` and `box` are not zones). In the repository's build the files
+`hit`, `body`, `box` and `stack` are not zones). In the repository's build the files
 `map_<name>.csv` (in order with `layers_<game> := name ...` in the `Makefile`),
 `flags.csv` and `sprites.txt` in the game's folder are enough. On the console, on the
 SDK's map page `l` goes to the next layer, Shift+L adds one (also from the menu, *New map
-layer*), `o` shows that one alone, `c` the flags of the tiles; on the sprite page keys
+layer*), `o` shows that one alone, `c` the flags of the tiles, `p` the sprite previews; on the sprite page keys
 `0`–`7` turn the cell's flags on; bm Pixel and `scripts/bmres.py` make zones (`bmres.py`
 carries the boxes with their zones). `cart_save` and `cart_load` carry layers, flags, zones
 and boxes with the cartridge. Format: the LAYERS (12), FLAGS (13), SPRITES (11) and BOXES
 (14) sections in `src/bm/bm.h`; a kernel of before draws the first layer and ignores the
 rest.
+
+Sprite previews: the map page can draw a real sprite over a placeholder tile. The layer must be
+named `objects`. Name a zone `pv<cell>`, where `<cell>` is the number of the placeholder's tile
+(its first 8x8 cell on the sheet). The zone is the sprite's rectangle on the sheet. The page draws
+the sprite with its bottom centre on the bottom centre of the 16x16 tile. Key `p` turns the
+previews on and off (they start on). The previews show at zoom 1:1 and 2x, and only when `o` is
+off or the layer `objects` is the layer you edit. Yharnam's `mkassets.py` writes these zones
+into `sprites.txt`.
 
 The map comes from `--map map.csv` (one row of comma-separated numbers per row of the
 map; each number is a cell of the sheet). Without a map it is 256×256 empty cells, one

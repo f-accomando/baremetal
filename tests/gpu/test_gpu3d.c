@@ -46,17 +46,17 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...)
     return n;
 }
 
-static uint8_t glyphs[256 * 16];         /* a pattern a glyph (M37's text) */
+static uint8_t glyphs[256 * 16];         /* a pattern a glyph (bm3d 4.8's text) */
 static const font_t font = { 8, 16, glyphs };
 static const char *ppm_dir;
 
 static g16_sheet_t sheet, sheet2, sheet3;
 static g16_sheet_t sheets10[10];        /* more sheets than the backend keeps in a job (8) */
-static g16_sheet_t sheet_e;             /* M39 (bm3d 7.3): opaque 128x128, gradients and checkers (ETC1) */
+static g16_sheet_t sheet_e;             /* bm3d 7.3: opaque 128x128, gradients and checkers (ETC1) */
 static r3d_mesh_t quad_e;               /* a quad over the whole of sheet_e */
-static r3d_mesh_t sphere, quad, floor_m, cube, lit_quad, glass, lit_box, hero, hero_tex, hero_skin;
+static r3d_mesh_t sphere, quad, floor_m, cube, lit_quad, glass, lit_box, hero, hero_tex, hero_skin, hero_skin_col;
 static r3d_mesh_t quad_s, lit_quad_s, lit_box_s;     /* M34: textured screen-door faces */
-static r3d_mesh_t grid_shuffled;        /* M39: a grid whose faces come in no order */
+static r3d_mesh_t grid_shuffled;        /* bm3d 5.6: a grid whose faces come in no order */
 static const r3d_mesh_t *hero_m = &hero;     /* the hero of s_vshader_heroes */
 static float hero_bones[2][12];
 static uint8_t hero_vbone[512];
@@ -116,7 +116,7 @@ static void make_sheet(void)
             g16_sheet_update_cell(&sheet_e, cx, cy);
 }
 
-/* M36: a "hero": a sphere (bone 0) and a cube above it (bone 1), lit by
+/* bm3d 3.0: a "hero": a sphere (bone 0) and a cube above it (bone 1), lit by
  * the sun; glossy, emissive, screen-door and flat faces */
 static void make_hero(void)
 {
@@ -182,6 +182,20 @@ static void make_hero(void)
     hero_skin.vbone = hero_skin_vbone;
     hero_skin.nbones = 2;
     r3d_mesh_normals(&hero_skin);
+    /* bm3d 7.33: the same skin in plain colours (vs_lit2): the hero's colours, emissive and flat
+     * faces kept; a glossy face on two bones would send it to the ARM, so its gloss goes */
+    r3d_mesh_alloc(&hero_skin_col, hero.nverts, hero.nfaces);
+    memcpy(hero_skin_col.verts, hero.verts, (size_t)hero.nverts * sizeof *hero.verts);
+    memcpy(hero_skin_col.faces, hero.faces, (size_t)hero.nfaces * 3 * sizeof *hero.faces);
+    for (int f = 0; f < hero.nfaces; f++) {
+        const uint16_t *fc = hero.faces + f * 3;
+        const int two = hero_skin_vbone[fc[0]] != hero_skin_vbone[fc[1]] || hero_skin_vbone[fc[0]] != hero_skin_vbone[fc[2]];
+        hero_skin_col.colors[f] = (hero.colors[f] & ~(two ? R3D_GLOSSY : 0u)) | (f % 13 == 0 ? R3D_FLAT : 0);
+    }
+    hero_skin_col.bones = hero.bones;
+    hero_skin_col.vbone = hero_skin_vbone;
+    hero_skin_col.nbones = 2;
+    r3d_mesh_normals(&hero_skin_col);
     r3d_mesh_free(&s);
     r3d_mesh_free(&c);
 }
@@ -265,7 +279,7 @@ static void make_meshes(void)
     }
     r3d_mesh_normals(&lit_quad);
     r3d_mesh_cube(&glass, 0x40C0F0 | R3D_SCREEN);
-    /* M36: a "lit" box as Overbit's map has them: textured faces and faces
+    /* bm3d 3.0: a "lit" box as Overbit's map has them: textured faces and faces
      * of a colour, light baked at every corner, an emissive face, two
      * faces shown only at the details 0 and 1 */
     r3d_mesh_cube(&lit_box, 0x80C060);
@@ -316,7 +330,7 @@ static void make_meshes(void)
 
 typedef void (*scene_fn)(r3d_t *r, g16_t *g, int gpu);
 
-static int use_queue;                   /* M35: the end of the scene started, then waited for */
+static int use_queue;                   /* bm3d 4.1: the end of the scene started, then waited for */
 
 static void flush(r3d_t *r, g16_t *g, int gpu)
 {
@@ -329,7 +343,7 @@ static void flush(r3d_t *r, g16_t *g, int gpu)
         CHECK(gpu3d_flush(g, 0) == 0, "flush: %s (%s)", gpu3d_status(), emu_error);
 }
 
-/* M36: unlit meshes inside the view: with the vertex shader on, the GPU
+/* bm3d 3.0: unlit meshes inside the view: with the vertex shader on, the GPU
  * places them itself (and throws their back faces away) */
 static void s_vshader(r3d_t *r, g16_t *g, int gpu)
 {
@@ -343,7 +357,7 @@ static void s_vshader(r3d_t *r, g16_t *g, int gpu)
     gpu3d_set_vshader(0);
 }
 
-/* M36: "lit" boxes with fog and a lamp, at two levels of detail */
+/* bm3d 3.0: "lit" boxes with fog and a lamp, at two levels of detail */
 static int vs_off;                      /* the GPU without its vertex shader */
 static void s_vshader_lit(r3d_t *r, g16_t *g, int gpu)
 {
@@ -360,7 +374,7 @@ static void s_vshader_lit(r3d_t *r, g16_t *g, int gpu)
     r3d_fog(r, 0, 0, 0);
 }
 
-/* M39: "lit" boxes in a row from far to near, each hiding most of the one
+/* bm3d 5.4: "lit" boxes in a row from far to near, each hiding most of the one
  * before: drawn as the scene says or nearest first (gpu3d_set_sort) */
 static void s_far_to_near(r3d_t *r, g16_t *g, int gpu)
 {
@@ -376,7 +390,7 @@ static void s_far_to_near(r3d_t *r, g16_t *g, int gpu)
     r3d_fog(r, 0, 0, 0);
 }
 
-/* M39: the grid of shuffled faces, unlit, by the vertex shader */
+/* bm3d 5.6: the grid of shuffled faces, unlit, by the vertex shader */
 static void s_grid(r3d_t *r, g16_t *g, int gpu)
 {
     r3d_camera(r, 0, 0, -5, 0, 0, 60);
@@ -386,7 +400,7 @@ static void s_grid(r3d_t *r, g16_t *g, int gpu)
     gpu3d_set_vshader(0);
 }
 
-/* M36: meshes the GPU clips: a "lit" floor under the camera and a wall
+/* bm3d 3.0: meshes the GPU clips: a "lit" floor under the camera and a wall
  * beside it, both reaching behind it (the near plane, the guard band),
  * and a lamp. The fog starts past them: the GPU blends the corners' fog
  * where it cuts a face, the ARM works it out there (as Overbit's map
@@ -408,7 +422,7 @@ static void s_vshader_clip(r3d_t *r, g16_t *g, int gpu)
     r3d_fog(r, 0, 0, 0);
 }
 
-/* M36: models lit by the sun with two bones (the heroes of Overbit), by
+/* bm3d 3.0: models lit by the sun with two bones (the heroes of Overbit), by
  * the vertex shader at level 2: Gouraud and flat, sky and ground, rim and
  * highlights, a lamp on the smooth ones, the fog; one through the near
  * plane */
@@ -461,6 +475,114 @@ static void s_vshader_skin(r3d_t *r, g16_t *g, int gpu)
     hero_m = &hero_skin;
     s_vshader_heroes(r, g, gpu);
     hero_m = &hero;
+}
+
+/* bm3d 7.33: a skin of plain colours, faces on two bones (vs_lit2): the lamp in colour and the fog
+ * as vs_lit's */
+static void s_vshader_skin_col(r3d_t *r, g16_t *g, int gpu)
+{
+    hero_m = &hero_skin_col;
+    s_vshader_heroes(r, g, gpu);
+    hero_m = &hero;
+}
+
+/* bm3d 7.5: the cel light (cel3d, flag 256) by the vertex programs against the ARM's table: the
+ * heroes alone (no mesh but the cel ones, so a GPU that drew nothing by the vertex shader is
+ * seen), flat and smooth, 4 bands; the sun at 0.5 so that most faces are well inside a band; a
+ * lamp and the fog on top (they are not cut), the highlight a step */
+static int cel_bands = 4;
+static float cel_floor = 0.35f;
+static unsigned cel_outline;            /* R3D_OUTLINE with the colour and width of cel3d (bm3d 7.5) */
+static void s_vshader_cel(r3d_t *r, g16_t *g, int gpu)
+{
+    r3d_camera(r, 0, 0.6f, -5, 0, -0.05f, 60);
+    r3d_light(r, -0.4f, 0.7f, -0.6f, 0.35f);
+    r3d_sky(r, 0xFFF0D0, 0x90B0FF, 0x806040);
+    r3d_shine(r, 0.6f, 16, 0.5f);
+    r3d_fog(r, 0xC0A080, 4, 14);
+    r3d_lamp_rgb(r, 0, -1.6f, 0.5f, -1.2f, 2.0f, 0.9f, 0xFF8040);
+    r3d_cel(r, cel_bands, cel_floor);
+    if (cel_outline) {
+        r->cel_rgb = 0x2030A0;
+        r->cel_width = 0.03f;
+    }
+    gpu3d_set_vshader(gpu && !vs_off ? 2 : 0);
+    for (int i = 0; i < 4; i++) {
+        const float a = 0.5f * (float)i;
+        const float b0[12] = { cosf(a), 0, sinf(a), 0, 0, 1, 0, 0, -sinf(a), 0, cosf(a), 0 };
+        const float b1[12] = { 1, 0, 0, 0.2f * (float)i, 0, cosf(a), -sinf(a), 0, 0, sinf(a), cosf(a), 0 };
+        memcpy(hero_bones[0], b0, sizeof b0);
+        memcpy(hero_bones[1], b1, sizeof b1);
+        const v3_t at[4] = { { -1.8f, -0.4f, 1 }, { 0, -0.3f, 0 }, { 1.8f, -0.4f, 1.5f }, { 0.3f, 0.2f, -4.6f } };
+        r3d_draw_flags(r, hero_m, at[i], 0, 0.3f * (float)i, 0, 0.7f,
+                       R3D_CEL | cel_outline | (i == 2 ? 0 : R3D_SMOOTH));
+    }
+    r3d_draw_flags(r, hero_m, (v3_t){ 0.9f, -0.2f, -3.2f }, 0.3f, 0.5f, 0, 0.3f, R3D_CEL | R3D_FRONT | R3D_SMOOTH);
+    flush(r, g, gpu);
+    gpu3d_set_vshader(0);
+    r3d_cel(r, 0, 0.35f);
+    r->cel_rgb = R3D_CEL_NO_OUTLINE;
+    r->cel_width = 0.02f;
+    r3d_lamp(r, 0, 0, 0, 0, 0, 0);
+    r3d_fog(r, 0, 0, 0);
+    r3d_shine(r, 0.6f, 16, 0);
+    r3d_sky(r, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF);
+}
+
+/* the outline by the inverted hull (flag 512): the heroes with it, flat and smooth, one through the
+ * near plane, cel and not; the hull is an unlit mesh of the same bones (bm3d 7.5) */
+static void s_vshader_outline(r3d_t *r, g16_t *g, int gpu)
+{
+    cel_outline = R3D_OUTLINE;
+    s_vshader_cel(r, g, gpu);
+    cel_outline = 0;
+}
+
+static void s_vshader_outline_skin(r3d_t *r, g16_t *g, int gpu)
+{
+    hero_m = &hero_skin;
+    s_vshader_outline(r, g, gpu);
+    hero_m = &hero;
+}
+
+static void s_vshader_cel_tex(r3d_t *r, g16_t *g, int gpu)
+{
+    hero_m = &hero_tex;
+    s_vshader_cel(r, g, gpu);
+    hero_m = &hero;
+}
+
+static void s_vshader_cel_skin(r3d_t *r, g16_t *g, int gpu)
+{
+    hero_m = &hero_skin;
+    s_vshader_cel(r, g, gpu);
+    hero_m = &hero;
+}
+
+static void s_vshader_cel_skin_col(r3d_t *r, g16_t *g, int gpu)
+{
+    hero_m = &hero_skin_col;
+    s_vshader_cel(r, g, gpu);
+    hero_m = &hero;
+}
+
+/* 2 bands with no floor, and 8 with the floor at 1: the ends of cel3d's range */
+static void s_vshader_cel_2(r3d_t *r, g16_t *g, int gpu)
+{
+    cel_bands = 2;
+    cel_floor = 0;
+    s_vshader_cel(r, g, gpu);
+    cel_bands = 4;
+    cel_floor = 0.35f;
+}
+
+static void s_vshader_cel_8(r3d_t *r, g16_t *g, int gpu)
+{
+    cel_bands = 8;
+    cel_floor = 0.1f;
+    s_vshader_cel(r, g, gpu);
+    cel_bands = 4;
+    cel_floor = 0.35f;
 }
 
 static void s_spheres(r3d_t *r, g16_t *g, int gpu)
@@ -582,7 +704,7 @@ static void s_vshader_sheets(r3d_t *r, g16_t *g, int gpu)
     gpu3d_set_vshader(0);
 }
 
-/* ten sheets in turn: more than a job keeps (8), so two jobs */
+/* ten sheets in turn: a job keeps 32, so one job */
 static void s_sheets10(r3d_t *r, g16_t *g, int gpu)
 {
     r3d_camera(r, 0, 0, -6, 0, 0, 60);
@@ -596,7 +718,7 @@ static void s_sheets10(r3d_t *r, g16_t *g, int gpu)
     flush(r, g, gpu);
 }
 
-/* M39 (bm3d 7.3): the opaque sheet_e on a large quad, unlit, and smaller
+/* bm3d 7.3: the opaque sheet_e on a large quad, unlit, and smaller
  * and turned beside it */
 static void s_etc1(r3d_t *r, g16_t *g, int gpu)
 {
@@ -656,6 +778,26 @@ static void s_overbit(r3d_t *r, g16_t *g, int gpu)
     flush(r, g, gpu);
 }
 
+/* bm3d 7.7: the shadow that darkens (style 0) on a floor and a lit sphere above it, the corners
+ * drawn by r3d (vs 0) or the shadow by the vertex programs (vs 1); the ARM darkens the same pixels */
+static void shadow_darken(r3d_t *r, g16_t *g, int gpu, int vs)
+{
+    r3d_camera(r, 0, 1.5f, -5, 0, -0.25f, 60);
+    r3d_light(r, -0.3f, 0.8f, 0.4f, 0.4f);
+    r->shadow_style = 0;
+    gpu3d_set_vshader(gpu != 0 && vs);
+    r3d_draw_flags(r, &cube, (v3_t){ 0, -2.2f, 1 }, 0, 0, 0, 1.2f, 0);
+    r3d_draw_flags(r, &sphere, (v3_t){ 0.6f, -1.0f, 1 }, 0, 0, 0, 0.8f, R3D_SHADOW);
+    r3d_draw_flags(r, &sphere, (v3_t){ -0.7f, -1.0f, 1.4f }, 0, 0, 0, 0.6f, R3D_SHADOW);
+    r3d_draw_flags(r, &sphere, (v3_t){ 0.6f, -0.2f, 1 }, 0, 0, 0, 0.8f, R3D_SMOOTH);
+    if (gpu)
+        CHECK(r->backend != NULL, "shadow darken: the shadows went to the ARM");
+    flush(r, g, gpu);
+    gpu3d_set_vshader(0);
+}
+static void s_shadow_darken(r3d_t *r, g16_t *g, int gpu) { shadow_darken(r, g, gpu, 0); }
+static void s_shadow_darken_vs(r3d_t *r, g16_t *g, int gpu) { shadow_darken(r, g, gpu, 1); }
+
 /* M34: textured screen-door faces over a sphere: a plain textured quad, a
  * quad of a "lit" model (light baked, fog), a "lit" box through the vertex
  * shader (vsh), all on the GPU (they went to the ARM before) */
@@ -676,11 +818,41 @@ static void s_tex_screen(r3d_t *r, g16_t *g, int gpu)
     gpu3d_set_vshader(0);
 }
 
-/* M37: 2D over the 3D in the same job: rectangles, sprites (flipped, at
+/* bm3d 4.8: 2D over the 3D in the same job: rectangles, sprites (flipped, at
  * twice their size), text (in lines, scaled), under a camera and a clip
  * rectangle, then 3D partly behind it. The ARM draws the same with gfx16:
  * the 2D pixel for pixel, the 3D after it hiding it where it is nearer. */
 static int g2d;                         /* the 2D drawn by the GPU */
+/* a piece of the draw merging tests: k by k squares of 1 by 1 (two triangles each), baked light; kind 0 with the
+ * sheet, 1 with colours */
+static void merge_piece(r3d_mesh_t *m, int k, int kind)
+{
+    r3d_mesh_alloc(m, (k + 1) * (k + 1), 2 * k * k);
+    r3d_mesh_alloc_uv(m);
+    for (int z = 0; z <= k; z++)
+        for (int x = 0; x <= k; x++)
+            m->verts[z * (k + 1) + x] = (v3_t){ (float)x / k - 0.5f, 0.03f * (float)((x * 5 + z * 3) % 4), (float)z / k - 0.5f };
+    for (int z = 0, t = 0; z < k; z++)
+        for (int x = 0; x < k; x++, t += 2) {
+            const uint16_t a = (uint16_t)(z * (k + 1) + x), b = (uint16_t)(a + 1), c = (uint16_t)(a + k + 1),
+                           d = (uint16_t)(c + 1);
+            const uint16_t f[6] = { a, c, b, b, c, d };
+            memcpy(m->faces + t * 3, f, sizeof f);
+            m->colors[t] = m->colors[t + 1] = kind ? 0xC08040u : R3D_TEXTURED;
+            for (int q = 0; q < 2; q++)
+                for (int v = 0; v < 3; v++) {
+                    const int vi = f[q * 3 + v];
+                    m->uv[(t + q) * 6 + v * 2] = (float)(vi % (k + 1)) * 30.0f;
+                    m->uv[(t + q) * 6 + v * 2 + 1] = (float)(vi / (k + 1)) * 30.0f;
+                }
+        }
+    m->clight = malloc((size_t)m->nfaces * 9);
+    for (int i = 0; i < m->nfaces * 9; i++)
+        m->clight[i] = (uint8_t)(70 + (i * 37 + kind * 11) % 120);
+    m->tex = kind ? NULL : &sheet;
+    r3d_mesh_normals(m);
+}
+
 static void rect2d(g16_t *g, int x, int y, int w, int h, uint16_t c)
 {
     if (g2d)
@@ -763,6 +935,8 @@ static const struct { const char *name; scene_fn fn; int w, h; float limit; int 
     { "3D 2D 3D", s_split, 640, 360, 0.02f, 0 },
     { "cleared", s_cleared, 320, 180, 0.02f, 1 },
     { "overbit", s_overbit, 640, 360, 0.03f, 1 },
+    { "shadow darken", s_shadow_darken, 640, 360, 0.03f, 0 },
+    { "shadow darken vs", s_shadow_darken_vs, 640, 360, 0.03f, 0 },
     { "effects", s_effects, 640, 360, 0.02f, 1 },
     { "vshader", s_vshader, 640, 360, 0.02f, 1 },
     { "vshader lit", s_vshader_lit, 640, 360, 0.04f, 1 },
@@ -770,6 +944,15 @@ static const struct { const char *name; scene_fn fn; int w, h; float limit; int 
     { "vshader heroes", s_vshader_heroes, 640, 360, 0.04f, 1 },
     { "vshader textured", s_vshader_heroes_tex, 640, 360, 0.04f, 1 },
     { "vshader skin", s_vshader_skin, 640, 360, 0.04f, 1 },
+    { "vshader skin colour", s_vshader_skin_col, 640, 360, 0.04f, 1 },
+    { "cel heroes", s_vshader_cel, 640, 360, 0.04f, 1 },
+    { "cel textured", s_vshader_cel_tex, 640, 360, 0.04f, 1 },
+    { "cel skin", s_vshader_cel_skin, 640, 360, 0.04f, 1 },
+    { "cel skin colour", s_vshader_cel_skin_col, 640, 360, 0.04f, 1 },
+    { "cel 2 bands", s_vshader_cel_2, 640, 360, 0.04f, 1 },
+    { "cel 8 bands", s_vshader_cel_8, 640, 360, 0.04f, 1 },
+    { "outline", s_vshader_outline, 640, 360, 0.04f, 1 },
+    { "outline skin", s_vshader_outline_skin, 640, 360, 0.04f, 1 },
     { "10 sheets", s_sheets10, 640, 360, 0.02f, 0 },
     { "vshader sheets", s_vshader_sheets, 640, 360, 0.02f, 0 },
     { "vshader groups", s_vshader_groups, 640, 360, 0.02f, 0 },
@@ -870,7 +1053,7 @@ static void run_scene(int s)
             if (s == 4)
                 CHECK(emu_stats.jobs - jobs == 1, "3 sheets: %u jobs (8 sheets fit in one)", emu_stats.jobs - jobs);
             if (scenes[s].fn == s_sheets10)
-                CHECK(emu_stats.jobs - jobs >= 2, "10 sheets: one job");
+                CHECK(emu_stats.jobs - jobs == 1, "10 sheets: %u jobs (32 sheets fit in one)", emu_stats.jobs - jobs);
             if (scenes[s].fn == s_vshader_groups) {
                 CHECK(test_arena_overruns() == 0, "vshader groups: the corners' copy written past its end");
                 if (emu_clip != 1)      /* (the models lit by the sun need the clipper) */
@@ -888,7 +1071,12 @@ static void run_scene(int s)
                 CHECK(emu_stats.zstores > zstores, "3D 2D 3D: the depth was not kept");
             if (scenes[s].fn == s_vshader || scenes[s].fn == s_vshader_lit ||
                 ((scenes[s].fn == s_vshader_clip || scenes[s].fn == s_vshader_heroes ||
-                  scenes[s].fn == s_vshader_heroes_tex || scenes[s].fn == s_vshader_skin) && emu_clip != 1))
+                  scenes[s].fn == s_vshader_heroes_tex || scenes[s].fn == s_vshader_skin ||
+                  scenes[s].fn == s_vshader_cel || scenes[s].fn == s_vshader_cel_tex ||
+                  scenes[s].fn == s_vshader_cel_skin || scenes[s].fn == s_vshader_cel_2 ||
+                  scenes[s].fn == s_vshader_skin_col || scenes[s].fn == s_vshader_cel_skin_col ||
+                  scenes[s].fn == s_vshader_cel_8 || scenes[s].fn == s_vshader_outline ||
+                  scenes[s].fn == s_vshader_outline_skin) && emu_clip != 1))
                 CHECK(emu_stats.glverts > glverts, "vshader: no mesh placed by the vertex shader");
             if (s == CLEARED)
                 CHECK(emu_stats.loads == loads && emu_stats.jobs > jobs, "cleared: the page was loaded");
@@ -948,7 +1136,7 @@ int main(int argc, char **argv)
              "two-thread shaders %s, vertex shader %s, "
              "indexed yes, clipping %s, "
              "lit models yes, queue yes, zclear in job %s, compact attributes yes, alpha textures %s, "
-             "ETC1 textures %s)",
+             "ETC1 textures %s, cel light yes)",
              emu_red_a ? "red" : "blue", emu_tex_swap ? "swapped" : "in place",
              emu_tformat == 2 ? "rows" : "tiles", emu_ms_load_one ? "on cleared pages" : "on any page",
              emu_tformat == 2 ? "no" : "yes", emu_no_threads ? "no" : "yes",
@@ -994,7 +1182,7 @@ int main(int argc, char **argv)
     make_hero();
     for (size_t s = 0; s < sizeof scenes / sizeof *scenes; s++)
         run_scene((int)s);
-    /* M36: the same lit scenes by the GPU a triangle at a time (r3d places
+    /* bm3d 3.0: the same lit scenes by the GPU a triangle at a time (r3d places
      * the corners) and with the vertex shader: nearly the same pixels (the
      * clipped corners not quite where the ARM puts them) */
     uint16_t *pg[2] = { test_aligned_alloc(16, 640 * 360 * 2), test_aligned_alloc(16, 640 * 360 * 2) };
@@ -1040,7 +1228,7 @@ int main(int argc, char **argv)
             save(pg[1], 640, 360, sc_name[sc], "gl");
         }
     }
-    /* M39: opaque sheets as RGB565 textures: the same pixels as 32-bit */
+    /* bm3d 5.2: opaque sheets as RGB565 textures: the same pixels as 32-bit */
     {
         uint16_t *q[2] = { test_aligned_alloc(16, 640 * 360 * 2), test_aligned_alloc(16, 640 * 360 * 2) };
         for (int k = 0; k < 2; k++) {
@@ -1157,7 +1345,7 @@ int main(int argc, char **argv)
         else
             CHECK(e1 == 0 && esil == 0 && ese == 0, "ETC1 off: %u sheets made, %d pixels differ", e1, esil);
     }
-    /* M39: the opaque meshes nearest first: the same picture, fewer
+    /* bm3d 5.4: the opaque meshes nearest first: the same picture, fewer
      * pixels shaded (the early z throws away those of the boxes behind) */
     {
         uint16_t *q[2] = { test_aligned_alloc(16, 640 * 360 * 2), test_aligned_alloc(16, 640 * 360 * 2) };
@@ -1194,7 +1382,7 @@ int main(int argc, char **argv)
         test_free(q[0]);
         test_free(q[1]);
     }
-    /* M39: a grid of shuffled faces in the vertex cache's order: the same
+    /* bm3d 5.6: a grid of shuffled faces in the vertex cache's order: the same
      * picture, fewer corners shaded again (a cache of 16 in the emulator) */
     {
         uint16_t *q[2] = { test_aligned_alloc(16, 640 * 360 * 2), test_aligned_alloc(16, 640 * 360 * 2) };
@@ -1226,7 +1414,7 @@ int main(int argc, char **argv)
         test_free(q[0]);
         test_free(q[1]);
     }
-    /* M39: the textured faces' shaders with two threads: the same pixels
+    /* bm3d 5.3: the textured faces' shaders with two threads: the same pixels
      * (sheets, a lit quad in the fog, textured heroes by the vertex shader) */
     {
         uint16_t *q[2] = { test_aligned_alloc(16, 640 * 360 * 2), test_aligned_alloc(16, 640 * 360 * 2) };
@@ -1263,7 +1451,7 @@ int main(int argc, char **argv)
         test_free(q[0]);
         test_free(q[1]);
     }
-    /* M39: compact attributes (colour and light bytes packed, unpacked by
+    /* bm3d 7.1: compact attributes (colour and light bytes packed, unpacked by
      * vs_baked8 and vs_lit8): the same pixels as the floats, but for a
      * step of RGB565 where the unpack's byte / 255 and the ARM's byte *
      * (1 / 255) differ in their last bit (unlit and baked meshes, lit boxes
@@ -1308,7 +1496,7 @@ int main(int argc, char **argv)
         test_free(q[0]);
         test_free(q[1]);
     }
-    /* M37: the textures filtered (bilinear): the same scene changes, but
+    /* bm3d 4.8: the textures filtered (bilinear): the same scene changes, but
      * only a little (the magnified floor smooths its squares' edges) */
     {
         uint16_t *q[2] = { test_aligned_alloc(16, 640 * 360 * 2), test_aligned_alloc(16, 640 * 360 * 2) };
@@ -1333,7 +1521,7 @@ int main(int argc, char **argv)
         CHECK(differ > 200 && differ < 640 * 360 / 4, "bilinear: %d pixels differ from the nearest texel", differ);
         save(q[1], 640, 360, "textures", "bilinear");
     }
-    /* M37: a frame enlarged by the GPU (the menu at 1080p): 3 times, the
+    /* bm3d 4.8: a frame enlarged by the GPU (the menu at 1080p): 3 times, the
      * nearest pixel, as the ARM enlarges it */
     {
         enum { FW = 160, FH = 90, K = 3 };
@@ -1351,7 +1539,7 @@ int main(int argc, char **argv)
         printf("  enlarged %dx%d %d times by the GPU: %d pixels differ\n", FW, FH, K, differ);
         CHECK(differ == 0, "enlarge: %d pixels differ from the nearest", differ);
     }
-    /* M39: two jobs in flight (gpu3d_set_queue(2)): a frame's job started
+    /* bm3d 5.1: two jobs in flight (gpu3d_set_queue(2)): a frame's job started
      * and not waited for, the next frame's filled in the other block on
      * another page meanwhile, then both: the pictures of one at a time (the
      * emulator runs a started job when it is waited for: memory the driver
@@ -1399,7 +1587,7 @@ int main(int argc, char **argv)
         CHECK(differ == 0 && gpu3d_queue2() == 0 && s0.overlapped >= 2, "two jobs in flight: %d pixels differ, %u "
               "overlapped", differ, s0.overlapped);
     }
-    /* M35: every scene again with its end started on the V3D (semaphores,
+    /* bm3d 4.1: every scene again with its end started on the V3D (semaphores,
      * gpu3d_submit) and waited for, its zclear()s inside the job (fs_zclear):
      * the same pixels */
     gpu3d_stats_t st0;
@@ -1439,9 +1627,116 @@ int main(int argc, char **argv)
     st.jobs += st0.jobs;
     st.tris += st0.tris;
     CHECK(st.jobs >= 5, "%u jobs", st.jobs);
-    printf("  vertex shader: %u corners shaded for %u indexed (M39)\n", emu_stats.glverts, emu_stats.glindexed);
+    printf("  vertex shader: %u corners shaded for %u indexed (bm3d 5.0)\n", emu_stats.glverts, emu_stats.glindexed);
     CHECK(emu_stats.glindexed > 0 && emu_stats.glverts < emu_stats.glindexed, "indexed meshes: %u shaded for %u",
           emu_stats.glverts, emu_stats.glindexed);
+    /* bm3d 7.6: draw merging. A map of pieces that stand still (baked light, two kinds: with the sheet and
+     * with colours, some turned, one scaled), drawn frame after frame: the first frame draws the pieces, the
+     * second makes the merged meshes, the third draws them, one draw a run. The pixels are those of the
+     * pieces drawn one by one. */
+    {
+        static r3d_mesh_t mt[2];
+        for (int kind = 0; kind < 2; kind++)
+            merge_piece(&mt[kind], 4, kind);
+        uint16_t *mp[2] = { test_aligned_alloc(16, 640 * 360 * 2), test_aligned_alloc(16, 640 * 360 * 2) };
+        uint32_t pieces = 0, merged = 0;
+        uint32_t calls[2] = { 0, 0 };
+        int cap = 0;                    /* (the clipper and the vertex shader can merge) */
+        for (int on = 0; on < 2; on++) {
+            g16_t g;
+            r3d_t r;
+            g16_target(&g, mp[on], 640, 640, 360, &font);
+            r3d_init(&r, &g);
+            r.backend = gpu3d_backend();
+            r.merge = on;
+            gpu3d_drop();
+            gpu3d_set_vshader(2);
+            cap = gpu3d_backend()->merge(NULL, NULL, NULL);
+            const uint32_t m0 = r3d_merge_count(&pieces);
+            const int frames = on ? 3 : 1;
+            for (int fr = 0; fr < frames; fr++) {
+                g16_cls(&g, g16_rgb(30, 20, 50));
+                r3d_zclear(&r);
+                gpu3d_stats_t sx;
+                gpu3d_take_stats(&sx);
+                r3d_camera(&r, 0.3f, 2.5f, -6, 0.05f, -0.35f, 70);
+                for (int kind = 0; kind < 2; kind++)
+                    for (int i = 0; i < 8; i++)
+                        for (int j = 0; j < 8; j++)
+                            if (((i + j) & 1) == kind)
+                                r3d_draw_flags(&r, &mt[kind], (v3_t){ -3.5f + 1.0f * (float)i, -1.0f + 0.01f * (float)j, -1.0f + 1.0f * (float)j },
+                                               0, (float)((i + j) % 4) * 1.5707963f, 0, i == 2 && j == 3 ? 0.7f : 0.95f, 0);
+                CHECK(gpu3d_flush(&g, 0) == 0, "merge: flush: %s", gpu3d_status());
+                gpu3d_take_stats(&sx);
+                calls[on] = sx.glmeshes;
+            }
+            merged = r3d_merge_count(&pieces) - m0;
+            if (on)
+                printf("  draw merging (bm3d 7.6): %u meshes a frame against %u, %u merged meshes drawn for %u pieces%s\n",
+                       calls[1], calls[0], merged, (unsigned)pieces, cap ? "" : " (the backend cannot clip: not merged)");
+            gpu3d_set_vshader(0);
+            r3d_free(&r);
+        }
+        int differ = 0;
+        for (int i = 0; i < 640 * 360; i++)
+            differ += mp[0][i] != mp[1][i];
+        /* the vertex sums in another order: a pixel on an edge may fall on the other side (1 in 230400 so far) */
+        printf("  draw merging: %d of %d pixels differ from the pieces drawn one by one (rounding of the sums)\n", differ,
+               640 * 360);
+        CHECK(differ <= 10, "draw merging: %d pixels differ from the pieces drawn one by one", differ);
+        if (cap)
+            CHECK(merged == 4 && calls[1] == 2 && calls[0] == 64, "draw merging: %u merged draws, %u meshes against %u pieces",
+                  merged, calls[1], calls[0]);
+        /* a run merges only when it pays (r3d.c MG_MIN_PIECES, MG_MEAN_FACES): 100 small pieces do, 10 big
+         * ones do not (the Pi measured +24% and -26%) */
+        if (cap) {
+            static r3d_mesh_t small_, big_;
+            merge_piece(&small_, 4, 0);         /* 32 faces */
+            merge_piece(&big_, 16, 0);          /* 512 faces */
+            uint16_t *mt_buf = test_aligned_alloc(16, 640 * 360 * 2);
+            for (int c = 0; c < 2; c++) {
+                const int n = c ? 10 : 100, perrow = c ? 5 : 10;
+                const float gap = c ? 1.2f : 0.6f, sc = c ? 1.0f : 0.5f;
+                g16_t g;
+                r3d_t r;
+                g16_target(&g, mt_buf, 640, 640, 360, &font);
+                r3d_init(&r, &g);
+                r.backend = gpu3d_backend();
+                r.merge = 1;
+                gpu3d_drop();
+                gpu3d_set_vshader(2);
+                const uint32_t m0 = r3d_merge_count(&pieces);
+                uint32_t last = 0;
+                for (int fr = 0; fr < 3; fr++) {
+                    g16_cls(&g, g16_rgb(30, 20, 50));
+                    r3d_zclear(&r);
+                    gpu3d_stats_t sx;
+                    gpu3d_take_stats(&sx);
+                    r3d_camera(&r, 0.3f, 2.5f, -6, 0.05f, -0.35f, 70);
+                    for (int i = 0; i < n; i++)
+                        r3d_draw_flags(&r, c ? &big_ : &small_,
+                                       (v3_t){ -2.5f + gap * (float)(i % perrow), -1.0f, -1.0f + gap * (float)(i / perrow) },
+                                       0, 0, 0, sc, 0);
+                    CHECK(gpu3d_flush(&g, 0) == 0, "merge threshold: flush: %s", gpu3d_status());
+                    gpu3d_take_stats(&sx);
+                    last = sx.glmeshes;
+                }
+                const uint32_t mg = r3d_merge_count(&pieces) - m0;
+                printf("  draw merging threshold: %d pieces of %d faces: %u merged draws in 3 frames, %u meshes in the last\n",
+                       n, c ? 512 : 32, mg, last);
+                if (c)
+                    CHECK(mg == 0 && last == 10, "10 big pieces are not merged: %u merged draws, %u meshes", mg, last);
+                else
+                    CHECK(mg == 2 && last == 1, "100 small pieces are merged: %u merged draws, %u meshes", mg, last);
+                gpu3d_set_vshader(0);
+                r3d_free(&r);
+            }
+        }
+        if (ppm_dir) {
+            save(mp[0], 640, 360, "merge", "off");
+            save(mp[1], 640, 360, "merge", "on");
+        }
+    }
     const int over = test_arena_overruns();
     CHECK(over == 0, "%d blocks of the driver written past their end", over);
     printf("gpu3d: %u jobs, %u triangles; %d/%d checks passed\n", st.jobs, st.tris, checks - failures, checks);

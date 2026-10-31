@@ -25,15 +25,23 @@ bm Studio builds 3D models out of blocks and tiles, right on the console. You pl
 - **bm Pixel and the sprite sheet.** The textures of the faces are pieces of the project's sprite sheet. bm Pixel draws it.
 - **bm SDK.** The hub of the project. In its F1 page the *OPEN IN* list has bm Studio as number 3, and the menu of bm Studio has *Back to bm SDK* when the SDK opened it.
 
+## Which editor for what
+
+- **bm Studio**: static models. Objects, props and buildings, made of blocks and tiles. The 3D map of a game is made in the map page of bm SDK.
+- **bm Mesh**: organic models. Characters and heroes, and all fine editing of vertices and triangles.
+- **bm Animator**: rigs and animations. It puts a skeleton into a model and moves it. It does not build models.
+- bm Studio and bm Mesh write the same MESH section, so a model can go from one editor to the other.
+
 ## Good to know
 
 - bm Studio is a cartridge built into the kernel. You find it in the **Dev** tab of the menu.
 - You use it with the keyboard or the gamepad (Bluetooth or USB). The mouse also works when one is connected.
-- Hold **F12**, or press **?**, and the keys of the page you are on appear on the screen.
+- In a dialog line (for example the file name), a click puts the caret between the letters.
+- Hold **F12**, or press **?**, and the keys of the page you are on appear on the screen. The bar at the bottom ends with the chip F12 keys. Click it, or hold F12, to see every key of the page.
 
 # Opening a project or a game
 
-bm Studio changes **projects** (`.bme`). A **game** (`.bm` or `.b16`) is only read: you can open it to look at its models, and the first save makes an editable copy.
+bm Studio changes **projects** (`.bme`). A **game** (`.bm`) is only read: you can open it to look at its models, and the first save makes an editable copy.
 
 ## Ways to start
 
@@ -46,13 +54,14 @@ bm Studio changes **projects** (`.bme`). A **game** (`.bm` or `.b16`) is only re
 
 ## Inside bm Studio
 
-- Press **Esc** to reach the menu. *Open...* lists the `.bm` and `.bme` files of `/carts` and of the root of the SD card. Shortcut: **Ctrl+O**.
+- Press **Esc** to reach the menu. *Open...* lists the `.bme` projects of `/bme` and the `.bm` and `.bme` files of `/carts` and of the root of the SD card, and the `.bmm` model files of `/bmm` (Save writes the same `.bmm`; Save as makes a `.bme` project). Shortcut: **Ctrl+O**.
+- *Import a model...* (**Ctrl+I**) and *Export to /bmm...* (**Ctrl+E**) bring a model in from `/bmm` or `/glb` and write one to `/bmm` (see "Saving and exporting").
 - *New project* (**Ctrl+N**) starts an empty project. It comes with the starter tiles of bm Studio on its sprite sheet.
 - A new project is not saved yet: the menu shows `(not saved yet)` next to the name. Save it with **Ctrl+S**.
 
 ## Caveats
 
-- Opening a game says `a game: saving makes its copy`. The first save asks `Save an editable copy: NAME.BME?`; from then on you work on the copy.
+- Opening a game says `a game: saving makes its copy`. The first save asks `Save an editable copy: name.bme?`; from then on you work on the copy.
 - A game without models can receive some: build them and save.
 - If the menu shows `*modified*`, there are changes not saved. *Open...*, *New project* and *Exit* ask before throwing them away.
 
@@ -67,7 +76,7 @@ bm Studio has two pages, chosen with the F keys (or **Y + left/right** on the ga
 - At the bottom, the keys of the moment.
 - The cursor is a cell-shaped box. The grid on the floor is one unit per square.
 
-![The build page: tools on the left, the model in the middle](shots/editor-studio-build.png)
+!The build page: tools on the left, the model in the middle
 
 ## The 3D view controls
 
@@ -107,8 +116,29 @@ A block is a cube of one unit. Two blocks side by side have no wall between them
 | `PgUp` / `PgDn` | Move the cursor one level up / down |
 | `Space` | Put a block |
 | `Backspace` or `Del` | Remove the block |
+| `k` | Change the kind of block: cube, ramp, corner, rounded, cylinder, cone, sphere, dome, tube, arch |
+| `n` | Soft shapes: pick the size to change: x, y or z |
+| `u` / `j` | Soft shapes: bigger / smaller along that axis (1 to 8 cells) |
+| `,` / `.` | Soft shapes: fewer / more sides (4 to 16) |
 
 On the gamepad: **A** puts, **B** removes, **X + up/down** changes level.
+
+### Ramp, corner and rounded blocks
+
+Press **k** (with the block or tile tool) to change the kind of block the next **Space** puts: cube, ramp, corner, rounded. The panel names the kind when it is not the cube. The kind stays until you change it.
+
+| Kind | Shape | Triangles |
+|---|---|---|
+| cube | the cube of one unit | 12 |
+| ramp | a slope from the near floor edge up to the far top edge, a wall on the far side, two triangular sides | 8 |
+| corner | a pyramid on the floor of the cell, its top at the far right top corner; its sloped sides fit a ramp | 6 |
+| rounded | an eight-sided column: the four vertical edges are cut 0.3 deep | 28 |
+
+The ramp and the corner rise **away from the camera**. Turn the view with **q** and **e** (45 degrees) to turn the block: far and right follow the view, in steps of 90 degrees. Every face takes the brush (a colour or a tile). **Backspace** removes the block of the cell, of any kind, and undo takes it back. The walls of a neighbour that look into the cell stay.
+
+### Soft shapes
+
+The kinds after *rounded* are round: **cylinder**, **cone**, **sphere**, **dome** (half a sphere on a flat base), **tube** (a cylinder with a hole of 0.6 of its radius) and **arch** (a half ring that stands on two feet and spans the x axis). A soft shape fills a box that starts at the cursor cell. **n** picks the axis (x, y or z), **u** and **j** make that side one cell longer or shorter (1 to 8), and **,** and **.** change the number of sides (4 to 16, 8 at first). The cursor box shows the size. Every face looks out and takes the brush (a colour or a tile). **Backspace** removes a soft shape whole when the size on the screen is the size it was put with. Use few sides for the Pi Zero W: a sphere of 8 sides has 48 triangles, a tube 64, an arch 68.
 
 ## The tile tool
 
@@ -135,7 +165,7 @@ Press **Tab** (on the gamepad **Y**) to open the sheet.
 - Outside the sheet, **r** turns the brush by a quarter turn with tools 1-2 only (with tool 3, select, **r** turns the chosen faces), and **h** mirrors the brush with any tool. **x** picks the tile or colour from the face under the cursor.
 - With a colour as brush, the faces get a flat colour and no texture.
 
-![The tile picker: the sheet, the selection and the tile large](shots/editor-studio-tiles.png)
+!The tile picker: the sheet, the selection and the tile large
 
 ## Selecting and moving
 
@@ -153,7 +183,10 @@ The arrows bring the pointer to the nearest face in that direction on screen.
 | `n` | Show the other side of the face |
 | `Enter` | Put the brush's tile on the faces |
 | `u` | Turn the texture |
-| `,` / `.` | Half as big / twice as big |
+| `,` / `.` | Half as big / twice as big (on the axis that `p` picked) |
+| `p` | Pick the axis of the scale: all, x, y or z |
+| `l` | Mirror copy: the chosen faces are copied across the plane of the cursor cell (symmetry) |
+| `f` | Flip the diagonal of a quad (the two triangles cut it the other way) |
 | `d` | Copy and move the copy |
 | `Del` | Delete the faces |
 | `o` | Move the faces into a new model |
@@ -191,7 +224,7 @@ With tool **5** (paint) chosen, **Enter** or **Space** opens the tile of the fac
 
 With a mouse, hold the left button over the pixels and drag.
 
-![The paint panel: the tile of a face, pixel by pixel](shots/editor-studio-paint.png)
+!The paint panel: the tile of a face, pixel by pixel
 
 # The models page and mesh reduction
 
@@ -210,9 +243,10 @@ Press **F2**. The list on the left holds the models of the file. Over the view, 
 | `PgUp` / `PgDn` | Change the order |
 | `-` | Reduce the triangles |
 | `m` | Make a model from a picture |
+| `c` | Map class of the model: not said, solid, floor or decor (the flags of the model, for a map kit) |
 | `i` | Texture margin: 0, 0.125, 0.25, 0.5 pixels |
 
-![The models page: the list, the counts and the model turning](shots/editor-studio-models.png)
+!The models page: the list, the counts and the model turning
 
 ## Reducing triangles
 
@@ -220,7 +254,7 @@ Press `-`. The box asks for the triangles wanted and proposes half. The reducer 
 
 ## Why it matters
 
-The console draws about 1200 triangles in a scene at 60 fps. Beyond that, the counts turn to a warning: `heavy for 60 fps (1200 triangles a scene)`.
+On the ARM software rasterizer, the console draws about 1200 triangles in a scene at 60 fps. With the VideoCore IV GPU fast-path (Vertex Shader + Double Command Queue), the console pushes up to **50,000 triangles at 60 fps** (and up to 27,400 at 1080p). If a model exceeds the recommended threshold (1,200 for ARM or 8,000 for a single GPU model), the counter displays a warning: `heavy for ...`.
 
 ## Caveats
 
@@ -237,7 +271,7 @@ The console draws about 1200 triangles in a scene at 60 fps. Beyond that, the co
 | Key | What it does |
 |---|---|
 | `Ctrl+S` | Save in place |
-| `Ctrl+Shift+S` | Save as: a name in 8.3 form, in `/carts`, ending in `.BME` |
+| `Ctrl+Shift+S` | Save as: a name in 8.3 form, in `/bme`, ending in `.BME` |
 | `F5` | Save, then try the game |
 
 ## What is saved
@@ -250,7 +284,21 @@ The console draws about 1200 triangles in a scene at 60 fps. Beyond that, the co
 
 The resource format for models is `.bmm`: MESH, ANIM when animated and a sheet with only the cells the textures use. On the PC, `scripts/bmres.py extract GAME.bm --model villager -o VILLAGER.bmm` makes one from a game.
 
-[TO FILL: saving and opening `.bmm` files from the console's bm Studio; the resource docs say it is planned, the program only saves the project]
+bm Studio reads and writes `.bmm` files in `/bmm`. The next section shows how.
+
+## Import a .glb
+
+The SD card has two folders for models. `/glb` holds `.glb` files that you copy there; bm Studio only reads them. `/bmm` holds the converted models (`.bmm`); bm Studio writes them there. All the names are in lower case.
+
+1. Press **Ctrl+I**, or choose **Import a model...** in the menu (Esc). On the pad, press Y + B for the menu.
+2. The list shows `/bmm` and `/glb`. A name marked `.glb: converted to /bmm` has no `.bmm` yet.
+3. Choose a `.bmm` to read it. Choose a `.glb` to convert it: bm Studio writes `/bmm/NAME.bmm` and adds the model to the project.
+4. If the name has more than 8 characters, or `/bmm` has the name already, bm Studio asks for a new name (1 to 8 of a-z, 0-9, `_` and `-`).
+5. The status line shows the vertices and the triangles. If the file is not good, it shows the message of the console, for example the format limit of 65535 vertices or triangles.
+
+A `.glb` gives flat colours. A `.bmm` with a skeleton keeps it (bm Animator plays it). The texture of a `.bmm` goes on the sheet of the project only when the sheet is empty; if not, the faces that used it turn grey. A `.bmm` with several models gives the first one.
+
+**Ctrl+S** saves the model in the project, as for any model. **Ctrl+E**, or **Export to /bmm...** in the menu, writes the current model to `/bmm/NAME.bmm` with its skeleton; if the file is there, bm Studio asks before it replaces it.
 
 ## For a game built from the repository
 
@@ -324,7 +372,7 @@ If the face has a flat colour instead of a tile, **Enter** paints the whole face
 5. Press **Ctrl+Z** to go back.
 
 ::: warn
-If the count is above 1200, the line says `heavy for 60 fps`. Reduce until the warning goes away.
+If the count is above the recommended threshold (1,200 for ARM or 8,000 for a single GPU model), the line displays a warning. Reduce until it fits within your game's triangle budget.
 :::
 
 ## Put your model in a game
@@ -337,9 +385,9 @@ If the count is above 1200, the line says `heavy for 60 fps`. Reduce until the w
 
 # Tips and limits
 
-- About 1200 triangles in a scene is what the console draws at 60 fps. A model you reduced is the cheapest way to stay under it.
+- On ARM software rasterization, about 1200 triangles in a scene is what the console draws at 60 fps; with the GPU (VideoCore IV fast-path) the budget reaches 50,000 triangles at 60 fps (and up to 8,000 per detailed model). A model you reduced with `-` or split into levels of detail (LOD) is the best way to maintain optimal performance.
 - Cursor cells go from -64 to 63 on each axis.
-- A vertex count over the limit turns red in the panel, and saving fails above the limit: 4096 vertices (and 16384 triangles).
+- The panel counts vertices and triangles. There is no size cap on saving; only the format limit of 65535 vertices and 65535 triangles per mesh stays. The vertex counter shows it ("of 65535").
 - Textured faces need the sprite sheet: the textures are pieces of it.
 - Use **F5** often: it saves and shows the model in the game.
 - A game and a project are not the same: the menu shows the path of the file you are working on, so check it is the `.BME` copy before you go on.

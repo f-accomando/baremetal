@@ -7,7 +7,7 @@
 --
 --   luahost tests/studio/pixel_host.lua ROOT SDDIR     (make test-studio)
 --
--- SDDIR/carts/village.bm and demo.bm must be there (games: the saves go into their .bme copies).
+-- SDDIR/carts/testkit.bm and mapkit.bm must be there (games: the saves go into their .bme copies).
 
 local ROOT, SD = arg[1] or ".", arg[2] or "build/pixel-sd"
 local checks, fails = 0, 0
@@ -119,7 +119,12 @@ local space_held = false
 for k, v in pairs(_G) do E[k] = v end
 E.SCREEN_W, E.SCREEN_H = 640, 360
 local function nop() end
-for _, n in ipairs({ "cls", "rect", "rectfill", "line", "circ", "circfill", "pset", "clip", "camera" }) do E[n] = nop end
+for _, n in ipairs({ "cls", "rect", "line", "circ", "circfill", "pset", "clip", "camera" }) do E[n] = nop end
+local rects = 0
+E.rectfill = function() rects = rects + 1 end
+local last_stack                          -- the last stack() / stackv() call: { name, args... }
+E.stack = function(...) last_stack = { "stack", ... } end
+E.stackv = function(...) last_stack = { "stackv", ... } end
 E.print = function(s, x, y) texts[#texts + 1] = { tostring(s), x or 0, y or 0 }; return (x or 0) + #tostring(s) * 8 end
 -- the keys as chips: written as "[name]"; prompt(name) alone measures
 local function chip_w(n) return #n == 1 and 16 or math.max(16, #n * 6 + 10) end
@@ -142,14 +147,20 @@ E.keyheld = function(n) return n == "space" and space_held end
 local MS = { x = 0, y = 0, b = 0, w = 0, p = 0 }
 E.mouse = function(on) if on ~= nil then return true end; return MS.x, MS.y, MS.b, MS.w, true end
 E.mousep = function(i) return MS.p >> (i or 0) & 1 == 1 end
-local bmui
+local bmui, bmlib
 E.require = function(name)
-  assert(name == "bmui", "require: only bmui here")
+  if name == "bmlib" then                -- the layout (lib.layout): once
+    bmlib = bmlib or assert(loadfile(ROOT .. "/src/script/bmlib.lua", "t", E))()
+    return bmlib
+  end
+  assert(name == "bmui", "require: only bmui and bmlib here")
   bmui = bmui or assert(loadfile(ROOT .. "/src/script/bmui.lua", "t", E))()   -- the mouse (it takes keyp over)
   return bmui
 end
 local keyhelp_list, keyhelp_title
 E.keyhelp = function(list, title) keyhelp_list, keyhelp_title = list, title; return 0 end
+local showkeys_n = 0
+E.showkeys = function() showkeys_n = showkeys_n + 1; return true end
 E.save = function(t) saved_t = t; return true end
 E.saved = function() return saved_t end
 E.cart_arg = function() return nil end
@@ -167,6 +178,8 @@ E.sspr = function(sx, sy, sw, sh, dx, dy, fx, fy, z)
   assert(sw >= 0 and sh >= 0 and (z == nil or z > 0), "sspr: bad arguments")
   blits = blits + 1
 end
+local sprs = 0
+E.spr = function() sprs = sprs + 1 end
 E.cart_sheet = function(w, h)
   if w then
     assert(w >= 8 and h >= 8 and w <= 4096 and h <= 4096 and w % 8 == 0 and h % 8 == 0, "cart_sheet: 8 to 4096, multiples of 8")
@@ -179,9 +192,35 @@ E.cart_sheet = function(w, h)
   return sheet.w, sheet.h
 end
 E.cart_new = function() sheet = { w = 256, h = 256, px = {} } end
-E.zones = function() return {} end
+-- the SPRITES section (cart_data(11)) and the zones read from it, as the kernel gives them
+local zdata
+local function zlist()
+  local out = {}
+  if zdata and #zdata >= 4 then
+    for i = 0, string.unpack("<I2", zdata, 1) - 1 do
+      local name, x, y, w, h, fr, fps, sl = string.unpack("<c16I2I2I2I2BBB", zdata, 5 + i * 28)
+      out[#out + 1] = { name:match("^[^%c]*"), x, y, w, h, fr, fps, sl }
+    end
+  end
+  return out
+end
+E.cart_data = function(kind, bytes)
+  assert(kind == 11, "cart_data: only SPRITES here")
+  if bytes == nil then return zdata end
+  zdata = bytes ~= "" and bytes or nil
+  return true
+end
+E.zones = function()
+  local out = {}
+  for _, z in ipairs(zlist()) do out[#out + 1] = z[1] end
+  return out
+end
 E.zboxes = function() return {} end
-E.zone = function() return nil end
+E.zone = function(name)
+  for _, z in ipairs(zlist()) do
+    if z[1] == name then return table.unpack(z, 2) end
+  end
+end
 E.ai = {
   sprite = function(req, opt)
     local n = opt and opt.size or 16
@@ -192,7 +231,7 @@ E.ai = {
 }
 
 local function host(path) return SD .. path:lower() end
-local on_sd = { ["/carts"] = { "demo.bm", "village.bm" } }
+local on_sd = { ["/carts"] = { "mapkit.bm", "testkit.bm" } }
 E.ls = function(dir)
   local out = {}
   for _, n in ipairs(on_sd[dir] or {}) do out[#out + 1] = { name = n, size = 0, dir = false } end
@@ -203,6 +242,7 @@ E.cart_load = function(path)
   local data = read_file(host(path))
   if not data then return nil, "no such file" end
   local w, h, px, pal, nc = decode_sheet(data)
+  zdata = section(data, 11)
   sheet = { w = w or 256, h = h or 256, px = {} }
   for i, c in pairs(px or {}) do sheet.px[i] = q565(c) end
   local p = { title = data:sub(25, 72):match("^[^\0]*"), lua = section(data, 1) or "" }
@@ -325,6 +365,12 @@ E.cart_write = function(path, t)
     local kind, data = sheet_section(t.palette, old)
     put({ [2] = true, [5] = true }, kind, data)
   end
+  for kind, data in pairs(t.sections or {}) do       -- false takes the section away
+    local out = {}
+    for _, sec in ipairs(secs) do if sec[1] ~= kind then out[#out + 1] = sec end end
+    if data then out[#out + 1] = { kind, data } end
+    secs = out
+  end
   local f = io.open(host(path), "wb")
   if not f then return false, "cannot write " .. path end
   f:write(pack_cart(t.title or (old and old:sub(25, 72):match("^[^\0]*")) or "", old and old:sub(73, 104):match("^[^\0]*") or "",
@@ -337,6 +383,25 @@ E.cart_write = function(path, t)
 end
 
 ----------------------------------------------------------------- driving it
+
+-- the export: sheet_png and doc_write record what they are given
+local png_calls, docs, png_fail, doc_fail = {}, {}, nil, nil
+E.sheet_png = function(rects)
+  png_calls[#png_calls + 1] = rects
+  if png_fail then return nil, png_fail end
+  return "PNG" .. #png_calls
+end
+local gif_calls, gif_fail = {}, nil
+E.sheet_gif = function(rects, delay)
+  gif_calls[#gif_calls + 1] = { rects = rects, delay = delay }
+  if gif_fail then return nil, gif_fail end
+  return "GIF" .. #gif_calls
+end
+E.doc_write = function(name, bytes)
+  if doc_fail then return nil, doc_fail end
+  docs[name] = bytes
+  return true
+end
 
 local chunk = assert(loadfile(ROOT .. "/carts/pixel/main.lua", "t", E))
 chunk()
@@ -370,7 +435,7 @@ local function status()
   for _, t in ipairs(texts) do if t[3] == 336 then return t[1] end end
   return ""
 end
-local function file(name) return read_file(SD .. "/carts/" .. name) end
+local function file(name) return read_file(SD .. (name:lower():match("%.bme$") and "/bme/" or "/carts/") .. name) end
 
 -- the sprite being drawn and the colour, from the panel
 local function sprite_at()
@@ -390,15 +455,15 @@ end
 
 ----------------------------------------------------------------- the scenario
 
-local village0 = file("village.bm")
-local demo0 = file("demo.bm")
+local kit0 = file("testkit.bm")
+local sample0 = file("mapkit.bm")
 
 E._init()
 frames(2)
-check(sees("open a cartridge") and sees("/carts/village.bm"), "at the start: the list of the files")
+check(sees("open a cartridge") and sees("/carts/testkit.bm"), "at the start: the list of the files")
 key("down", "\n")
-check(status():find("village.bm: sheet", 1, true) and status():find("(the file's palette)", 1, true),
-      "the village: its sheet and the palette of its SHEET8: " .. status())
+check(status():find("testkit.bm: sheet", 1, true) and status():find("(the file's palette)", 1, true),
+      "the test kit: its sheet and the palette of its SHEET8: " .. status())
 check(sees("[f1]") and sees("draw") and sees("COLOURS"), "the draw page, its tab with the F1 chip")
 local npal0 = tonumber(screen():match("COLOURS (%d+)"))
 
@@ -501,6 +566,49 @@ key("^z", "r")
 check(S(14, 0) == c1 and S(14, 3) == c1, "a quarter turn")
 key("^z")
 
+-- w: the wand chooses the area of one colour; the tools keep to it
+local function goto_xy(x, y)
+  key("home")
+  for _ = 1, math.abs(x - 8) do key(x < 8 and "left" or "right") end
+  for _ = 1, math.abs(y - 8) do key(y < 8 and "up" or "down") end
+end
+key("f1", "del")                         -- the draw page, the whole sprite clear
+key("1", "U")
+goto_xy(2, 2); key(" ")
+goto_xy(5, 5); key(" ")                  -- colour 1 on (2,2)-(5,5)
+key("2", "b")
+goto_xy(3, 3); key(" ")                  -- one pixel of colour 2 inside
+local w1, w2 = S(2, 2), S(3, 3)
+check(w1 and w2 and w1 ~= w2, "wand: two colours drawn")
+key("w")
+check(sees("wand"), "w: the wand is the tool: " .. status())
+goto_xy(2, 2); key(" ")
+check(sees("15 pixels chosen"), "wand: 15 pixels of colour 1 (the hole is not in): " .. status())
+key("del")
+check(S(2, 2) == nil and S(5, 5) == nil and S(3, 3) == w2, "wand + Del: only the region is cleared, the hole stays")
+key("^z")
+check(S(2, 2) == w1 and S(5, 5) == w1 and S(4, 4) == w1 and S(3, 3) == w2, "one undo restores it")
+-- copy honours the mask: pasted, the hole stays empty under it
+goto_xy(2, 2); key("w", " ", "^c", "esc")
+goto_xy(9, 9); key("^v", "\n")
+check(S(9, 9) == w1 and S(12, 12) == w1 and S(10, 10) == nil, "wand + copy + paste: the region only, the hole is empty")
+key("^z")
+-- lift honours the mask and moves the region only
+goto_xy(2, 2); key("w", " ", "\n", "down", "\n")
+check(S(2, 2) == nil and S(2, 3) == w1 and S(3, 3) == w1 and S(3, 4) == nil, "wand + lift: the region moves one lower (it covers the hole), the hole itself stays behind")
+key("^z")
+check(S(2, 2) == w1 and S(3, 3) == w2, "undo the lift")
+-- flip acts on the region
+goto_xy(2, 2); key("w", " ", "h")
+check(S(3, 3) == w1 and S(4, 3) == nil and S(2, 2) == w1, "wand + flip: only the region flips (the hole pixel does not)")
+key("^z")
+-- m clears the mask: a rectangle then clears everything inside
+key("m")
+goto_xy(2, 2); key(" ")
+goto_xy(5, 5); key(" ", "del")
+check(S(3, 3) == nil and S(2, 2) == nil, "m: a rectangle select has no mask, Del clears the whole box")
+key("^z", "esc", "b")
+
 -- the animation and the size
 key("+", "+", ">", "k", "z")
 check(screen():find("anim %d+/6") and sees("9 fps") and sees("onion"), "6 frames, 9 frames a second, onion skin")
@@ -547,13 +655,13 @@ check(select(2, E.cart_sheet()) == h0 + 64, "the sheet is 64 pixels taller")
 -- save: only the sheet changes in the file; first a frame that says so
 keyq[#keyq + 1] = "^s"
 frames(1)
-check(sees("saving /carts/village.bm ..."), "Ctrl+S: saving first")
+check(sees("saving /carts/testkit.bm ..."), "Ctrl+S: saving first")
 key()
-check(status():find("saved /carts/VILLAGE.BME", 1, true), "Ctrl+S: " .. status())
-check(file("village.bm") == village0, "the game stays as it was: the save went into its copy, VILLAGE.BME")
-local v1 = file("village.bme")
+check(status():find("saved /bme/testkit.bme", 1, true), "Ctrl+S: " .. status())
+check(file("testkit.bm") == kit0, "the game stays as it was: the save went into its copy, TESTKIT.BME")
+local v1 = file("testkit.bme")
 for _, t in ipairs({ 1, 4, 8, 9 }) do
-  check(section(v1, t) == section(village0, t), "section " .. t .. " stays as it was")
+  check(section(v1, t) == section(kit0, t), "section " .. t .. " stays as it was")
 end
 check(section(v1, 5) and not section(v1, 2), "the sheet is a SHEET8")
 local w, h, px, spal, snc = decode_sheet(v1)
@@ -561,12 +669,12 @@ check(w == w0 and h == h0 + 64, "the new size in the file")
 local opaque, first = 0, nil
 for i = 0, snc - 1 do if spal[i] then opaque = opaque + 1 end end
 for i = 0, snc - 1 do if spal[i] then first = first or i end end
-local _, _, _, pal0 = decode_sheet(village0)
+local _, _, _, pal0 = decode_sheet(kit0)
 local orig_first
 for i = 0, 255 do if pal0[i] then orig_first = pal0[i]; break end end
 check(opaque == npal0 + 1 and first == 0 and spal[0] == orig_first,
       "the palette first in the SHEET8, as it was plus the new colour (" .. opaque .. " of " .. snc .. ")")
-local _, _, opx, opal = decode_sheet(village0)
+local _, _, opx, opal = decode_sheet(kit0)
 local exact = 0
 for i = 0, 255 do if opal[i] and spal[i - 1 + 1] then exact = exact + 1 end end
 check(exact > 0, "colours kept with their 24 bits")
@@ -588,8 +696,22 @@ check(sees("new sheet"), "a new sheet")
 key("1", "b", " ")
 key("^s")
 check(sees("file name"), "Ctrl+S on a new sheet: Save as")
+-- a click on the line of the dialog puts the caret there (M48): "ac", a click between, "b"
+for _ = 1, 40 do key("\b") end
+key("a", "c")
+for _, b in ipairs({ 0, 1, 0 }) do
+  local was = MS.b
+  MS.x, MS.y, MS.b, MS.w = 96 + 8, 184, b, 0
+  MS.p = MS.b & ~was
+  frames(1)
+  MS.p = 0
+end
+frames(1)
+key("b")
+check(sees("abc"), "mouse: a click on the line of the dialog puts the caret between the letters")
+key("end")
 type_text("NEWSPR")
-check(status():find("saved /carts/NEWSPR.BME", 1, true), "saved: " .. status())
+check(status():find("saved /bme/newspr.bme", 1, true), "saved: " .. status())
 local n1 = file("newspr.bme")
 check(n1 and section(n1, 1):find("bm Pixel: a new sprite sheet", 1, true) and section(n1, 5), "the new cartridge: the viewer and a SHEET8")
 local ok, err = pcall(load, section(n1, 1))
@@ -597,7 +719,7 @@ check(ok and err, "the viewer is Lua")
 
 -- try the game
 key("f5")
-check(ran == "/carts/NEWSPR.BME", "F5: the project runs")
+check(ran == "/bme/newspr.bme", "F5: the project runs")
 
 -- F12 held: the keys of the page (keyhelp(), the kernel draws them)
 local function in_help(keys, what)
@@ -607,8 +729,24 @@ local function in_help(keys, what)
   return false
 end
 key("f1")
+-- q: the tile view draws the sprite 3 x 3 with spr
+local s0 = sprs
+frames(1)
+check(sprs - s0 == 0, "tile view off: no spr call in the preview (" .. (sprs - s0) .. ")")
+key("q")
+check(sees("tile view: the seams show"), "q: the status says the seams show: " .. status())
+s0 = sprs
+frames(1)
+check(sprs - s0 == 9, "q: the preview draws the sprite 3 x 3, 9 spr calls: " .. (sprs - s0))
+key("q")
+s0 = sprs
+frames(1)
+check(sprs - s0 == 0 and sees("tile view off"), "q again: back to the normal preview, no spr call")
+
 check(keyhelp_title == "bm Pixel" and in_help("b / e / g / i", "pencil, eraser, fill") and in_help("Y A", "undo"),
       "keyhelp: the keys of the draw page, the pad's")
+check(in_help("q", "tile view"), "keyhelp: q is tile view")
+check(in_help("w", "wand"), "keyhelp: w is the wand")
 key("f3")
 check(in_help("e", "edit: R G B") and not in_help("p", "play"), "keyhelp: the palette's")
 check(E._exit() == true, "_exit: nothing to save, it leaves")
@@ -647,7 +785,8 @@ check(not sees("anchor"), "mouse: a rectangle from a press to a release")
 mouse(60, 60, 4); mouse(60, 60, 0); frames(1)
 mouse(60, 60, 0, 1)
 click(100, 100, 2)
-check(sees("Pencil") and sees("Filled rectangle"), "mouse: the draw page's context menu")
+check(sees("Pencil") and sees("Filled rectangle") and sees("Tile view"), "mouse: the draw page's context menu, with Tile view")
+
 mx, my = at("Pencil")
 click(mx, my)
 check(sees("pencil"), "mouse: Pencil from the context menu")
@@ -662,13 +801,273 @@ check(sees("PALETTE"), "mouse: the palette tab")
 click(16 + 2 * 16 + 4, 48 + 4)
 click(304 + 10, 128 + 6)
 mouse(310, 134, 1); mouse(330, 134, 1); mouse(330, 134, 0); frames(1)
+local function chan() for _, t in ipairs(texts) do if t[2] == 304 and t[3] == 128 then return tonumber(t[1]:match("%d+")) end end end
+local r0 = chan()
+mouse(400, 136, 0, 1); mouse(400, 136, 0); frames(1)
+check(r0 and chan() ~= r0, "mouse: the wheel over R changes its value (" .. tostring(r0) .. " -> " .. tostring(chan()) .. ")")
 key("esc")
+click(16 + 2 * 16 + 4, 48 + 4)
+check(sees("colour 3"), "mouse: a click chooses colour 3")
+mouse(100, 100, 0, -1); mouse(100, 100, 0); frames(1)
+check(sees("colour 19"), "mouse: the wheel moves the choice one row of the palette")
 mx, my = at("menu", nil, 0)
 click(mx, my)
 check(sees("Exit bm Pixel"), "mouse: the menu tab")
 mx, my = at("Continue", 32)
 click(mx, my)
 check(not sees("Exit bm Pixel"), "mouse: a click on Continue")
+
+
+----------------------------------------------------------------- the stack page
+
+-- a clean corner of the sheet, then: the page with no zone, a stack zone, copy a slice to the
+-- next, the onion skin, the vertical layout, the mouse, delete a zone, save
+frames(400)
+for y = 0, 127 do for x = 0, 63 do E.sset(x, y, nil) end end
+zdata = nil
+key("f4")
+check(sees("no stack zone"), "F4: no stack zone yet")
+key("n")
+type_text("tree 0 0 16 16 4 h")
+local tn = select(7, E.zone("tree"))
+check(tn == 4 and sees("stack tree"), "n: a stack zone, 4 slices, side by side")
+key("p")
+for _, p in ipairs({ { 0, 0 }, { 2, 0 }, { 0, 2 } }) do E.sset(p[1], p[2], 0xF80000) end   -- slice 1
+frames(2)
+check(last_stack and last_stack[1] == "stack" and last_stack[2] == 0 and last_stack[3] == 0 and last_stack[6] == 4,
+      "the turning view calls stack() with the zone")
+key("c")
+check(sees("slice 2/4") and E.sget(16, 0) == E.sget(0, 0) and E.sget(18, 0) and E.sget(16, 2),
+      "c: slice 1 is copied to slice 2 and the page goes to it")
+key("^z")
+check(E.sget(16, 0) == nil and E.sget(0, 0) ~= nil, "Ctrl+Z: the copy is one undo step")
+key("^y")
+check(E.sget(16, 0) ~= nil, "Ctrl+Y: and back")
+key("right")
+local r0 = rects
+frames(1)
+local base = rects - r0
+key("k")
+r0 = rects
+frames(1)
+check(rects - r0 - base == 3, "k: the onion skin draws the 3 dither pixels of the slice before: " .. (rects - r0 - base))
+r0 = rects
+frames(3)
+check(rects - r0 == 3 * (base + 3), "the onion skin costs only its pixels, 3 rectangles a frame")
+key("k")
+r0 = rects
+frames(1)
+check(rects - r0 == base, "k: the onion skin off")
+key("end", "c")
+check(sees("last slice"), "c on the last slice: nothing after it")
+
+-- the vertical layout
+key("n")
+type_text("bad 0 250 16 16 3 v")
+check(E.zone("bad") == nil and sees("out of the sheet"), "stackv zone below the sheet: refused")
+key("n")
+type_text("vt 0 64 16 16 3 v")
+check(select(7, E.zone("vt")) == 3 and zdata:byte(5 + 1 * 28 + 27) & 1 == 1 and zdata:byte(5 + 27) == 0,
+      "n ... v: a stackv zone, bit 0 of byte 27 only in its entry")
+frames(2)
+check(last_stack[1] == "stackv" and last_stack[3] == 64 and last_stack[6] == 3, "the view calls stackv() for it")
+key("right")
+check(sees("stackv vt  slice 2/3  at (0,80)"), "slice 2 of a stackv is 16 pixels lower: " .. (screen():match("stackv vt[^\n]*") or "?"))
+key("e")
+check(sees("vt 0 64 16 16 3 v"), "e: the layout is in the text")
+type_text("vt 0 64 16 16 3 h")
+frames(2)
+check(last_stack[1] == "stack" and zdata:byte(5 + 28 + 27) & 1 == 0, "e ... h: back to side by side")
+key("e")
+type_text("vt 0 64 16 16 3 v")
+
+-- the mouse: a drag on the turning view turns it, a click stops or starts it
+E.sp.spin = true
+click(400, 200)
+check(E.sp.spin == false, "mouse: a click on the view stops the turning")
+click(400, 200)
+check(E.sp.spin == true, "mouse: and starts it")
+E.sp.spin = false
+local rot0 = E.sp.rot
+mouse(400, 200, 0); mouse(400, 200, 1); mouse(420, 200, 1); mouse(450, 200, 1); mouse(450, 200, 0); frames(1)
+check(E.sp.rot ~= rot0 and E.sp.spin == false, "mouse: a drag on the view turns the stack by hand")
+click(100, 100, 2)
+check(sees("Onion skin") and sees("Copy the slice to the next") and sees("Delete the zone"), "mouse: the stack page's context menu")
+mx, my = at("Onion skin")
+click(mx, my)
+check(E.sp.onion == true, "mouse: Onion skin from the context menu")
+key("k")
+
+-- delete a zone: twice; the pixels stay
+key("up")
+local zs = #E.zones()
+key("del")
+check(#E.zones() == zs and sees("again"), "Del: asks first")
+key("del")
+check(#E.zones() == zs - 1 and E.zone("tree") == nil and E.zone("vt") ~= nil, "Del twice: the zone is out of SPRITES")
+check(E.sget(0, 0) ~= nil, "the pixels of the zone stay on the sheet")
+check(zdata:byte(5 + 27) & 1 == 1, "the layout of the other zone is kept")
+
+-- save: the zone and its layout are in the file
+key("^s")
+local nf = file("newspr.bme")
+local z11 = section(nf, 11)
+check(z11 and string.unpack("<I2", z11, 1) == 1 and z11:byte(5 + 27) & 1 == 1 and z11:byte(5 + 26) == 3,
+      "Ctrl+S: SPRITES in the file, vt, 3 slices, vertical")
+key("del", "del")
+check(#E.zones() == 0 and zdata == nil, "the last zone deleted: no SPRITES")
+key("^s")
+nf = file("newspr.bme")
+check(section(nf, 11) == nil, "Ctrl+S: the file has no SPRITES")
+key("f4")
+check(sees("no stack zone"), "F4: empty again")
+-- leave a stackv zone in the file that the kernel's parser and the build's Python read
+key("n")
+type_text("vt 0 64 16 16 3 v")
+do                                       -- the sheet as the first save of NEWSPR left it (check_files.py: one pixel)
+  local _, _, npx = decode_sheet(n1)
+  sheet.px = {}
+  for i, c in pairs(npx) do sheet.px[i] = q565(c) end
+end
+key("^s")
+check(section(file("newspr.bme"), 11) ~= nil, "a stackv zone left in NEWSPR.BME for the kernel's parser")
+
+----------------------------------------------------------------- Ctrl+E: export a PNG
+local function rects_of(call)
+  local t = {}
+  for _, r in ipairs(call) do t[#t + 1] = table.concat(r, ",") end
+  return table.concat(t, ";")
+end
+key("f1")
+check(in_help("ctrl e", "a PNG") and in_help("ctrl e", "GIF"), "help: Ctrl+E export a PNG or a GIF")
+check(sees("PNG"), "the draw hint bar names Ctrl+E PNG")
+check(not sees("Export a PNG to /docs"), "the menu is closed on F1")
+key("esc")
+check(sees("Export a PNG or GIF to /docs...   (Ctrl+E)"), "the menu has the export row")
+key("f1")
+local rx0, ry0 = sprite_at()
+key("^e")
+check(sees("this sprite") and sees("the whole sheet") and sees("frames side by side") and sees("as a GIF"), "Ctrl+E: the chooser offers the four")
+key("\n")                                   -- this sprite
+check(sees("PNG name"), "the name is asked")
+check(sees("testkit.png") or sees("sprites.png") or sees(".png"), "the default name ends in .png")
+key("\n")
+check(#png_calls == 1 and #png_calls[1] == 1, "this sprite: one rectangle")
+local r1 = png_calls[1][1]
+check(r1[1] == rx0 and r1[2] == ry0 and r1[3] == r1[4], "this sprite: the sprite's corner and a square: " .. rects_of(png_calls[1]))
+local dname = next(docs)
+check(dname and #dname <= 12 and dname:match("^[%l%d_]+%.png$") and #dname:gsub("%.png$", "") <= 8, "the default name is 8.3: " .. tostring(dname))
+check(status():find("saved /docs/" .. dname, 1, true), "the status shows the path: " .. status())
+-- the animation: one rectangle per frame, in the preview order
+png_calls, docs = {}, {}
+key("^e", "down", "\n")
+type_text("walkcycle_long.PNG")
+local nfr = #png_calls[1]
+check(#png_calls == 1 and nfr >= 1, "animation: one call")
+local ok_anim = true
+for k, r in ipairs(png_calls[1]) do
+  if r[3] ~= r1[3] or r[4] ~= r1[3] or r[2] % r1[3] ~= 0 or r[1] % r1[3] ~= 0 then ok_anim = false end
+end
+check(ok_anim and png_calls[1][1][1] == rx0 and png_calls[1][1][2] == ry0, "animation: first rectangle is this sprite, all the same size: " .. rects_of(png_calls[1]))
+check(docs["walkcycl.png"] == "PNG1", "a long name is cut to 8 letters, lower case: " .. tostring(next(docs)))
+check(status():find("cut to 8", 1, true) and status():find("walkcycl.png", 1, true), "the status says the name was cut: " .. status())
+-- one more frame: the list grows
+png_calls, docs = {}, {}
+key("+")
+key("^e", "down", "\n")
+key("\n")
+check(#png_calls[1] == nfr + 1 or nfr == 16, "animation: + adds a rectangle (" .. nfr .. " -> " .. #png_calls[1] .. ")")
+-- the animation as a GIF: one rectangle per frame, in the preview order, the delay from the speed
+key("f1")
+local png_n = #png_calls
+docs = {}
+key("^e")
+local fps1 = tonumber(screen():match("(%d+) a second"))
+key("down", "down", "\n")
+check(sees("GIF name") and sees(".gif"), "GIF: the name is asked, it ends in .gif")
+key("\n")
+check(#gif_calls == 1 and #png_calls == png_n, "GIF: one sheet_gif call, no PNG")
+local gc = gif_calls[1]
+check(#gc.rects == nfr + 1 or nfr == 16, "GIF: one rectangle a frame (" .. #gc.rects .. ")")
+check(gc.rects[1][1] == rx0 and gc.rects[1][2] == ry0 and gc.rects[1][3] == r1[3] and gc.rects[1][4] == r1[3], "GIF: first rectangle is this sprite: " .. rects_of(gc.rects))
+local gdname = next(docs)
+check(gdname and gdname:match("^[%l%d_]+%.gif$") and #gdname:gsub("%.gif$", "") <= 8, "GIF: the default name is 8.3: " .. tostring(gdname))
+check(status():find("saved /docs/" .. gdname, 1, true), "GIF: the status shows the path: " .. status())
+check(fps1 and gc.delay == math.floor(100 / fps1 + 0.5), "GIF: delay from the speed (" .. tostring(fps1) .. " a second): " .. tostring(gc.delay))
+key("<")                                    -- one frame a second less
+gif_calls, docs = {}, {}
+key("^e")
+check(tonumber(screen():match("(%d+) a second")) == fps1 - 1, "GIF: the choice names the speed")
+key("down", "down", "\n")
+type_text("Longname_x.GIF")
+check(gif_calls[1] and gif_calls[1].delay == math.floor(100 / (fps1 - 1) + 0.5) and docs["longname.gif"] == "GIF1", "GIF: delay follows the speed; long name cut: " .. tostring(next(docs)))
+check(status():find("cut to 8", 1, true) and status():find("longname.gif", 1, true), "GIF: the status says the name was cut: " .. status())
+key(">")
+-- the errors: sheet_gif nil, doc_write nil
+gif_calls, docs = {}, {}
+gif_fail = "the rectangles must have the same size"
+key("^e", "down", "down", "\n")
+key("\n")
+check(status():find("export failed: the rectangles must have the same size", 1, true) and next(docs) == nil, "GIF: sheet_gif nil: the reason shows, nothing is written: " .. status())
+gif_fail = nil
+doc_fail = "no space"
+key("^e", "down", "down", "\n")
+key("\n")
+check(status():find("export failed: no space", 1, true), "GIF: doc_write nil: the reason shows: " .. status())
+doc_fail = nil
+-- Esc at the name writes nothing
+gif_calls = {}
+key("^e", "down", "down", "\n")
+key("esc")
+check(#gif_calls == 0, "GIF: Esc at the name: nothing is made")
+-- the Tab commands list of the sheet page has the export
+key("f2", "\t")
+check(sees("Export a PNG or GIF... (Ctrl+E)"), "F2 Tab: the commands list has the export")
+key("esc")
+key("f1")
+-- the whole sheet
+png_calls, docs = {}, {}
+key("^e", "down", "down", "down", "\n")
+key("\n")
+local w = png_calls[1][1]
+check(#png_calls[1] == 1 and w[1] == 0 and w[2] == 0 and w[3] > 0 and w[4] > 0, "whole sheet: {0,0,w,h}: " .. rects_of(png_calls[1]))
+-- the errors
+png_calls = {}
+png_fail = "the rectangle is larger than 4096"
+key("^e", "down", "down", "down", "\n")
+key("\n")
+check(status():find("export failed: the rectangle is larger than 4096", 1, true), "sheet_png nil: the reason shows: " .. status())
+png_fail = nil
+doc_fail = "no space"
+key("^e", "\n")
+key("\n")
+check(status():find("export failed: no space", 1, true), "doc_write nil: the reason shows: " .. status())
+doc_fail = nil
+-- the menu row opens the same chooser; Esc leaves it
+key("esc")
+for _ = 1, 6 do key("down") end
+key("\n")
+check(sees("this sprite"), "the menu row opens the chooser")
+key("esc")
+key("f1")
+
+-- the fixed chip "F12 keys" on the hint bar of every page
+dofile(ROOT .. "/tests/studio/hintchip.lua"){
+  name = "bm Pixel", check = check, texts = function() return texts end, hy = 320, w = 640, chip_w = chip_w,
+  click = click, shown = function() return showkeys_n end,
+  pages = {
+    { name = "draw", go = function() key("f1") end },
+    { name = "sheet", go = function() key("f2") end },
+    { name = "palette", go = function() key("f3") end },
+    { name = "stack", go = function() key("f4") end },
+    { name = "menu", go = function() key("esc") end },
+  } }
+key("f1")
+do
+  local function on_bar(s) for _, t in ipairs(texts) do if t[3] == 320 and t[1] == s then return true end end end
+  check(on_bar("shapes") and on_bar("tools") and on_bar("PNG") and on_bar("colour"),
+        "draw page: the bar has the tools, the shapes (l u o), PNG and colour next to the fixed chip")
+end
 
 io.write(string.format("bm Pixel: %d/%d checks passed\n", checks - fails, checks))
 os.exit(fails == 0 and 0 or 1)

@@ -29,12 +29,21 @@ typedef struct {
 /* Mounts the volume through the block reader (sd_read). Returns 0 on
  * success; fat_error() says why not. */
 int fat_mount(void);
+/* The clock for the dates of new and written files: seconds since 1970
+ * (UTC), 0 while unknown (then the date stays 2026-01-01). */
+void fat_set_clock(unsigned long (*seconds_since_1970)(void));
 const char *fat_error(void);
-/* "FAT32, 1024 MiB, label BOOT" */
+/* "FAT32, 1024 MB, label BOOT" */
 const char *fat_describe(void);
 /* The volume's cluster size in bytes (0 if not mounted): a card's write
  * speed depends on it (the sd: line at boot says it). */
 uint32_t fat_cluster_bytes(void);
+/* Data clusters of the volume (0 if not mounted). */
+uint32_t fat_total_clusters(void);
+/* A count of the free clusters in steps: set `st` to zeros, call until it returns 1 (done: st->free is exact as of the
+ * last sector read). Each call reads at most max_sectors sectors of the FAT (1..256). -1 on a read error. */
+typedef struct { uint32_t next, free; } fat_free_t;
+int fat_free_step(fat_free_t *st, uint32_t max_sectors);
 
 /* Opens a directory by path ("/" or "/carts", case insensitive). */
 int fat_opendir(fat_dir_t *d, const char *path);
@@ -62,7 +71,7 @@ int fat_find(const char *path, fat_entry_t *e);
 int fat_mkdirs(const char *path);
 
 /* Writes a whole file in directory `dir` (which must exist), creating it or
- * replacing its content. `name` must be a valid 8.3 name ("CONFIG.TXT";
+ * replacing its content. `name` must be a valid 8.3 name ("config.txt";
  * lower case is stored upper case). The new data is written to clusters
  * already marked as a chain before the directory entry points at it, so a
  * power cut leaves either the old or the new file (plus, at worst, lost
@@ -87,7 +96,7 @@ extern int (*fat_write_tick)(void);
 /* The bytes of the file being written that are on the card so far (set
  * before each fat_write_tick: a progress bar). */
 extern size_t fat_write_done;
-/* Whole clusters (up to 32 KiB of them next to each other, the sectors
+/* Whole clusters (up to 32 KB of them next to each other, the sectors
  * with data of the last one too) in one SD command, read back and
  * compared, instead of one sector at a time (a kernel took the RGB30 more
  * than a minute, a 6 MB game froze the Pi's menu 30 s); a run that fails

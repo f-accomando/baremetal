@@ -79,7 +79,7 @@ bass  = note "<c2 a1 f1 g1>" :s "acid" :lpf(sine:range(300, 1800):slow(4))
 
 Se sbagli, la riga viene segnata, la riga di stato dice che cosa non va e la musica che suonava continua. Correggi la riga e premi di nuovo **Ctrl+Enter**.
 
-![La riga di bm Sound con un pattern in riproduzione](shots/riff-sound-line.png)
+!La riga di bm Sound con un pattern in riproduzione
 
 ::: copy
 s "kick*4, ~ snare, hat*8" :gain(.9) :room(.2)

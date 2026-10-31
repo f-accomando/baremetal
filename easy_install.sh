@@ -16,7 +16,7 @@
 #                           formatted (FAT32, the whole card up to 31 GB) with
 #                           the image's files on it; settings, saves and your
 #                           own games are kept, unless you say no
-#   5  [NET] send a file    a game (.bm, into /carts: the menu shows it at once),
+#   5  [NET] send a file    a game (.bm, into /bm: the menu shows it at once),
 #                           a resource (.bmm .bmi .bms ..., into /bm/lib) or any
 #                           file to a console's SD card (tools/bm_net.py --send)
 #   6  [NET] monitor        a console's monitor on this PC (tools/bm_net.py): its
@@ -27,6 +27,14 @@
 #                           settings shown (tokens and passwords hidden), keys set
 #                           (github_token for the reports, WiFi...) or removed
 #   8   [SD] config         the same on the card in the reader
+#   9  [NET] bridge         tools/pi_bridge.py for a saved profile (its board: pi,
+#                           zero2 or rgb30): you type the password, NET and AGY
+#                           then run tools/pi.py without seeing it;
+#                           ./easy_install.sh bridge [profile]
+#   w  [NET] screen         a console's screen live in this terminal (tools/bm_watch.py,
+#                           op V of the transfer port): sixel (real pixels, 640x360, the
+#                           text is legible: Windows Terminal 1.22 or later, WezTerm, foot)
+#                           or blocks (shapes only); Ctrl-C stops
 #   r  release              a new version on GitHub (scripts/release.sh --no-sd:
 #                           the tag, the CI tests it and publishes it); the
 #                           consoles take it from Settings > Updates
@@ -38,7 +46,7 @@
 #   b  branch              change it, or bring it up to date (git pull)
 #   p  paths               the repository's folder, the card's drive letter
 # The same as an argument: ./easy_install.sh kernel | install | image | net [profile]
-# | send FILE [profile] | monitor [profile] | line "gpu; b3d; send" [profile] (a monitor
+# | send FILE [profile] | monitor [profile] | watch [profile] [sixel|blocks] | line "b3d; send" [profile] (a monitor
 # line run, its output shown: bm_net.py --line) | config [profile] | config-sd | release [vX.Y.Z] | rollback [vX.Y.Z]
 # sudo is asked for when needed (packages, mounting the card); the card is
 # mounted, synced and unmounted (and ejected) by the script. At the end:
@@ -509,21 +517,20 @@ does not start: put kernel8.img on its card once (2 [SD] update kernel, with the
     exit 0
 }
 
-short_name() {                                  # an 8.3 name for the SD card (PONG.BM): the file's if it is one
+short_name() {                                  # an 8.3 name for the SD card (pong.bm): the file's if it is one
     local b=$1 stem ext
     if [[ $b =~ ^[A-Za-z0-9_-]{1,8}(\.[A-Za-z0-9_-]{1,3})?$ ]]; then echo "$b"; return; fi
     stem=${b%.*}; ext=
     [ "$stem" = "$b" ] || ext=${b##*.}
     stem=$(tr -cd 'A-Za-z0-9_-' <<< "$stem"); ext=$(tr -cd 'A-Za-z0-9_-' <<< "$ext")
     stem=${stem:0:8}; ext=${ext:0:3}
-    [ -n "$stem" ] || stem=FILE
-    stem=${stem^^}; ext=${ext^^}
+    [ -n "$stem" ] || stem=file
+    stem=${stem,,}; ext=${ext,,}
     echo "$stem${ext:+.$ext}"
 }
 
 # a file on a console's SD card (tools/bm_net.py --send): a game goes into
-# /carts (bm/ on the RGB30) and the console's menu shows it once written, a
-# resource into /bm/lib
+# /bm and the console's menu shows it once written, a resource into /bm/lib
 job_send() {
     local file=${1:-} base n83 to x p name ip code board out old rc
     if [ -z "$file" ]; then
@@ -546,7 +553,7 @@ job_send() {
     fi
     case ${base,,} in
         *.bmm|*.bmi|*.bms|*.bmt|*.bmc|*.bmk) to=/bm/lib ;;
-        *) to=/carts ;;
+        *) to=/bm ;;
     esac
     read -r -p "Folder on the SD card [$to]: " x || x=
     to=${x:-$to}
@@ -567,9 +574,9 @@ job_send() {
         ok "sent: $to/$n83 on $name"
         # the console answers as soon as the file arrived whole and writes it
         # from its menu ("Updating" on the game meanwhile); a game that is
-        # open is replaced when it is closed. The RGB30 puts a game for
-        # /carts in bm/, the folder its menu lists.
-        [[ ${n83,,} != *.bm && ${n83,,} != *.b16 ]] || [ "$to" != /carts ] ||
+        # open is replaced when it is closed. A game for /carts goes to bm/,
+        # the folder the menus list.
+        [[ ${n83,,} != *.bm && ${n83,,} != *.b16 ]] || { [ "$to" != /bm ] && [ "$to" != /carts ]; } ||
             ok "the game is in its menu once written (Games, or Dev for a tool; if it is open: when you close it)"
     else
         warn "not sent: see above"
@@ -604,6 +611,45 @@ job_monitor() {
     save_conf
 }
 
+# a console's screen on this PC (tools/bm_watch.py): live in the terminal, Ctrl-C stops. The second argument says how it is
+# drawn: sixel (real pixels, 640x360: Windows Terminal 1.22 or later, WezTerm, foot) or blocks (shapes only); asked if missing
+job_watch() {
+    PICK_Q="Which console to watch"
+    pick_profile "${1:-}" || return 0
+    local p=${PROFILES[$PICK]} name ip code board old x rc mode=${2:-}
+    name=$(profile_field "$p" 0); ip=$(profile_field "$p" 1)
+    code=$(profile_field "$p" 2); board=$(profile_field "$p" 3)
+    reach_console
+    if [ -z "$mode" ]; then
+        mode=blocks
+        [ -z "${WT_SESSION:-}" ] || mode=sixel          # (Windows Terminal says so)
+        read -r -p "Draw it as sixel (real pixels, legible text) or blocks (shapes only) [$mode]: " x || x=
+        case $x in s*|S*) mode=sixel ;; b*|B*) mode=blocks ;; esac
+    fi
+    [ "$mode" = sixel ] || mode=blocks
+    while :; do
+        rc=0
+        say "The screen of $name ($ip, bm $old), $mode: Ctrl-C stops"
+        python3 tools/bm_watch.py "$ip" -p "$code" --mode "$mode" || rc=$?
+        [ "$rc" = 1 ] || break                  # 1: not let in, or no stream (a kernel before op V)
+        read -r -p "It did not let you in? The Console password now (6 digits, Enter: stop): " x || x=
+        [[ $x =~ ^[0-9]{6}$ ]] || break
+        code=$x
+    done
+    PROFILES[PICK]="$name|$ip|$code|$board|$(profile_field "$p" 4)"     # IP and code as they work now
+    save_conf
+}
+
+# The bridge for NET and AGY: pi_bridge.py asks the password once, never this script (the saved code stays unused)
+job_bridge() {
+    PICK_Q="Which one to open the bridge for"
+    pick_profile "${1:-}" || return 0
+    local p=${PROFILES[$PICK]} name ip board
+    name=$(profile_field "$p" 0); ip=$(profile_field "$p" 1); board=$(profile_field "$p" 3)
+    say "The bridge to $name ($ip, $(board_name "$board")): type the console password, then NET and AGY use tools/pi.py. Ctrl-C stops it."
+    python3 tools/pi_bridge.py --board "${board:-pi}" "$ip"
+}
+
 # ---------------------------------------------------------------- a console's settings
 # bm/config.txt: "key=value" lines (src/kernel/config.c); the ones you may want
 config_keys() {
@@ -616,7 +662,7 @@ config_keys() {
   layout         it or us: the keyboard           volume   0 to 10
   game_intro     0: no loading splash             perf     1: the performance overlay
   gpu3d          0: the 3D on the ARM (gpu3d_aa, gpu3d_vs, gpu3d_queue: the GPU's options)
-  menu_scale     3: the Pi's menu at 1920x1080    mouse    off: no pointer anywhere
+  menu_scale     1|2|3: the Pi's menu size       mouse    off: no pointer anywhere
   confirm        a: A confirms (RGB30)            show_bm  0: no .bm in the RGB30's menu
 KEYS
 }
@@ -1063,7 +1109,12 @@ Raspberry Pi Imager; 2 or 3 update its files."
         cp --update=none /dev/null "$bk/.cp-test" 2>/dev/null && keep=--update=none
         rm -f "$bk/.cp-test"
         if [ -d "$bk/bm" ]; then cp -r $keep "$bk/bm/." "$SD/bm/"; fi
-        if [ -d "$bk/carts" ]; then cp -r $keep "$bk/carts/." "$SD/carts/"; fi
+        if [ -d "$bk/carts" ]; then
+            cp -r $keep "$bk/carts/." "$SD/carts/"
+            for g in "$SD"/carts/*.bm "$SD"/carts/*.BM "$SD"/carts/*.b16 "$SD"/carts/*.B16; do   # the menus read bm/ only
+                [ -f "$g" ] && mv -n "$g" "$SD/bm/"
+            done
+        fi
         ok "settings, saves and games put back"
     fi
     sync
@@ -1089,14 +1140,16 @@ case ${1:-} in
     net) job_net "${2:-}" ;;
     send) job_send "${2:-}" "${3:-}"; exit 0 ;;
     monitor) job_monitor "${2:-}"; exit 0 ;;
-    line) [ -n "${2:-}" ] || die "line \"gpu; b3d; send\" [profile]: the line is missing"
+    bridge) job_bridge "${2:-}"; exit 0 ;;
+    watch) job_watch "${2:-}" "${3:-}"; exit 0 ;;
+    line) [ -n "${2:-}" ] || die "line \"b3d; send\" [profile]: the line is missing"
           job_monitor "${3:-}" "$2"; exit 0 ;;
     config) job_config "${2:-}"; exit 0 ;;
     config-sd) job_config_sd; exit 0 ;;
     release) job_release "${2:-}"; exit 0 ;;
     rollback) job_rollback "${2:-}" ;;
     "") ;;
-    *) die "unknown: $1 (kernel, install, image, net [profile], send FILE [profile], monitor [profile], \
+    *) die "unknown: $1 (kernel, install, image, net [profile], send FILE [profile], monitor [profile], watch [profile] [sixel|blocks], bridge [profile], \
 line \"LINE\" [profile], config [profile], config-sd, release [vX.Y.Z], rollback [vX.Y.Z], or nothing for the menu)" ;;
 esac
 
@@ -1111,6 +1164,8 @@ while :; do
   6  [NET] monitor         (a console's monitor here: its keys and commands; Ctrl-Q leaves)
   7  [NET] config          (a console's bm/config.txt: shown, keys set or removed)
   8   [SD] config          (bm/config.txt on the card in the reader)
+  9  [NET] bridge          (pi_bridge.py for a console's profile: you type the password, NET and AGY use pi.py)
+  w  [NET] screen          (a console's screen live here: sixel, real pixels, or blocks; Ctrl-C stops)
   r  release               (a new version on GitHub: release.sh --no-sd; the consoles update)
   o  older release         (an older signed release on the card: checked first, old kernels in bm/backup)
   b  branch                (now $BRANCH: change it or update it)
@@ -1127,11 +1182,13 @@ MENU
         6) job_monitor ;;
         7) job_config ;;
         8) job_config_sd ;;
+        9) job_bridge ;;
+        w|W) job_watch ;;
         r|R) job_release ;;
         o|O) job_rollback ;;
         b|B) change_branch; BRANCH=$(git rev-parse --abbrev-ref HEAD); echo "  branch      $(branch_line)" ;;
         p|P) change_paths ;;
         q|Q|"") exit 0 ;;
-        *) warn "1 to 8, r, o, b, p or q" ;;
+        *) warn "1 to 9, w, r, o, b, p or q" ;;
     esac
 done

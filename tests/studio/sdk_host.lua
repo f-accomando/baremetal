@@ -9,7 +9,7 @@
 --
 --   luahost tests/studio/sdk_host.lua ROOT SDDIR     (make test-studio)
 --
--- SDDIR/carts/village.bm must be there (a copy of build/carts/village.bm).
+-- SDDIR/carts/testkit.bm must be there (a copy of build/carts/testkit.bm).
 
 local ROOT, SD = arg[1] or ".", arg[2] or "build/sdk-sd"
 local checks, fails = 0, 0
@@ -148,7 +148,7 @@ local function anim_rigs(bin)
     local p = pos + 24 + nb * 44 + ((nv + 3) & ~3)
     for c = 1, nc do
       local nk, mode, flags, length = string.unpack("<I2BBf", bin, p + 16)
-      assert(nk >= 1 and mode <= 2 and length > 0, "ANIM: a bad clip")
+      assert(nk >= 1 and mode <= 4 and length > 0, "ANIM: a bad clip")
       local prev, keys = 0, {}
       for k = 0, nk - 1 do
         local t = string.unpack("<f", bin, p + 24 + k * (4 + nb * 28))
@@ -169,13 +169,13 @@ end
 
 ----------------------------------------------------------------- the SD card and the project
 
-local on_sd = { ["/carts"] = { "village.bm" } }
+local on_sd = { ["/carts"] = { "testkit.bm" } }
 local function host(path) return SD .. path:lower() end
 local sec = {}                -- the project's MESH (8) and ANIM (9)
 local sheet = { w = 256, h = 256, px = {} }
 local mapc = {}               -- the map: [y * 4096 + x] = cell (layer 1)
 local lnames, mlay, flg = { "main" }, {}, {}   -- the layers' names, layers 2.., the tiles' flags
-local ran, tooled, saves, last_save, built = nil, nil, 0, nil, nil
+local ran, tooled, saves, last_save, built, published = nil, nil, 0, nil, nil, nil
 
 local function add_file(path)
   local dir, name = path:match("^(.*)/([^/]+)$")
@@ -189,6 +189,7 @@ end
 
 local E, texts, sel_rows, keyq, pad, padprev, frame, saved_t, quitted, draws, arg_t
 local keyhelp_list, keyhelp_title
+local showkeys_n = 0
 local MESH_MT = {}
 local function chip_w(n) return #n == 1 and 16 or math.max(16, #n * 6 + 10) end
 local PADN = { A = 1, B = 1, X = 1, Y = 1, START = 1, SELECT = 1, L1 = 1, R1 = 1, UP = 1, UPDOWN = 1, LEFTRIGHT = 1,
@@ -273,11 +274,13 @@ local function new_env(arg)
     keyhelp_list, keyhelp_title = list, title
     return 0
   end
+  E.showkeys = function() showkeys_n = showkeys_n + 1; return true end
   E.save = function(t) saved_t = t; return true end
   E.saved = function() return saved_t end
   E.cart_arg = function() return arg_t end
   E.cart_run = function(p) ran = p end
   E.cart_tool = function(name, p) tooled = { name, p } end
+  E.cart_publish = function(p) published = p end        -- (the console leaves the SDK for its Publish panel)
   E.timeslice = function() end
   -- (the real count is the kernel's, tried by tests/bm/test_tokens.c)
   E.code_tokens = function(s)
@@ -473,7 +476,7 @@ local function new_env(arg)
       fo:close()
       add_file(b)
     end)
-    assert(path:match("^/carts/[%u%d_]+%.BME$"), "cart_save: a project's 8.3 name in /carts: " .. path)
+    assert(path:match("^/bme/[%l%d_]+%.bme$") or path:match("^/carts/[%u%l%d_]+%.[Bb][Mm][Ee]$"), "cart_save: a project's 8.3 name in /bme (or an old place): " .. path)
     local px = {}
     for i = 0, sheet.w * sheet.h - 1 do
       local c = sheet.px[i]
@@ -493,11 +496,12 @@ local function new_env(arg)
     if moved then return true, path end
     return true
   end
-  -- cart_build: the project's game next to it (.BM, or .B16 when kind == "b16")
-  E.cart_build = function(path, kind)
-    if not path:match("%.BME$") then return false, "only a project (.bme) is built" end
-    local ext = kind == "b16" and ".B16" or ".BM"
-    local game = path:gsub("%.BME$", ext)
+  -- cart_build: the project's game next to it (.bm)
+  E.cart_build = function(path)
+    if not path:lower():match("%.bme$") then return false, "only a project (.bme) is built" end
+    local ext = ".bm"
+    local game = path:gsub("%.[Bb][Mm][Ee]$", ext)
+    if path:match("^/bme/") then game = game:gsub("^/bme/", "/bm/") end   -- a project in /bme builds into the games folder
     local fi, fo = assert(io.open(host(path), "rb")), assert(io.open(host(game), "wb"))
     fo:write(fi:read("a"))
     fi:close()
@@ -593,6 +597,8 @@ local function play_template(code, name)
   local G = {}
   for k, v in pairs(E) do G[k] = v end
   G._init, G._update, G._draw = nil, nil, nil       -- (the SDK's own)
+  G.save = function() return true end
+  G.saved = function() return nil end
   local held = {}
   G.btn = function(i) return held[i] == true end
   G.btnp = function(i) return held[i] == true end
@@ -618,7 +624,7 @@ end
 run_sdk(nil)
 frames(30)
 check(sees("OPEN IN") and sees("bm Code") and sees("bm Animator") and sees("bm Sound"), "the hub: the suite's programs")
-check(sees("PROJECT") and sees("screen 640x360") and sees("target .bm"), "the hub: the project's settings")
+check(sees("PROJECT") and sees("screen 640x360") and not sees("target"), "the hub: the project's settings")
 check(sees("CONTENTS") and sees("tokens"), "the hub: the contents measured")
 check(sees("New game") and sees("bm SDK"), "the hub: the title and the program's name")
 check(keyhelp_title == "bm SDK" and keyhelp_list, "F12: the keys of the page")
@@ -649,7 +655,7 @@ for i, nm in ipairs(names) do
   for _ = 1, 10 do key("\b") end            -- "MYGAME.BME"
   typed("T" .. i)
   key("\n")
-  check(last_save and last_save.path == "/carts/T" .. i .. ".BME", nm .. ": saved as T" .. i .. ".BME, a project")
+  check(last_save and last_save.path == "/bme/t" .. i .. ".bme", nm .. ": saved as t" .. i .. ".bme, a project")
   play_template(last_save.t.lua, nm)
   if nm == "Shooter 2D" then
     local inked = 0
@@ -699,6 +705,86 @@ check(status():find("map layer 1/2: main", 1, true), "l: the next layer: " .. st
 key("c")
 check(status():find("flags of the tiles", 1, true) or sees("flags of the tiles"), "c: the flags over the map")
 key("c")
+-- APP-21: the terrain brush (t): a 4 x 4 block of the sheet from the base tile, the borders choose themselves
+do
+  local B = E.require("bm3d")
+  -- the pure part: all 16 masks (N=1 E=2 S=4 W=8), 8x8 and 16x16 steps, a foreign tile is not in the set
+  local function tl(m, base, step) return base + (m % 4) * step + (m // 4) * step * 32 end
+  for _, cfg in ipairs({ { 1, 1 }, { 2, 2 } }) do
+    local step, base = cfg[1], 1 + cfg[1] * 64
+    for m = 0, 15 do
+      local cells = { [5 .. "," .. 5] = base }
+      if m & 1 ~= 0 then cells["5," .. 5 - step] = tl(15, base, step) end
+      if m & 2 ~= 0 then cells[5 + step .. ",5"] = tl(0, base, step) end
+      if m & 4 ~= 0 then cells["5," .. 5 + step] = tl(9, base, step) end
+      if m & 8 ~= 0 then cells[5 - step .. ",5"] = tl(6, base, step) end
+      cells["6,6"] = base + 1                         -- (a diagonal one: it does not count)
+      local get = function(x, y) return cells[x .. "," .. y] or 0 end
+      local got = B.autotile_mask(get, 5, 5, base, step, 32, 256, 256)
+      check(got == m, "autotile: step " .. step .. " mask " .. m .. " = " .. got)
+      check(B.autotile_tile(base, m, step, 32) == tl(m, base, step), "autotile: tile of mask " .. m)
+    end
+    local alien = { ["5,4"] = base + 3 * step * 32 + 4 * step, ["6,5"] = base - 1 }   -- (outside the block)
+    check(B.autotile_mask(function(x, y) return alien[x .. "," .. y] or 0 end, 5, 5, base, step, 32, 256, 256) == 0,
+          "autotile: tiles out of the set are not neighbours (step " .. step .. ")")
+  end
+  check(B.autotile_mask(function() return 1 end, 0, 0, 1, 1, 32, 256, 256) == 6, "autotile: the map's edge is no neighbour")
+
+  local cx, cy = 1, 0                    -- (the cursor of the map page, here)
+  local function go(x, y)
+    while cx < x do key("right"); cx = cx + 1 end
+    while cx > x do key("left"); cx = cx - 1 end
+    while cy < y do key("down"); cy = cy + 1 end
+    while cy > y do key("up"); cy = cy - 1 end
+  end
+  local x0, y0 = 3, 2
+  local base = E.mget(x0, y0) == 0 and 1 or -1
+  check(base == 1, "terrain: a free area")
+  local function T(m) return tl(m, 1, 1) end
+  key("t")
+  check(status():find("TERRAIN base 1", 1, true), "terrain: t shows TERRAIN base N: " .. status())
+  check(sees("terrain"), "terrain: the hint names the brush")
+  local before_n = 0
+  for _ in pairs(mapc) do before_n = before_n + 1 end
+  for r = 0, 2 do
+    for c = 0, 2 do go(x0 + c, y0 + r); key(" ") end
+  end
+  local want = { { 6, 14, 12 }, { 7, 15, 13 }, { 3, 11, 9 } }
+  local ok = true
+  for r = 0, 2 do
+    for c = 0, 2 do
+      if E.mget(x0 + c, y0 + r) ~= T(want[r + 1][c + 1]) then ok = false end
+    end
+  end
+  check(ok, "terrain: a 3x3 block, corners, edges and the middle choose themselves")
+  go(x0 + 1, y0 + 1); key("")
+  check(E.mget(x0 + 1, y0 + 1) == 0 and E.mget(x0 + 1, y0) == T(10) and E.mget(x0, y0 + 1) == T(5)
+        and E.mget(x0 + 2, y0 + 1) == T(5) and E.mget(x0 + 1, y0 + 2) == T(10) and E.mget(x0, y0) == T(6),
+        "terrain: Backspace erases the cell and re-tiles its 4 neighbours")
+  key("u")
+  ok = true
+  for r = 0, 2 do
+    for c = 0, 2 do
+      if E.mget(x0 + c, y0 + r) ~= T(want[r + 1][c + 1]) then ok = false end
+    end
+  end
+  check(ok, "terrain: one undo gives back the erased cell and its neighbours")
+  -- a line, then a cell more: one undo takes the last stroke only
+  go(x0, y0 + 5); key(" "); go(x0 + 1, y0 + 5); key(" "); go(x0 + 2, y0 + 5); key(" ")
+  check(E.mget(x0, y0 + 5) == T(2) and E.mget(x0 + 1, y0 + 5) == T(10) and E.mget(x0 + 2, y0 + 5) == T(8), "terrain: a line")
+  go(x0 + 3, y0 + 5); key(" ")
+  check(E.mget(x0 + 2, y0 + 5) == T(10) and E.mget(x0 + 3, y0 + 5) == T(8), "terrain: the line grows, the old end re-tiled")
+  key("u")
+  check(E.mget(x0 + 2, y0 + 5) == T(8) and E.mget(x0 + 3, y0 + 5) == 0 and E.mget(x0, y0 + 5) == T(2),
+        "terrain: one undo takes one stroke")
+  key("t")
+  check(status():find("terrain brush off", 1, true), "terrain: t again, the brush is off: " .. status())
+  go(x0 + 6, y0); key(" ")
+  check(E.mget(x0 + 6, y0) == 1, "terrain: off, space places the current tile")
+  key("u")
+  for y = y0, y0 + 6 do for x = x0, x0 + 6 do E.mset(x, y, 0) end end     -- (the later checks start from an empty map)
+  go(1, 0)
+end
 -- the 16x16 brush (z): a tile of 2 x 2 cells (n, n + 1 and the two under them: the sheet has 32 cells a row),
 -- the cursor and the tile on even cells; Home / End: a page left / right
 check(sees("z: 8/16"), "the map's strip: z, the brush")
@@ -750,7 +836,7 @@ check(sees("SPRITES"), "F3 again: the sprites")
 key("f2", "f5")
 check(sees("file name"), "F5 on a project with no name: Save as first")
 key("\n")
-check(ran == "/carts/MYGAME.BME", "F5 saves and tries the project: " .. tostring(ran))
+check(ran == "/bme/mygame.bme", "F5 saves and tries the project: " .. tostring(ran))
 check(saved_t and saved_t.page == "code", "the page remembered for the way back")
 local tried = ran
 
@@ -765,38 +851,64 @@ key("f1", "f1")
 frames(5)
 check(sees("59.9 fps") and sees("RAM 510k peak"), "the dev kit: the last try")
 
--- the target .b16: the cap and what the format will not have (the shooter
--- uses math.random); M42 step 4: sets square 360x360 and Ctrl+B builds .b16
-run_sdk({ path = "/carts/T4.BME" })
-frames(10)
-check(sees("Shooter 2D"), "the shooter opened")
-key("b")
-check(status():find("target .b16", 1, true) and sees("screen 360x360"), "b: the target .b16 and 360x360 screen")
-key("^b")
-check(built == "/carts/T4.B16" and status():find("built /carts/T4.B16", 1, true), "Ctrl+B with target .b16 builds .B16: " .. status())
-key("f1")
-frames(5)
-check(sees("of 8M (.b16)") and sees("math.random"), "the dev kit for a .b16: the cap, math.random")
-check(saved_t.targets and saved_t.targets["/CARTS/T4.BME"] == "b16", "the target remembered for the file")
-
 -- an error in the game: the code page on its line
-run_sdk({ path = "/carts/T1.BME", back = true, error = "main.lua:3: boom" })
+run_sdk({ path = "/bme/t1.bme", back = true, error = "main.lua:3: boom" })
 frames(2)
 check(sees("main.lua:3: boom") or status():find("the game stopped", 1, true), "the error shown")
 check(status():find("the game stopped", 1, true) or status():find("boom", 1, true), "back from an error: " .. status())
 
--- Ctrl+B: the game of the project (cart_build), next to it; Ctrl+Shift+B: exports .b16
+-- Ctrl+B: the game of the project (cart_build), next to it; Ctrl+Shift+B does nothing (no .b16)
 key("^b")
-check(built == "/carts/T1.BM" and status():find("built /carts/T1.BM", 1, true), "Ctrl+B builds the game: " .. status())
+check(built == "/bm/t1.bm" and status():find("built /bm/t1.bm", 1, true), "Ctrl+B builds the game: " .. status())
 key("^B")
-check(built == "/carts/T1.B16" and status():find("built /carts/T1.B16", 1, true), "Ctrl+Shift+B exports .b16: " .. status())
+check(built == "/bm/t1.bm", "Ctrl+Shift+B builds nothing more: " .. tostring(built))
 
--- the models of a project (village.bm): the 3D page, the code for one,
+-- Publish to the Market (Esc menu): builds the game, then the console is asked for its Publish panel
+key("esc")
+for _ = 1, 6 do key("down") end
+check(sees("Publish to the Market"), "the menu offers Publish to the Market")
+key("\n")
+check(published == "/bm/t1.bm", "Publish builds the game and asks the console to publish it: " .. tostring(published))
+key("esc")
+
+-- projects live in /bme: Ctrl+O lists them there, and an old project next to its game
+-- (/carts/OLD.BME) is still found; Save writes where the project is, and says so
+do
+  local fi = assert(io.open(host("/bme/t1.bme"), "rb"))
+  local fo = assert(io.open(host("/carts/old.bme"), "wb"))
+  fo:write(fi:read("a"))
+  fi:close()
+  fo:close()
+  add_file("/carts/OLD.BME")
+end
+run_sdk({ path = "/bme/t1.bme" })
+frames(5)
+key("^o")
+check(sees("choose") or sees("open"), "Ctrl+O opens the list")
+check(sees("/bme/t1.bme"), "Ctrl+O lists the project in /bme (the stand-in card keeps lower case)")
+local seen_old = sees("/carts/old.bme")
+for _ = 1, 60 do                         -- (the list scrolls)
+  if seen_old then break end
+  key("down")
+  seen_old = sees("/carts/old.bme")
+end
+check(seen_old, "Ctrl+O still lists an old project next to its game")
+key("esc")
+key("^s")
+frames(2)
+check(last_save.path == "/bme/t1.bme" and status():find("saved /bme/t1.bme", 1, true), "Ctrl+S saves in /bme: " .. status())
+run_sdk({ path = "/carts/old.bme" })
+frames(5)
+key("^s")
+frames(2)
+check(last_save.path == "/carts/old.bme" and status():find("old place", 1, true), "an old project is saved where it is, and the status says so: " .. status())
+
+-- the models of a project (testkit.bm): the 3D page, the code for one,
 -- the assistant's model joining them
-run_sdk({ path = "/carts/village.bm" })
+run_sdk({ path = "/carts/testkit.bm" })
 frames(10)
 local nmodels = #E.models()
-check(nmodels > 3, "village has models (" .. nmodels .. ")")
+check(nmodels > 3, "the kit has models (" .. nmodels .. ")")
 key("f4")
 frames(3)
 check(sees("MODELS " .. nmodels), "F4: the models")
@@ -824,8 +936,8 @@ key("f1", "3")
 frames(1)
 if sees("file name") then key("\n") end
 check(tooled and tooled[1] == "studio", "3: bm Studio on the project: " .. tostring(tooled and tooled[1]))
-check(tooled[2] == "/carts/VILLAGE.BME", "the game was saved first: its editable copy " .. tostring(tooled[2]))
-run_sdk({ path = "/carts/village.bm", from = "pixel" })
+check(tooled[2] == "/bme/testkit.bme", "the game was saved first: its editable copy " .. tostring(tooled[2]))
+run_sdk({ path = "/carts/testkit.bm", from = "pixel" })
 frames(2)
 check(status():find("back from bm Pixel", 1, true), "back from bm Pixel: " .. status())
 
@@ -852,13 +964,8 @@ local function click(x, y, b)
   mouse(x, y, 0); mouse(x, y, b or 1); mouse(x, y, 0); frames(1)
 end
 
-run_sdk({ path = "/carts/village.bm" })
+run_sdk({ path = "/carts/testkit.bm" })
 frames(400)
--- the project page: a click chooses a row, a second click does it (target)
-click(40, 16 + 12 * 16 + 8)
-click(40, 16 + 12 * 16 + 8)
-check(sees("target .b16"), "mouse: the project page, the target by clicking twice")
-click(40, 16 + 12 * 16 + 8)
 -- the tabs: 2D (sprites), drawing, a colour, a flag, the sheet
 local mx, my = at("2D", nil, 0)
 click(mx, my)
@@ -894,6 +1001,131 @@ click(400, 200, 2)
 check(sees("Open in bm Studio") and sees("Spin"), "mouse: the 3D page's context menu")
 mx, my = at("Spin")
 click(mx, my)
+
+-- the code view: a double click selects a word, a drag selects, a letter replaces it (M48)
+mx, my = at("code", nil, 0)
+click(mx, my)
+frames(5)
+click(100, 24)
+key("end", "\n")
+typed("foo bar")
+mouse(84, 40, 0); mouse(84, 40, 1); mouse(84, 40, 0); mouse(84, 40, 1); mouse(84, 40, 0); frames(1)
+key("Z")
+check(sees("foo") and sees("Z") and not sees("bar"), "mouse: a double click on a word selects it, a letter replaces it")
+mouse(40, 40, 0); mouse(40, 40, 1); mouse(52, 40, 1); mouse(64, 40, 1); mouse(64, 40, 0); frames(1)
+key("\b")
+check(sees("Z") and not sees("foo"), "mouse: a drag selects, Backspace takes the text out")
+click(100, 24)
+key("end", "\n")
+typed("one two")
+mouse(40, 40, 0); mouse(40, 40, 1); mouse(80, 40, 1); mouse(120, 40, 1); mouse(120, 40, 0); frames(1)
+key("^c")
+key("end", "\n", "^v")
+check(select(2, screen():gsub("two", "")) >= 2, "mouse: Ctrl+C copies the selected text, Ctrl+V puts it back")
+
+-- the line of a dialog: a click puts the caret between the letters (M48)
+key("^S")
+check(sees("file name"), "mouse: Save as asks the name")
+for _ = 1, 20 do key("\b") end
+typed("ac")
+click(96 + 8, 184)
+key("b")
+check(sees("abc"), "mouse: a click on the line of the dialog puts the caret between the letters")
+key("esc")
+
+-- R11: a Tiled map (.tmj) into the map's layers
+do
+  local B = E.require("bm3d")
+  local function tmj(w, h, tw, layers, extra)
+    return '{"width":' .. w .. ',"height":' .. h .. ',"tilewidth":' .. tw .. ',"tileheight":' .. tw ..
+           ',"orientation":"orthogonal","tilesets":[{"firstgid":1,"columns":' .. (tw == 16 and 4 or 8) ..
+           ',"tilewidth":' .. tw .. ',"tiles":[{"id":1,"properties":[{"name":"solid","type":"bool","value":true}]},' ..
+           '{"id":9,"properties":[{"name":"hurt","type":"bool","value":true},{"name":"note","type":"string","value":"x"}]}]}],' ..
+           '"layers":[' .. layers .. ']' .. (extra or "") .. '}'
+  end
+  local ground = '{"name":"Ground","type":"tilelayer","data":[0,2,2147483650,10,1,0,0,2]}'
+  local objs = '{"name":"spawns","type":"objectgroup","objects":[]}'
+  local m8 = tmj(4, 2, 8, ground .. "," .. objs)
+  local r = assert(B.tiled_import(m8, 32))
+  check(r.w == 4 and r.h == 2 and r.tile == 8 and #r.layers == 1 and r.layers[1].name == "Ground", "tiled: size, layer name")
+  local c = r.layers[1].cells
+  check(c[2] == 1 and c[3] == 1 and c[4] == 33 and c[5] == 0 and c[8] == 1, "tiled: gids to sheet cells (flip bits dropped, gid 1 = cell 0 = empty)")
+  check(r.flags[1] == 1 and r.flags[33] == 16 and r.ignored[1] == "spawns (objectgroup)", "tiled: tile properties to flags, object layer ignored")
+  local r16 = assert(B.tiled_import(tmj(2, 2, 16, '{"name":"a","type":"tilelayer","data":[1,6,0,6]}'), 32))
+  local c16 = r16.layers[1].cells
+  check(r16.w == 4 and r16.h == 4 and r16.tile == 16, "tiled: 16x16 tiles make 2 x 2 cells")
+  check(c16[1] == 0 and c16[2] == 1 and c16[5] == 32 and c16[6] == 33, "tiled: 16x16 gid 1 is the cells 0 1 32 33")
+  check(c16[3] == 66 and c16[4] == 67 and c16[7] == 98 and c16[8] == 99 and c16[9] == 0, "tiled: 16x16 gid 6 is the cells 66 67 98 99")
+  local group = '{"name":"g","type":"group","layers":[{"name":"in","type":"tilelayer","data":[2,2,2,2,2,2,2,2]}]}'
+  local rg = assert(B.tiled_import(tmj(4, 2, 8, group .. "," .. ground .. ',{"name":"Ground","type":"tilelayer","data":[0,0,0,0,0,0,0,0]}'), 32))
+  check(#rg.layers == 3 and rg.layers[1].name == "g_in" and rg.layers[3].name == "Ground2", "tiled: groups walked, equal names told apart")
+  local function bad(text, why, msg)
+    local res, err = B.tiled_import(text, 32)
+    check(res == nil and tostring(err):find(why, 1, true), "tiled error " .. msg .. ": " .. tostring(err))
+  end
+  bad("{", "JSON", "broken JSON")
+  bad('{"a":1}', "no layers", "no layers")
+  bad(tmj(4, 2, 12, ground), "8x8 or 16x16", "tile size")
+  bad(tmj(4, 2, 8, '{"name":"x","type":"tilelayer","encoding":"base64","data":"AAAA"}'), "CSV", "base64")
+  bad(tmj(4, 2, 8, objs), "no tile layer", "only objects")
+  bad(tmj(4, 2, 8, '{"name":"x","type":"tilelayer","data":[1,2]}'), "2 tiles", "short data")
+  bad(tmj(4, 2, 8, ground, ',"infinite":true'), "infinite", "infinite map")
+  bad(tmj(300, 2, 8, ground), "256x256", "too big")
+  bad(tmj(4, 2, 8, '{"name":"x","type":"tilelayer","data":[0,0,0,0,0,0,0,2000]}'), "outside the sheet", "tile past the sheet")
+  bad((m8:gsub('"orthogonal"', '"isometric"')), "orthogonal", "isometric")
+  -- the menu: Import a Tiled map
+  local file = { name = "level1.tmj", data = m8 }
+  E.doc_list = function() return { { name = "notes.txt", size = 3 }, { name = file.name, size = #file.data } } end
+  E.doc_read = function(n) return n == file.name and file.data or nil, "no such file" end
+  local before = #E.mlayers()
+  key("esc")
+  local rf, chosen = E.rectfill, nil
+  E.rectfill = function(x, y, w, h, c) if x == 24 and w == 272 and h == 16 then chosen = y end; return rf(x, y, w, h, c) end
+  frames(1)
+  for _ = 1, 12 do if chosen == 208 then break end; chosen = nil; key("down") end
+  E.rectfill = rf
+  check(sees("Import a Tiled map") and chosen == 208, "tiled: the menu has the import")
+  key("\n")
+  check(sees("level1.tmj") and not sees("notes.txt"), "tiled: the dialog lists the .tmj files only")
+  key("\n")
+  check(sees("add the layers to the map") and sees("replace the map"), "tiled: add or replace")
+  key("\n")
+  local names = E.mlayers()
+  check(#names == before + 1 and names[#names] == "Ground", "tiled: the layer was added: " .. table.concat(names, ","))
+  check(E.mget(1, 0, "Ground") == 1 and E.mget(3, 0, "Ground") == 33 and E.mget(0, 0, "Ground") == 0, "tiled: the cells are in the layer")
+  check(E.fget(1, 0) and E.fget(33, 4), "tiled: the flags are on the sheet")
+  check(sees("Tiled: ") or status():find("Tiled", 1, true), "tiled: the answer " .. status())
+  -- a file that does not parse says why
+  file.data = "[1,2"
+  key("esc", "\n", "\n")
+  check(sees("Tiled: not a JSON file"), "tiled: a broken file is told")
+  -- replace: the map has only the file's layers
+  file.data = m8
+  key("\n", "\n", "down", "\n")
+  names = E.mlayers()
+  check(#names == 1 and names[1] == "Ground" and E.mget(3, 0, "Ground") == 33, "tiled: replace keeps only the imported layers: " .. table.concat(names, ","))
+  key("esc", "down", "down", "esc")                -- (the menu's choice back on the first line)
+end
+
+-- the fixed chip "F12 keys" on the hint bar of every page
+do
+  dofile(ROOT .. "/tests/studio/hintchip.lua"){
+    name = "bm SDK", check = check, texts = function() return texts end, hy = 320, w = 640, chip_w = chip_w,
+    click = click, shown = function() return showkeys_n end,
+    pages = {
+      { name = "project", go = function() key("f1") end },
+      { name = "code", go = function() key("f2") end },
+      { name = "sprites", go = function() key("f3") end },
+      { name = "map", go = function() key("f3") end },
+      { name = "models", go = function() key("f4") end },
+      { name = "menu", go = function() key("esc") end },
+    } }
+  key("f3")
+  key("f3")
+  local function on_bar(s) for _, t in ipairs(texts) do if t[3] == 320 and t[1] == s then return true end end end
+  check(on_bar("terrain") and on_bar("layer") and on_bar("mini"), "map page: the bar has terrain, layer and mini (m) next to the fixed chip")
+  key("esc")
+end
 
 io.write(string.format("sdk_host: %d checks, %d failed\n", checks, fails))
 os.exit(fails == 0 and 0 or 1)

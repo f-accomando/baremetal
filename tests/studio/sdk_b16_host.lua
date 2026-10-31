@@ -15,8 +15,8 @@
 --
 --   luahost tests/studio/sdk_b16_host.lua ROOT SDDIR CART   (make test-sdk-b16)
 --
--- CART is the built script (build/sdk_b16/main.lua); SDDIR/bm/village.b16
--- must be there (a copy of build/carts/village.bm).
+-- CART is the built script (build/sdk_b16/main.lua); SDDIR/bm/testkit.b16
+-- must be there (a copy of build/carts/testkit.bm).
 
 local ROOT, SD, CART = arg[1] or ".", arg[2] or "build/sdk-b16-sd", arg[3] or "build/sdk_b16/main.lua"
 local checks, fails = 0, 0
@@ -243,7 +243,7 @@ end
 
 ----------------------------------------------------------------- the SD card
 
-local on_sd = { ["/carts"] = {}, ["/bm"] = { "village.b16" }, ["/"] = {} }
+local on_sd = { ["/carts"] = {}, ["/bm"] = { "testkit.b16" }, ["/"] = {} }
 local function host(path) return SD .. path:lower() end
 -- the card as this test made it (a file left in the folder by an earlier
 -- run is not on it)
@@ -266,7 +266,9 @@ end
 local E, texts, keyq, held, frame, saved_t, quitted, draws, arg_t
 local sec, sheet, mapc, lnames, mlay, flg
 local refused, copies, saves, last_save, built, ran, tooled
+local audio_files, audio_puts, audio_last = {}, 0, nil      -- the sound banks by file; what was played
 local keyhelp_list, keyhelp_title, MS, ai_full, last_kb, numeric_btn
+local showkeys_n = 0
 local loaded, cur_font
 local CUTS = {}
 local MESH_MT = {}
@@ -334,6 +336,13 @@ local function new_env(arg, o)
   E.map = function(cx, cy, sx, sy, w, h) g_box("map", sx, sy, w * 8, h * 8) end
   for _, n in ipairs({ "circ", "circfill", "tri", "pset" }) do E[n] = nop end
   for _, n in ipairs({ "cls", "zclear", "light3d", "fog3d", "lamp3d", "camera", "sky3d" }) do E[n] = nop end
+  -- the 3D map preview (AGY-04): the host has no map3d engine, so a stub world
+  E.map3d_build = function() return {} end
+  E.map3d_height = function() return 0.0 end
+  E.map3d_objects = function() return {} end
+  E.map3d_draw = nop
+  E.line3d = nop
+  E.point3d = nop
   E.clip = function(x) clipped = x ~= nil end
   E.font = function(name)
     if name then cur_font = name == "6x12" and { 6, 12 } or { 8, 16 } end
@@ -419,6 +428,7 @@ local function new_env(arg, o)
     keyhelp_list, keyhelp_title = list, title
     return 0
   end
+  E.showkeys = function() showkeys_n = showkeys_n + 1; return true end
   E.save = function(t) saved_t = t; return true end
   E.saved = function() return saved_t end
   E.cart_arg = function() return arg_t end
@@ -429,8 +439,9 @@ local function new_env(arg, o)
   E.cart_build = function(path, kind)
     if not path:upper():match("%.BME$") then return false, path .. ": only a project (.bme) is built" end
     local dir, base = path:match("^(.*)/([^/.]+)%.[^.]*$")
-    local ext = kind == "b16" and ".B16" or ".BM"
-    local game = dir .. "/" .. base:upper() .. ext       -- bm_build / bm_build_b16: next to it, its 8.3 name
+    local ext = ".bm"
+    if dir == "/bme" then dir = "/bm" end                 -- a project in /bme builds into the games folder (RGB30: /bm)
+    local game = dir .. "/" .. base:lower() .. ext       -- bm_build: its 8.3 name
     local d = assert(read_file(host(path)))
     local f = assert(io.open(host(game), "wb")); f:write(d); f:close()
     add_file(game)
@@ -483,7 +494,9 @@ local function new_env(arg, o)
     if f == nil then return v end
     return v >> f & 1 == 1
   end
+  E.msize = function() return 256, 256, #lnames end
   E.fset = function(n, f, on)
+    if on == nil then flg[n] = f & 255; return end
     local bit = 1 << f
     flg[n] = on and (flg[n] or 0) | bit or (flg[n] or 0) & ~bit
   end
@@ -575,7 +588,7 @@ local function new_env(arg, o)
   -- cart_save as the runtime's for a tool (write_target): any file but a
   -- game, a project of an earlier run too; a game (.bm, .b16) is read only:
   -- the console asks (yes here) and writes its editable copy next to it
-  -- (bm_copy_name: NAME.BME, NAME1.BME...), a new one becomes its project;
+  -- (bm_copy_name: name.bme, name1.bme...), a new one becomes its project;
   -- true and the file written when it is not the one asked
   E.cart_save = function(path, t)
     assert(type(t.lua) == "string", "cart_save: the code")
@@ -584,10 +597,10 @@ local function new_env(arg, o)
     if up:match("%.BM$") or up:match("%.B16$") then
       local dir, base = path:match("^(.*)/([^/.]+)%.[^.]*$")
       if exists(path) then
-        local stem = base:upper():sub(1, 8)
+        local stem = base:lower():sub(1, 8)
         path = nil
         for k = 0, 9 do
-          local p = dir .. "/" .. (k == 0 and stem or stem:sub(1, 7) .. k) .. ".BME"
+          local p = "/bme/" .. (k == 0 and stem or stem:sub(1, 7) .. k) .. ".bme"
           if not exists(p) then path = p; break end
         end
         if not path then
@@ -596,7 +609,7 @@ local function new_env(arg, o)
         end
         copies = copies + 1
       else
-        path = dir .. "/" .. base .. ".BME"
+        path = "/bme/" .. base:lower():sub(1, 8) .. ".bme"
       end
     end
     local px = {}
@@ -618,7 +631,20 @@ local function new_env(arg, o)
     if path ~= asked then return true, path end
     return true
   end
-  E.cart_audio = function() return false end
+  -- the sound banks of the files (cart_put_audio writes one, cart_audio reads
+  -- it: the AUDIO section of the project), and the last preview played
+  E.cart_put_audio = function(path, bank)
+    audio_files[path:upper()] = bank
+    audio_puts = audio_puts + 1
+    return true
+  end
+  E.cart_audio = function(path)
+    if path == nil then return nil end
+    return audio_files[path:upper()] or false
+  end
+  E.audio_bank = function(bank) audio_last = { bank = bank } end
+  E.audio_play = function(v, sound, note, vol, fx, ms) audio_last = { v = v, sound = sound, note = note, vol = vol, fx = fx, ms = ms, bank = audio_last and audio_last.bank } end
+  E.sfx = function(n) audio_last = { sfx = n, bank = audio_last and audio_last.bank } end
   -- the assistant's knowledge: the Pi's kernel (ask, entries, recipes) or,
   -- as on the RGB30, only the music
   if o.ai then
@@ -726,13 +752,14 @@ end
 ----------------------------------------------------------------- the checks
 
 -- a fresh start on the RGB30: no file, the project page of a new game,
--- 360x360 and the target .b16
+-- 360x360
 saved_t = nil
 run_sdk(nil)
 tag = "project"
 frames(30)
 check(sees("PROJECT") and sees("title") and sees("New game"), "the hub: the project's rows")
-check(sees("360x360") and sees(".b16"), "a new project: 360x360, the target .b16")
+check(sees("360x360"), "a new project: 360x360")
+check(not sees(".b16") and not sees("target"), "no target row: one cartridge type, .bm")
 check(sees("CONTENTS") and sees("tokens"), "the hub: the contents measured")
 check(not sees("OPEN IN") and not sees("bm Code"), "no programs of the suite: the RGB30's kernel has none")
 check(tabs():find("[L1]", 1, true) and tabs():find("project", 1, true) and tabs():find("[R1]", 1, true),
@@ -819,6 +846,8 @@ local pages = {
   { "sprites", "the sprites", function() press("r1"); press("r1") end },
   { "map", "the map", function() press("r1"); press("r1"); with("y", "down") end },
   { "3D", "3D", function() press("r1"); press("r1"); press("r1") end },
+  { "sounds", "the sounds", function() for _ = 1, 4 do press("r1") end end },
+  { "sfx", "the effects", function() for _ = 1, 4 do press("r1") end; with("y", "down") end },
 }
 for _, pg in ipairs(pages) do
   run_sdk(nil)
@@ -839,6 +868,7 @@ for _, pg in ipairs(pages) do
   check(seen_rows["Save as..."] and seen_rows["Open..."] and seen_rows["Menu"],
         pg[1] .. ": the actions end with save, open, menu")
   check(seen_rows["Try the game"] and seen_rows["Build the game .bm"], pg[1] .. ": try and build (a tool)")
+  if pg[1] == "map" then check(seen_rows["Terrain brush"], "map: the actions list has Terrain brush (APP-22)") end
   check(not seen_rows["Open in bm Studio"] and not seen_rows["Open in bm Mesh"], pg[1] .. ": no other program")
   press("back")
   check(not dialog_open(), pg[1] .. ": back closes the actions")
@@ -862,6 +892,146 @@ for _, pg in ipairs(pages) do
   check(ran_n == n and n > 5, pg[1] .. ": all its " .. n .. " actions run (" .. ran_n .. ")")
 end
 check(not numeric_btn, "the SDK never asks a button by number: " .. tostring(numeric_btn))
+
+
+-- the sounds page (APP-6d/e/f): the project's sound bank on the pad. The
+-- bank is written with the project (cart_put_audio after cart_save), what
+-- the file had after the effects is kept byte for byte, an edit is heard.
+local function bank_bytes(wave, tail)
+  local tone = {}
+  for i = 1, 21 do tone[i] = 0 end
+  tone[12] = 40
+  return "BMAU" .. string.pack("<BBBBBBxxxxxx", 2, 1, 0, 1, 0, 0)
+         .. string.pack("<c8BBBBBBBbBBBbxxxx", "TEST", wave, 128, 200, 1, 0, 255, 10, 0, 0, 0, 0, 0)
+         .. string.char(table.unpack(tone)) .. "\0\0\0" .. tail
+end
+local function settled()                          -- the status line, once the message is gone
+  frames(250)
+  return status()
+end
+local function open_sounds(arg)
+  if not arg then saved_t = nil end              -- a new project, not the last one
+  run_sdk(arg)
+  frames(3)
+  for _ = 1, 4 do press("r1") end
+  frames(2)
+end
+do
+  tag = "snd"
+  audio_files, audio_puts, audio_last = {}, 0, nil
+  open_sounds(nil)
+  check(sees("SOUNDS") and sees("(empty)") and tabs():find("snd", 1, true), "R1 x4: the sounds page: " .. tabs())
+  check(settled():find("sound 0", 1, true) and settled():find("SQUARE", 1, true), "sound 0: SQUARE: " .. status())
+  for _ = 1, 4 do press("right") end
+  check(sees("SINE") and settled():find("SINE", 1, true), "right x4: wave SINE: " .. status())
+  check(sees("*"), "an edit: the file is not saved")
+  press("ok")
+  check(audio_last and audio_last.sound == 0 and audio_last.note == 69 and audio_last.vol == 255 and audio_last.ms == 350
+        and type(audio_last.bank) == "string" and audio_last.bank:sub(1, 4) == "BMAU",
+        "ok plays A4 of slot 0 with the bank as it is now")
+  press("down")
+  for _ = 1, 3 do press("right") end
+  press("r2")
+  check(settled():find("sound 1", 1, true), "R2: sound 1: " .. status())
+  press("l2")
+  key("^s")
+  key("\n")                                      -- the name MYGAME.BME is accepted
+  local got = audio_files["/BME/MYGAME.BME"]
+  check(got and got:sub(1, 4) == "BMAU" and got:byte(5) == 2 and got:byte(6) == 1, "Ctrl+S writes the bank with the project")
+  check(got and got:byte(25) == 4 and got:byte(27) == 203, "the bank: sound 0 is SINE, its volume 203: "
+        .. tostring(got and got:byte(27)))
+  check(not tabs():find("*", 1, true), "saved: no star on the tabs")
+  local puts = audio_puts
+  key("^s")
+  check(audio_puts == puts + 1, "saving again writes the bank again (after the first edit)")
+
+  -- a bank of the file: read, edited, written with what follows the effects as it was
+  local tail = string.pack("<BBxx", 16, 0) .. "TAIL"
+  local orig = bank_bytes(4, tail)
+  saved_t = nil
+  run_sdk(nil); frames(3)
+  key("^S")
+  for _ = 1, 12 do key("\b") end
+  for c in ("TB"):gmatch(".") do key(c) end
+  key("\n")
+  audio_files["/BME/TB.BME"] = orig
+  local n0 = audio_puts
+  open_sounds({ path = "/bme/tb.bme", back = false })
+  check(sees("TEST") and settled():find("SINE", 1, true), "the file's bank: sound 0 TEST, SINE: " .. status())
+  key("^s")
+  frames(2)
+  check(audio_puts == n0 and audio_files["/BME/TB.BME"] == orig, "saving without touching the sounds leaves the bank alone")
+  press("right")
+  check(settled():find("METAL", 1, true), "right: the next wave: " .. status())
+  press("left")
+  key("^s")
+  check(audio_files["/BME/TB.BME"] == orig, "an edit undone: pack(parse(bank)) is the same bytes")
+  press("right")
+  key("^s")
+  local now = audio_files["/BME/TB.BME"]
+  check(now ~= orig and now:sub(-#tail) == tail and now:byte(8) == 1 and now:byte(25) == 5,
+        "an edit: the wave is METAL and the patterns after the effects are kept")
+
+  -- a bank the SDK cannot read: the page says so and nothing is written over it
+  audio_files["/BME/TB.BME"] = "BMAUxxxxxxxxxxxxxxxxxxxx"
+  open_sounds({ path = "/bme/tb.bme", back = false })
+  check(sees("cannot be read"), "a broken bank: the page says so")
+  press("right"); press("ok")
+  key("^s")
+  frames(2)
+  check(audio_files["/BME/TB.BME"] == "BMAUxxxxxxxxxxxxxxxxxxxx", "a broken bank is not written over")
+
+  -- the effects: Y + down is the other view; ok puts a note (A4 of the sound
+  -- chosen on the sounds page) and plays it, up / down change it, back clears
+  open_sounds(nil)
+  with("y", "down")
+  tag = "sfx"
+  check(sees("EFFECTS") and tabs():find("sfx", 1, true), "Y + down: the effects: " .. tabs())
+  press("ok")
+  check(audio_last and audio_last.sound == 0 and audio_last.note == 69 and audio_last.vol == 255 and audio_last.ms == 350,
+        "ok on a step: A4 of sound 0 is put and heard")
+  press("up")
+  check(settled():find("A#4", 1, true), "up: the note, A#4: " .. status())
+  press("right")
+  press("ok")
+  check(audio_last.note == 70, "the next step takes the last note (70): " .. tostring(audio_last.note))
+  press("back")
+  check(settled():find("empty", 1, true), "back: the step is empty")
+  press("left"); press("r2")
+  check(settled():find("effect 1", 1, true), "R2: effect 1: " .. status())
+  press("l2")
+  key("+")
+  key("^s")
+  key("\n")
+  local fx = audio_files["/BME/MYGAME.BME"]
+  check(fx and fx:byte(7) == 1 and fx:byte(6) == 0, "the effect is written: one effect, no sound")
+  check(fx and string.unpack("<H", fx, 25) == 70 and string.unpack("<I4", fx, 33) == (70 | 255 << 16),
+        "its speed 70 ms and its first step A#4 (note 70, sound 0, volume 255)")
+  with("y", "up")
+  check(sees("SOUNDS"), "Y + up: the sounds again")
+  key("f7")
+  check(sees("EFFECTS"), "F7 on the sounds page: the effects")
+  key("f7")
+  check(sees("SOUNDS"), "F7 again: the sounds")
+  key("f1"); key("f7")
+  check(sees("SOUNDS") or sees("EFFECTS"), "F7: the page from another")
+
+  -- sounds from a file (the Lib, key i): a file of bm/lib, then one of its sounds
+  on_sd["/bm/lib"] = { "kit.bm" }
+  audio_files["/BM/LIB/KIT.BM"] = bank_bytes(5, "")      -- sound 0: TEST, METAL
+  open_sounds(nil)
+  key("i")
+  check(sees("sounds from a file") and sees("KIT.BM"), "i: the files with sounds")
+  press("ok")
+  check(sees("a sound of KIT.BM") and sees("TEST"), "ok: the sounds of the file")
+  press("ok")
+  check(sees("TEST") and settled():find("METAL", 1, true), "the sound is in slot 0: " .. status())
+  check(sees("*"), "an import is an edit")
+  key("i")
+  press("ok"); press("ok")
+  check(settled():find("sound 1", 1, true), "again: the next empty slot (1): " .. status())
+  on_sd["/bm/lib"] = nil
+end
 
 -- the code page with the pad: the cross moves, ok types with padtype's keyboard
 run_sdk(nil)
@@ -950,6 +1120,73 @@ check(sees("4px") or status():find("1:2", 1, true), "-: map zoom out to 4px")
 key("m")
 check(sees("OVERVIEW") and sees("256x256"), "m: 256x256 overview in one screen")
 key("m", "z")
+-- APP-22: the terrain brush (t), as in the Pi SDK (APP-21): a 4 x 4 block of the sheet from the base tile
+do
+  local B = E.require("bm3d")
+  local function tl(m, base, step) return base + (m % 4) * step + (m // 4) * step * 32 end
+  for _, cfg in ipairs({ { 1, 1 }, { 2, 2 } }) do
+    local step, base = cfg[1], 1 + cfg[1] * 64
+    for m = 0, 15 do
+      local cells = { ["5,5"] = base }
+      if m & 1 ~= 0 then cells["5," .. 5 - step] = tl(15, base, step) end
+      if m & 2 ~= 0 then cells[5 + step .. ",5"] = tl(0, base, step) end
+      if m & 4 ~= 0 then cells["5," .. 5 + step] = tl(9, base, step) end
+      if m & 8 ~= 0 then cells[5 - step .. ",5"] = tl(6, base, step) end
+      cells["6,6"] = base + 1                         -- (a diagonal one: it does not count)
+      local get = function(x, y) return cells[x .. "," .. y] or 0 end
+      local got = B.autotile_mask(get, 5, 5, base, step, 32, 256, 256)
+      check(got == m, "autotile: step " .. step .. " mask " .. m .. " = " .. got)
+      check(B.autotile_tile(base, m, step, 32) == tl(m, base, step), "autotile: tile of mask " .. m)
+    end
+  end
+  check(B.autotile_mask(function() return 1 end, 0, 0, 1, 1, 32, 256, 256) == 6, "autotile: the map's edge is no neighbour")
+
+  if settled():find("16x16", 1, true) then key("z") end        -- (the 8x8 brush)
+  check(not settled():find("16x16", 1, true), "terrain: the 8x8 brush: " .. status())
+  local cx, cy = status():match("%((%d+),(%d+)%)")
+  cx, cy = tonumber(cx), tonumber(cy)
+  local function go(x, y)
+    while cx < x do key("right"); cx = cx + 1 end
+    while cx > x do key("left"); cx = cx - 1 end
+    while cy < y do key("down"); cy = cy + 1 end
+    while cy > y do key("up"); cy = cy - 1 end
+  end
+  if tonumber(settled():match("tile (%d+)")) == 0 then key(".") end   -- (tile 0 is the empty cell)
+  local base = tonumber(settled():match("tile (%d+)"))
+  check(base and base + 3 * 32 + 3 < 1024, "terrain: a base tile with room for the block: " .. tostring(base))
+  local x0, y0 = 10, 10
+  local function T(m) return tl(m, base, 1) end
+  key("t")
+  check(status():find("TERRAIN base " .. base, 1, true), "terrain: t shows TERRAIN base N: " .. status())
+  local function block(want)
+    for r = 0, 2 do for c = 0, 2 do
+      if E.mget(x0 + c, y0 + r) ~= T(want[r + 1][c + 1]) then return false end
+    end end
+    return true
+  end
+  for r = 0, 2 do for c = 0, 2 do go(x0 + c, y0 + r); key(" ") end end
+  local want = { { 6, 14, 12 }, { 7, 15, 13 }, { 3, 11, 9 } }
+  check(block(want), "terrain: a 3x3 block, corners, edges and the middle choose themselves")
+  go(x0 + 1, y0 + 1); key("")
+  check(E.mget(x0 + 1, y0 + 1) == 0 and E.mget(x0 + 1, y0) == T(10) and E.mget(x0, y0 + 1) == T(5)
+        and E.mget(x0 + 2, y0 + 1) == T(5) and E.mget(x0 + 1, y0 + 2) == T(10) and E.mget(x0, y0) == T(6),
+        "terrain: Backspace erases the cell and re-tiles its 4 neighbours")
+  key("u")
+  check(block(want), "terrain: one undo gives back the erased cell and its neighbours")
+  go(x0, y0 + 5); key(" "); go(x0 + 1, y0 + 5); key(" "); go(x0 + 2, y0 + 5); key(" ")
+  check(E.mget(x0, y0 + 5) == T(2) and E.mget(x0 + 1, y0 + 5) == T(10) and E.mget(x0 + 2, y0 + 5) == T(8), "terrain: a line")
+  go(x0 + 3, y0 + 5); key(" ")
+  check(E.mget(x0 + 2, y0 + 5) == T(10) and E.mget(x0 + 3, y0 + 5) == T(8), "terrain: the line grows, the old end re-tiled")
+  key("u")
+  check(E.mget(x0 + 2, y0 + 5) == T(8) and E.mget(x0 + 3, y0 + 5) == 0 and E.mget(x0, y0 + 5) == T(2),
+        "terrain: one undo takes one stroke")
+  key("t")
+  check(status():find("terrain brush off", 1, true), "terrain: t again, the brush is off: " .. status())
+  go(x0 + 6, y0); key(" ")
+  check(E.mget(x0 + 6, y0) == base, "terrain: off, space places the current tile")
+  key("u")
+  for y = y0, y0 + 6 do for x = x0, x0 + 6 do E.mset(x, y, 0) end end
+end
 press("r2")
 press("back")
 
@@ -958,6 +1195,8 @@ local function play_template(code, name)
   local G2 = {}
   for k, v in pairs(E) do G2[k] = v end
   G2._init, G2._update, G2._draw = nil, nil, nil
+  G2.save = function() return true end
+  G2.saved = function() return nil end
   local h = {}
   G2.btn = function(i) return h[i] == true end
   G2.btnp = function(i) return h[i] == true end
@@ -1001,7 +1240,7 @@ for i, nm in ipairs(names) do
   press("ok")
   press("start")
   frames(2)
-  check(last_save and last_save.path == "/carts/" .. i .. ".BME", nm .. ": saved as " .. i .. ".BME: " ..
+  check(last_save and last_save.path == "/bme/" .. i .. ".bme", nm .. ": saved as " .. i .. ".bme: " ..
         tostring(last_save and last_save.path))
   if last_save then play_template(last_save.t.lua, nm) end
 end
@@ -1010,42 +1249,42 @@ end
 -- writes its project where it is: no new name, the runtime never refuses)
 run_sdk(nil)                                     -- (the last project comes back: saved())
 frames(3)
-check(sees("8.BME") or sees("3D with models"), "the last project opens by itself: " .. tabs())
+check(sees("8.bme") or sees("3D with models"), "the last project (8.BME, 3D with models) opens by itself: " .. tabs())
 key("^S")
 check(sees("file name"), "Ctrl+Shift+S: Save as")
 for _ = 1, 12 do key("\b") end
 for c in ("KEEP"):gmatch(".") do key(c) end
 key("\n")
-check(last_save.path == "/carts/KEEP.BME", "saved as KEEP.BME: " .. last_save.path)
+check(last_save.path == "/bme/keep.bme", "saved as KEEP.BME: " .. last_save.path)
 key("f2", "-")
 key("^s")
-check(last_save.path == "/carts/KEEP.BME" and refused == 0, "Ctrl+S again in the same run: the same file")
+check(last_save.path == "/bme/keep.bme" and refused == 0, "Ctrl+S again in the same run: the same file")
 run_sdk(nil)
 frames(3)
-check(sees("KEEP.BME") or tabs():find("KEEP", 1, true), "a new run: KEEP.BME again: " .. tabs())
+check(sees("keep.bme") or tabs():find("KEEP", 1, true), "a new run: KEEP.BME again: " .. tabs())
 local n_saves = saves
 key("f2", "-")
 key("^s")
 frames(2)
-check(not sees("file name") and saves == n_saves + 1 and last_save.path == "/carts/KEEP.BME",
+check(not sees("file name") and saves == n_saves + 1 and last_save.path == "/bme/keep.bme",
       "a new run: Ctrl+S writes KEEP.BME again, no new name: " .. last_save.path)
 check(refused == 0 and copies == 0, "the runtime never refused a save, no copy of a project (" .. refused .. ")")
 
 -- the build and the try: the project's game next to it (the Games tab
--- lists bm/: the message says so); F5 leaves for the console to play it
+-- lists the game: the message says so); F5 leaves for the console to play it
 key("^b")
-check(built == "/carts/KEEP.BM", "Ctrl+B builds the game: " .. tostring(built))
-check(status():find("built /carts/KEEP.BM", 1, true) and status():find("lists bm/", 1, true),
+check(built == "/bm/keep.bm", "Ctrl+B builds the game: " .. tostring(built))
+check(status():find("built /bm/keep.bm", 1, true) and status():find("it is in Games", 1, true),
       "Ctrl+B says where the game is: " .. status())
 key("^B")
-check(built == "/carts/KEEP.B16", "Ctrl+Shift+B exports .b16: " .. tostring(built))
+check(built == "/bm/keep.bm" and not sees("Export"), "Ctrl+Shift+B does nothing: no .b16 export")
 check(not quitted and not ran, "building does not leave the SDK")
 key("f5")
-check(ran == "/carts/KEEP.BME" and quitted, "F5 tries the project (the SDK leaves for it): " .. tostring(ran))
+check(ran == "/bme/keep.bme" and quitted, "F5 tries the project (the SDK leaves for it): " .. tostring(ran))
 
 -- the suite's other programs are not in the RGB30's kernel: not offered,
 -- and their keys say so with no cart_tool (it would end the session)
-run_sdk({ path = "/carts/KEEP.BME", back = false })
+run_sdk({ path = "/bme/keep.bme", back = false })
 frames(3)
 check(not sees("open in") and not sees("OPEN IN"), "no row of the suite's programs")
 key("1")
@@ -1058,7 +1297,7 @@ check(not tooled and not quitted and status():find("bm Studio is on the Pi", 1, 
 press("x")
 check(sees("The code to draw it") and not sees("Open in bm Studio"), "the 3D actions: no other program")
 press("back")
-run_sdk({ path = "/carts/KEEP.BME" }, { ai = true })
+run_sdk({ path = "/bme/keep.bme" }, { ai = true })
 frames(3)
 key("f4", "f6")
 frames(2)
@@ -1072,12 +1311,13 @@ frames(2)
 run_sdk(nil)
 frames(3)
 key("^o")
-check(sees("/bm/VILLAGE.B16"), "Open: the games in bm/")
-press("ok")                                      -- (the first row: /bm/ comes before /carts/)
+check(sees("/bm/TESTKIT.B16"), "Open: the games in bm/")
+press("down")                                    -- (/bm/ first: KEEP.BM built above, then TESTKIT.B16)
+press("ok")
 frames(2)
-check(sees("Studio Village"), "the game opened")
+check(sees("Test Kit"), "the game opened")
 check(status():find("editable copy", 1, true), "a game: saving makes its editable copy: " .. status())
-tag = "3D village"
+tag = "3D test kit"
 press("r1"); press("r1"); press("r1")
 frames(3)
 local nmodels = #E.models()
@@ -1091,11 +1331,11 @@ press("back")
 key("f6")
 check(status():find("assistant is not on this console", 1, true), "F6 on the RGB30: no assistant: " .. status())
 key("^s")
-check(copies == 1 and last_save.path == "/bm/VILLAGE.BME", "Ctrl+S: the editable copy next to the game: " ..
+check(copies == 1 and last_save.path == "/bme/testkit.bme", "Ctrl+S: the editable copy next to the game: " ..
       last_save.path)
-check(status():find("saved /bm/VILLAGE.BME", 1, true), "the SDK goes on with the copy: " .. status())
+check(status():find("saved /bme/testkit.bme", 1, true), "the SDK goes on with the copy: " .. status())
 key("^b")
-check(built == "/bm/VILLAGE.BM" and status():find("it is in Games", 1, true), "Ctrl+B: the game in bm/: " .. status())
+check(built == "/bm/testkit.bm" and status():find("it is in Games", 1, true), "Ctrl+B: the game in bm/: " .. status())
 check(refused == 0, "the runtime never refused a save (" .. refused .. ")")
 
 -- the keyboard: the same pages with its keys, the hints with keys
@@ -1108,17 +1348,85 @@ for _, k in ipairs({ "f1", "f1", "f2", "f3", "f3", "f4", "esc" }) do
   frames(2)
 end
 check(sees("Exit bm SDK") and sees("Ctrl+Shift+S"), "the menu with the keyboard's shortcuts")
+-- R11: a Tiled map (.tmj) into the map's layers
+do
+  local B = E.require("bm3d")
+  local function tmj(w, h, tw, layers, extra)
+    return '{"width":' .. w .. ',"height":' .. h .. ',"tilewidth":' .. tw .. ',"tileheight":' .. tw ..
+           ',"orientation":"orthogonal","tilesets":[{"firstgid":1,"columns":' .. (tw == 16 and 4 or 8) ..
+           ',"tilewidth":' .. tw .. ',"tiles":[{"id":1,"properties":[{"name":"solid","type":"bool","value":true}]},' ..
+           '{"id":9,"properties":[{"name":"hurt","type":"bool","value":true},{"name":"note","type":"string","value":"x"}]}]}],' ..
+           '"layers":[' .. layers .. ']' .. (extra or "") .. '}'
+  end
+  local ground = '{"name":"Ground","type":"tilelayer","data":[0,2,2147483650,10,1,0,0,2]}'
+  local objs = '{"name":"spawns","type":"objectgroup","objects":[]}'
+  local m8 = tmj(4, 2, 8, ground .. "," .. objs)
+  local r = assert(B.tiled_import(m8, 32))
+  check(r.w == 4 and r.h == 2 and r.tile == 8 and #r.layers == 1 and r.layers[1].name == "Ground", "tiled: size, layer name")
+  local c = r.layers[1].cells
+  check(c[2] == 1 and c[3] == 1 and c[4] == 33 and c[5] == 0 and c[8] == 1, "tiled: gids to sheet cells (flip bits dropped, gid 1 = cell 0 = empty)")
+  check(r.flags[1] == 1 and r.flags[33] == 16 and r.ignored[1] == "spawns (objectgroup)", "tiled: tile properties to flags, object layer ignored")
+  local r16 = assert(B.tiled_import(tmj(2, 2, 16, '{"name":"a","type":"tilelayer","data":[1,6,0,6]}'), 32))
+  local c16 = r16.layers[1].cells
+  check(r16.w == 4 and r16.h == 4 and r16.tile == 16, "tiled: 16x16 tiles make 2 x 2 cells")
+  check(c16[1] == 0 and c16[2] == 1 and c16[5] == 32 and c16[6] == 33, "tiled: 16x16 gid 1 is the cells 0 1 32 33")
+  check(c16[3] == 66 and c16[4] == 67 and c16[7] == 98 and c16[8] == 99 and c16[9] == 0, "tiled: 16x16 gid 6 is the cells 66 67 98 99")
+  local group = '{"name":"g","type":"group","layers":[{"name":"in","type":"tilelayer","data":[2,2,2,2,2,2,2,2]}]}'
+  local rg = assert(B.tiled_import(tmj(4, 2, 8, group .. "," .. ground .. ',{"name":"Ground","type":"tilelayer","data":[0,0,0,0,0,0,0,0]}'), 32))
+  check(#rg.layers == 3 and rg.layers[1].name == "g_in" and rg.layers[3].name == "Ground2", "tiled: groups walked, equal names told apart")
+  local function bad(text, why, msg)
+    local res, err = B.tiled_import(text, 32)
+    check(res == nil and tostring(err):find(why, 1, true), "tiled error " .. msg .. ": " .. tostring(err))
+  end
+  bad("{", "JSON", "broken JSON")
+  bad('{"a":1}', "no layers", "no layers")
+  bad(tmj(4, 2, 12, ground), "8x8 or 16x16", "tile size")
+  bad(tmj(4, 2, 8, '{"name":"x","type":"tilelayer","encoding":"base64","data":"AAAA"}'), "CSV", "base64")
+  bad(tmj(4, 2, 8, objs), "no tile layer", "only objects")
+  bad(tmj(4, 2, 8, '{"name":"x","type":"tilelayer","data":[1,2]}'), "2 tiles", "short data")
+  bad(tmj(4, 2, 8, ground, ',"infinite":true'), "infinite", "infinite map")
+  bad(tmj(300, 2, 8, ground), "256x256", "too big")
+  bad(tmj(4, 2, 8, '{"name":"x","type":"tilelayer","data":[0,0,0,0,0,0,0,2000]}'), "outside the sheet", "tile past the sheet")
+  bad((m8:gsub('"orthogonal"', '"isometric"')), "orthogonal", "isometric")
+  -- the menu: Import a Tiled map
+  local file = { name = "level1.tmj", data = m8 }
+  E.doc_list = function() return { { name = "notes.txt", size = 3 }, { name = file.name, size = #file.data } } end
+  E.doc_read = function(n) return n == file.name and file.data or nil, "no such file" end
+  local before = #E.mlayers()
+  check(sees("Import a Tiled map"), "tiled: the menu has the import")
+  key("up", "up", "\n")
+  check(sees("level1.tmj") and not sees("notes.txt"), "tiled: the dialog lists the .tmj files only")
+  key("\n")
+  check(sees("add the layers to the map") and sees("replace the map"), "tiled: add or replace")
+  key("\n")
+  local names = E.mlayers()
+  check(#names == before + 1 and names[#names] == "Ground", "tiled: the layer was added: " .. table.concat(names, ","))
+  check(E.mget(1, 0, "Ground") == 1 and E.mget(3, 0, "Ground") == 33 and E.mget(0, 0, "Ground") == 0, "tiled: the cells are in the layer")
+  check(E.fget(1, 0) and E.fget(33, 4), "tiled: the flags are on the sheet")
+  check(sees("Tiled: ") or status():find("Tiled", 1, true), "tiled: the answer " .. status())
+  -- a file that does not parse says why
+  file.data = "[1,2"
+  key("esc", "\n", "\n")
+  check(sees("Tiled: not a JSON file"), "tiled: a broken file is told")
+  -- replace: the map has only the file's layers
+  file.data = m8
+  key("\n", "\n", "down", "\n")
+  names = E.mlayers()
+  check(#names == 1 and names[1] == "Ground" and E.mget(3, 0, "Ground") == 33, "tiled: replace keeps only the imported layers: " .. table.concat(names, ","))
+  key("esc", "down", "down", "esc")                -- (the menu's choice back on the first line)
+end
+
 key("esc", "f2")
 for c in ("x = 1"):gmatch(".") do key(c) end
 check(sees("x = 1") or sees("x"), "typing on the keyboard")
 
 -- a long message: on two rows, over the hints (the menu's "Open in bm
 -- SDK" on a game: cart_arg() = {path, back = false})
-run_sdk({ path = "/bm/VILLAGE.B16", back = false })
+run_sdk({ path = "/bm/TESTKIT.B16", back = false })
 frames(2)
 local r320, r336
 for _, t in ipairs(texts) do
-  if t[3] == 320 and t[1]:find("^opened VILLAGE.B16") then r320 = t[1] end
+  if t[3] == 320 and t[1]:find("^opened TESTKIT.B16") then r320 = t[1] end
   if t[3] == 336 and t[1]:find("copy", 1, true) then r336 = t[1] end
 end
 check(r320 and r336, "a long message on the two status rows: " .. status())
@@ -1146,21 +1454,68 @@ for _, t in ipairs(texts) do if t[1] == "code" and t[3] == 0 then cx = t[2] end 
 if cx then click(cx + 4, 8) end
 check(sees("type") and not sees("PROJECT"), "a click on the tab: the code: " .. status())
 
--- the dev kit of a .b16 that uses what the profile leaves out (the shooter:
--- math.random), every row of it inside the page
-run_sdk(nil)
+-- the code view: a double click selects a word, a drag selects, a letter replaces it (M48)
+local function typed(s) for c in s:gmatch(".") do key(c) end end
+click(100, 24)
+key("end", "\n")
+typed("foo bar")
+mouse(84, 40, 0); mouse(84, 40, 1); mouse(84, 40, 0); mouse(84, 40, 1); mouse(84, 40, 0); frames(1)
+key("Z")
+check(sees("foo") and sees("Z") and not sees("bar"), "mouse: a double click on a word selects it, a letter replaces it")
+mouse(40, 40, 0); mouse(40, 40, 1); mouse(52, 40, 1); mouse(64, 40, 1); mouse(64, 40, 0); frames(1)
+key("\b")
+check(sees("Z") and not sees("foo"), "mouse: a drag selects, Backspace takes the text out")
+click(100, 24)
+key("end", "\n")
+typed("one two")
+mouse(40, 40, 0); mouse(40, 40, 1); mouse(80, 40, 1); mouse(120, 40, 1); mouse(120, 40, 0); frames(1)
+key("^c")
+key("end", "\n", "^v")
+check(select(2, screen():gsub("two", "")) >= 2, "mouse: Ctrl+C copies the selected text, Ctrl+V puts it back")
+
+-- the sound page: the wheel changes the field or the note under it, a double click does Enter (M48)
+key("f7")
 frames(2)
-key("^n")
-for _ = 1, 3 do press("down") end
-press("ok")
-tag = "devkit shooter"
-with("y", "down")
-frames(30)
-check(sees("math.random") and sees("things a .b16 will not have"), "the dev kit: what a .b16 leaves out")
+local fx, fy
+for _, t in ipairs(texts) do if t[1] == "FIELDS" then fx, fy = t[2], t[3] end end
+local function at_xy(x, y) for _, t in ipairs(texts) do if t[2] == x and t[3] == y then return t[1] end end end
+local v0 = fx and at_xy(fx + 72, fy + 16)
+mouse(fx + 20, fy + 24, 0, 1); mouse(fx + 20, fy + 24, 0); frames(1)
+check(v0 and at_xy(fx + 72, fy + 16) ~= v0, "mouse: the wheel over a field changes its value (" .. tostring(v0) .. ")")
+key("f7")
+frames(2)
+local sy
+for _, t in ipairs(texts) do if t[1]:find("^STEPS") then sy = t[3] end end
+check(sy and at_xy(8 + 3 * 16, sy + 16) == "..", "the effects page: step 3 is empty")
+mouse(8 + 3 * 16 + 4, sy + 24, 0); mouse(8 + 3 * 16 + 4, sy + 24, 1); mouse(8 + 3 * 16 + 4, sy + 24, 0)
+mouse(8 + 3 * 16 + 4, sy + 24, 1); mouse(8 + 3 * 16 + 4, sy + 24, 0); frames(2)
+check(at_xy(8 + 3 * 16, sy + 16) ~= "..", "mouse: a double click on a step puts a note, as Enter does")
+mouse(8 + 3 * 16 + 4, sy + 24, 0, 1); mouse(8 + 3 * 16 + 4, sy + 24, 0); frames(1)
+check(at_xy(8 + 3 * 16, sy + 16) ~= nil, "mouse: the wheel over a step changes its note")
+
+-- the line of a dialog: a click puts the caret between the letters (M48)
+key("^S")
+check(sees("file name"), "mouse: Save as asks the name")
+for _ = 1, 20 do key("\b") end
+typed("ac")
+local lx, ly
+for _, t in ipairs(texts) do if t[1] == "ac" then lx, ly = t[2], t[3] end end
+click(lx + 8, ly + 8)
+key("b")
+check(sees("abc"), "mouse: a click on the line of the dialog puts the caret between the letters")
+key("esc")
+
+-- a click on a long message hides it
+run_sdk({ path = "/bm/TESTKIT.B16", back = false }, { mouse = true })
+frames(2)
+local function msg_rows() local n = 0; for _, t in ipairs(texts) do if t[3] == 320 and t[1]:find("^opened TESTKIT.B16") then n = n + 1 end end; return n end
+check(msg_rows() == 1, "a long message is on the hint row")
+click(100, 328)
+check(msg_rows() == 0, "mouse: a click on a long message hides it")
 
 -- back from a try (a tool session): the numbers on the project page and in
 -- the dev kit; an error: the code page on its line
-run_sdk({ path = "/carts/KEEP.BME", back = true, run = { frames = 600, secs = 10, fps = 59.9, ms = 6.1, ms_max = 7.5,
+run_sdk({ path = "/bme/keep.bme", back = true, run = { frames = 600, secs = 10, fps = 59.9, ms = 6.1, ms_max = 7.5,
                                                          slow = 0, lua_kb = 120, lua_peak_kb = 180, data_kb = 330,
                                                          instr_max = 12000, tokens = 321, tris = 40, gpu = false } })
 tag = "after a try"
@@ -1172,7 +1527,7 @@ check(sees("LAST TRY") and sees("59.9 fps"), "the hub: the last try")
 with("y", "down")
 frames(2)
 check(sees("59.9 fps") and sees("RAM 510k"), "the dev kit: the last try")
-run_sdk({ path = "/carts/KEEP.BME", back = true, error = "main.lua:3: attempt to call a nil value (global 'boom')" })
+run_sdk({ path = "/bme/keep.bme", back = true, error = "main.lua:3: attempt to call a nil value (global 'boom')" })
 tag = "error"
 frames(2)
 check(status():find("the game stopped", 1, true), "back from an error: " .. status())
@@ -1195,6 +1550,30 @@ if os.getenv("SDK_DEBUG") then
   for k, x in pairs(ASSIST_OUT) do a[#a + 1] = k .. "@" .. x end
   io.write("the assistant's panel past 360 (cut by the screen): " .. table.concat(a, " ") .. "\n")
 end
+-- the fixed chip "F12 keys" on the hint bar of every page, at 360 px (a keyboard in use);
+-- with the pad it has no button and is not drawn
+run_sdk(nil, { mouse = true, keyboard = true })
+tag = "fixed chip"
+frames(3)
+dofile(ROOT .. "/tests/studio/hintchip.lua"){
+  name = "bm SDK (RGB30)", check = check, texts = function() return texts end, hy = 320, w = 360, chip_w = chip_w,
+  click = click, shown = function() return showkeys_n end,
+  pages = {
+    { name = "project", go = function() key("f1") end },
+    { name = "code", go = function() key("f2") end },
+    { name = "sprites", go = function() key("f3") end },
+    { name = "map", go = function() key("f3") end },
+    { name = "models", go = function() key("f4") end },
+  } }
+run_sdk(nil, { mouse = true })
+tag = "fixed chip, pad"
+frames(3)
+do
+  local any
+  for _, t in ipairs(texts) do if t[1] == "[f12]" and t[3] == 320 then any = true end end
+  check(not any, "bm SDK (RGB30): with the pad the fixed chip is not drawn (it has no button)")
+end
+
 checks = checks + 1
 if #G.fails > 0 then fails = fails + 1 end
 

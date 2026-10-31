@@ -43,10 +43,13 @@ MAGIC_RES = b"BMRES\0\0\0"
 MAGIC_CART = (b"BMCART\0\0", b"BM33CART")
 SEC_LUA, SEC_SHEET, SEC_MAP, SEC_COVER, SEC_SHEET8, SEC_AUDIO = 1, 2, 3, 4, 5, 6
 SEC_MESH, SEC_ANIM, SEC_INFO, SEC_SPRITES, SEC_LAYERS, SEC_FLAGS, SEC_BOXES = 8, 9, 10, 11, 12, 13, 14
+SEC_PREVIEW = 16
 SEC_NAMES = {SEC_LUA: "LUA", SEC_SHEET: "SHEET", SEC_MAP: "MAP", SEC_COVER: "COVER", SEC_SHEET8: "SHEET8",
              SEC_AUDIO: "AUDIO", SEC_MESH: "MESH", SEC_ANIM: "ANIM", SEC_INFO: "INFO", SEC_SPRITES: "SPRITES",
-             SEC_LAYERS: "LAYERS", SEC_FLAGS: "FLAGS", SEC_BOXES: "BOXES"}
+             SEC_LAYERS: "LAYERS", SEC_FLAGS: "FLAGS", SEC_BOXES: "BOXES", SEC_PREVIEW: "PREVIEW"}
 KNOWN = set(SEC_NAMES) | {7}
+COVER_MAX = 512
+PREVIEW_FRAMES_MAX, PREVIEW_SIZE_MAX = 64, 256
 
 CART, MODEL, IMAGE, SOUND, MAP, PALETTE, KIT = range(7)
 KIND_NAMES = {CART: "cartridge", MODEL: "models", IMAGE: "image", SOUND: "sounds", MAP: "map",
@@ -54,12 +57,13 @@ KIND_NAMES = {CART: "cartridge", MODEL: "models", IMAGE: "image", SOUND: "sounds
 EXTENSIONS = {".bmm": MODEL, ".bmi": IMAGE, ".bms": SOUND, ".bmt": MAP, ".bmc": PALETTE, ".bmk": KIT}
 SHEETS = {SEC_SHEET, SEC_SHEET8}
 ALLOWED = {
-    MODEL: {SEC_INFO, SEC_MESH, SEC_ANIM} | SHEETS,
-    IMAGE: {SEC_INFO, SEC_SPRITES, SEC_BOXES, SEC_FLAGS} | SHEETS,
+    MODEL: {SEC_INFO, SEC_COVER, SEC_PREVIEW, SEC_MESH, SEC_ANIM} | SHEETS,
+    IMAGE: {SEC_INFO, SEC_COVER, SEC_SPRITES, SEC_BOXES, SEC_FLAGS} | SHEETS,
     SOUND: {SEC_INFO, SEC_AUDIO},
-    MAP: {SEC_INFO, SEC_MAP, SEC_LAYERS, SEC_FLAGS} | SHEETS,
+    MAP: {SEC_INFO, SEC_COVER, SEC_MAP, SEC_LAYERS, SEC_FLAGS} | SHEETS,
     PALETTE: {SEC_INFO, SEC_SHEET8},
-    KIT: {SEC_INFO, SEC_MESH, SEC_ANIM, SEC_SPRITES, SEC_BOXES, SEC_AUDIO, SEC_MAP, SEC_LAYERS, SEC_FLAGS} | SHEETS,
+    KIT: {SEC_INFO, SEC_COVER, SEC_PREVIEW, SEC_MESH, SEC_ANIM, SEC_SPRITES, SEC_BOXES, SEC_AUDIO, SEC_MAP, SEC_LAYERS,
+          SEC_FLAGS} | SHEETS,
 }
 
 INFO_MAX = 16 * 1024
@@ -206,11 +210,16 @@ def check(f, where="file"):
             flags_get(f)
         if f.get(SEC_INFO) is not None:
             info_parse(f.get(SEC_INFO))
+        if f.get(SEC_COVER) is not None:
+            cover_get(f)
+        if f.get(SEC_PREVIEW) is not None:
+            preview_get(f)
         zones = []
         if f.get(SEC_SPRITES) is not None:
             zones = sprites_decode(f.get(SEC_SPRITES))
             for z in zones:
-                if sheet and (z["x"] + z["w"] * z["frames"] > sheet[0] or z["y"] + z["h"] > sheet[1]):
+                zx, zy, zw, zh = zone_rect(z)
+                if sheet and (zx + zw > sheet[0] or zy + zh > sheet[1]):
                     raise ResError(f"zone {z['name']} is out of the sheet")
         if f.get(SEC_BOXES) is not None:
             frames = {z["name"]: z["frames"] for z in zones}
@@ -351,11 +360,16 @@ def sprites_decode(body):
     for i in range(n):
         o = 4 + SPRITE_SIZE * i
         name = _cstr(body[o:o + NAME_LEN])
-        x, y, w, h, frames, fps = struct.unpack_from("<4HBB", body, o + NAME_LEN)
+        x, y, w, h, frames, fps, slices, flags = struct.unpack_from("<4HBBBB", body, o + NAME_LEN)
         if not name or name in seen or not w or not h or not 1 <= frames <= FRAMES_MAX:
             raise ResError(f"bad zone {name!r} in SPRITES")
         seen.add(name)
-        zones.append({"name": name, "x": x, "y": y, "w": w, "h": h, "frames": frames, "fps": fps})
+        zone = {"name": name, "x": x, "y": y, "w": w, "h": h, "frames": frames, "fps": fps}
+        if slices:                      # byte 26: slices of a stack zone
+            zone["slices"] = slices
+            if flags & 1:               # byte 27, bit 0: the slices lie one under the other (stackv)
+                zone["vertical"] = True
+        zones.append(zone)
     return zones
 
 
@@ -364,8 +378,9 @@ def sprites_encode(zones):
         raise ResError(f"1 to {SPRITES_MAX} zones, not {len(zones)}")
     out = bytearray(struct.pack("<HH", len(zones), 0))
     for z in zones:
-        out += _fixed(z["name"], NAME_LEN) + struct.pack("<4HBBH", z["x"], z["y"], z["w"], z["h"],
-                                                         z.get("frames", 1), z.get("fps", 0), 0)
+        out += _fixed(z["name"], NAME_LEN) + struct.pack("<4HBBBB", z["x"], z["y"], z["w"], z["h"],
+                                                         z.get("frames", 1), z.get("fps", 0), z.get("slices", 0),
+                                                         1 if z.get("vertical") and z.get("slices") else 0)
     return bytes(out)
 
 
@@ -396,8 +411,10 @@ def boxes_encode(boxes):
 
 
 def zone_rect(z):
-    """the pixels of a zone with all its frames: x, y, w, h"""
-    return z["x"], z["y"], z["w"] * z["frames"], z["h"]
+    """the pixels of a zone with all its frames or slices: x, y, w, h"""
+    if z.get("vertical"):
+        return z["x"], z["y"], z["w"] * z["frames"], z["h"] * z.get("slices", 1)
+    return z["x"], z["y"], z["w"] * max(z["frames"], z.get("slices", 0)), z["h"]
 
 
 # ------------------------------------------------------------------ sheets
@@ -634,6 +651,39 @@ def anim_build(rigs):
 
 # ------------------------------------------------------------------ MAP
 
+def cover_get(f):
+    """COVER -> (w, h, RGBA bytes)"""
+    body = f.get(SEC_COVER)
+    w, h = struct.unpack_from("<HH", body, 0)
+    if not 1 <= w <= COVER_MAX or not 1 <= h <= COVER_MAX or len(body) != 4 + 4 * w * h:
+        raise ResError("bad cover size (COVER)")
+    return w, h, bytes(body[4:])
+
+
+def preview_body(fw, fh, fps, palette, frames):
+    """PREVIEW (src/bm/bm.h): palette = [(r, g, b)] with colour 0 clear, frames = [bytes of fw*fh palette numbers]"""
+    head = struct.pack("<6H", fw, fh, len(frames), fps, len(palette), 0)
+    return head + b"".join(bytes(c) for c in palette) + b"".join(frames)
+
+
+def preview_get(f):
+    """PREVIEW -> (fw, fh, fps, palette [(r, g, b)], frames [bytes])"""
+    body = f.get(SEC_PREVIEW)
+    if len(body) < 12:
+        raise ResError("bad PREVIEW")
+    fw, fh, n, fps, nc, _ = struct.unpack_from("<6H", body, 0)
+    if not (1 <= fw <= PREVIEW_SIZE_MAX and 1 <= fh <= PREVIEW_SIZE_MAX and 1 <= n <= PREVIEW_FRAMES_MAX and 1 <= nc <= 256):
+        raise ResError("bad PREVIEW size")
+    if len(body) != 12 + 3 * nc + n * fw * fh:
+        raise ResError("bad PREVIEW length")
+    pal = [tuple(body[12 + 3 * i:15 + 3 * i]) for i in range(nc)]
+    base = 12 + 3 * nc
+    frames = [bytes(body[base + i * fw * fh:base + (i + 1) * fw * fh]) for i in range(n)]
+    if any(max(fr) >= nc for fr in frames):
+        raise ResError("PREVIEW: a colour number is out of the palette")
+    return fw, fh, fps, pal, frames
+
+
 def map_get(f):
     body = f.get(SEC_MAP)
     w, h = struct.unpack_from("<HH", body, 0)
@@ -647,6 +697,7 @@ def map_body(w, h, cells):
 
 
 LAYERS_MAX = 8
+DATA_LAYERS = ("height", "walls", "objects")   # layers of a 3D map that hold numbers, not sheet tiles (map3d_build)
 
 
 def layers_get(f):
@@ -1163,7 +1214,7 @@ def extract_palette(src):
 def extract_kit(src):
     out = File(KIT, name=src.name, author=src.author)
     for t, b in src.sections:
-        if t in ALLOWED[KIT]:
+        if t in ALLOWED[KIT] and t not in (SEC_COVER, SEC_PREVIEW):      # the game's cover is the game's card
             out.sections.append([t, b])
     if not [t for t, _ in out.sections if t != SEC_INFO]:
         raise ResError("the cartridge has no resources")
@@ -1286,7 +1337,7 @@ def integrate(cart, res, origin=None):
         rects += [px_cells(*zone_rect(z)) for z in rzones]
         if rmap:
             per = rw // CELL
-            used = sorted({n for _, cells in rlayers for n in cells})
+            used = sorted({n for name, cells in rlayers if name not in DATA_LAYERS for n in cells})
             rects += [(n % per, n // per, 1, 1) for n in used if 0 < n < per * (rh // CELL)]
     islands = merge_rects(rects)
     csheet = sheet_get(cart)
@@ -1360,6 +1411,9 @@ def integrate(cart, res, origin=None):
         layers = []
         for name, cells in rlayers:
             out = []
+            if name in DATA_LAYERS:             # numbers, not tiles: heights, walls, object ids stay as they are
+                layers.append((name, list(cells)))
+                continue
             for n in cells:
                 if 0 < n < per * (rsheet[1] // CELL):
                     dx, dy = off_of((n % per, n // per, 1, 1))
@@ -1579,6 +1633,20 @@ def apply_info(f, a, item=None):
     info_store(f, info)
 
 
+
+def project_copy_path(game):
+    """The editable copy of a game: projects live in the /bme folder of the SD card
+    (docs/PROJECT-LAYOUT.md). A game in the SD card's bm/ or carts/ folder gets its copy in the
+    bme/ folder next to it (made if needed); a loose file gets it next to the file."""
+    folder = os.path.dirname(os.path.abspath(game))
+    name = os.path.splitext(os.path.basename(game))[0] + ".bme"
+    if os.path.basename(folder).lower() in ("bm", "carts"):
+        proj = os.path.join(os.path.dirname(folder), "bme")
+        os.makedirs(proj, exist_ok=True)
+        return os.path.join(proj, name)
+    return os.path.join(folder, name)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1650,7 +1718,7 @@ def main(argv=None):
             out = a.output or a.cart
             if not a.output and os.path.splitext(a.cart)[1].lower() in (".bm", ".b16"):
                 # a game is read only: the resources go into its editable copy
-                out = os.path.splitext(a.cart)[0] + ".bme"
+                out = project_copy_path(a.cart)
                 print(f"{a.cart} is a game, read only: its editable copy is {out}")
             data = write(out, cart)
             print(f"{out}: {len(data)} bytes")

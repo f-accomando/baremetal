@@ -274,7 +274,7 @@ static uint32_t rig_walk(const uint8_t *p, uint32_t room, int deep)
         const uint8_t *h = p + off;
         unsigned nk = rd16(h + BM_MODEL_NAME), mode = h[BM_MODEL_NAME + 2];
         float length = rdf32(h + BM_MODEL_NAME + 4);
-        if (!nk || nk > BM_KEYS_MAX || mode > 2 || !(length > 0 && length < 1e6f))
+        if (!nk || nk > BM_KEYS_MAX || mode > 4 || !(length > 0 && length < 1e6f))
             return 0;
         off += CLIP_HEAD;
         if ((uint64_t)off + (uint64_t)nk * keysize > room)
@@ -449,21 +449,22 @@ int bm_cover_peek(const uint8_t *d, size_t len, uint32_t *need, const uint8_t **
 #define BIT(t) (1u << (t))
 static const uint32_t res_allowed[BM_RES_KINDS] = {
     0,
-    BIT(BM_SEC_INFO) | BIT(BM_SEC_MESH) | BIT(BM_SEC_ANIM) | BIT(BM_SEC_SHEET) | BIT(BM_SEC_SHEET8),
-    BIT(BM_SEC_INFO) | BIT(BM_SEC_SPRITES) | BIT(BM_SEC_SHEET) | BIT(BM_SEC_SHEET8) | BIT(BM_SEC_FLAGS) |
-        BIT(BM_SEC_BOXES),
-    BIT(BM_SEC_INFO) | BIT(BM_SEC_AUDIO),
-    BIT(BM_SEC_INFO) | BIT(BM_SEC_MAP) | BIT(BM_SEC_LAYERS) | BIT(BM_SEC_FLAGS) | BIT(BM_SEC_SHEET) |
+    BIT(BM_SEC_INFO) | BIT(BM_SEC_COVER) | BIT(BM_SEC_MESH) | BIT(BM_SEC_ANIM) | BIT(BM_SEC_SHEET) |
         BIT(BM_SEC_SHEET8),
+    BIT(BM_SEC_INFO) | BIT(BM_SEC_COVER) | BIT(BM_SEC_SPRITES) | BIT(BM_SEC_SHEET) | BIT(BM_SEC_SHEET8) |
+        BIT(BM_SEC_FLAGS) | BIT(BM_SEC_BOXES),
+    BIT(BM_SEC_INFO) | BIT(BM_SEC_AUDIO),
+    BIT(BM_SEC_INFO) | BIT(BM_SEC_COVER) | BIT(BM_SEC_MAP) | BIT(BM_SEC_LAYERS) | BIT(BM_SEC_FLAGS) |
+        BIT(BM_SEC_SHEET) | BIT(BM_SEC_SHEET8),
     BIT(BM_SEC_INFO) | BIT(BM_SEC_SHEET8),
-    BIT(BM_SEC_INFO) | BIT(BM_SEC_MESH) | BIT(BM_SEC_ANIM) | BIT(BM_SEC_SHEET) | BIT(BM_SEC_SHEET8) |
-        BIT(BM_SEC_SPRITES) | BIT(BM_SEC_AUDIO) | BIT(BM_SEC_MAP) | BIT(BM_SEC_LAYERS) | BIT(BM_SEC_FLAGS) |
-        BIT(BM_SEC_BOXES),
+    BIT(BM_SEC_INFO) | BIT(BM_SEC_COVER) | BIT(BM_SEC_MESH) | BIT(BM_SEC_ANIM) | BIT(BM_SEC_SHEET) |
+        BIT(BM_SEC_SHEET8) | BIT(BM_SEC_SPRITES) | BIT(BM_SEC_AUDIO) | BIT(BM_SEC_MAP) | BIT(BM_SEC_LAYERS) |
+        BIT(BM_SEC_FLAGS) | BIT(BM_SEC_BOXES),
 };
 #define KNOWN_SECTIONS (BIT(BM_SEC_LUA) | BIT(BM_SEC_SHEET) | BIT(BM_SEC_MAP) | BIT(BM_SEC_COVER) | \
                         BIT(BM_SEC_SHEET8) | BIT(BM_SEC_AUDIO) | BIT(BM_SEC_OLD_ANIM) | BIT(BM_SEC_MESH) | \
                         BIT(BM_SEC_ANIM) | BIT(BM_SEC_INFO) | BIT(BM_SEC_SPRITES) | BIT(BM_SEC_LAYERS) | \
-                        BIT(BM_SEC_FLAGS) | BIT(BM_SEC_BOXES))
+                        BIT(BM_SEC_FLAGS) | BIT(BM_SEC_BOXES) | BIT(BM_SEC_DATA))
 
 /* A SPRITES section: the number of zones, or -1 if it is broken. */
 static int sprites_check(const uint8_t *p, uint32_t size)
@@ -509,6 +510,56 @@ int bm_sprites_check(const uint8_t *p, uint32_t size)
 int bm_boxes_check(const uint8_t *p, uint32_t size)
 {
     return boxes_check(p, size);
+}
+
+/* A DATA section: u16 n (1..64), u16 reserved, n entries of 24 bytes (name[16], u32 offset from the start of the
+ * section, u32 size), then the blobs. The number of blobs, or -1 if it is broken. */
+int bm_data_check(const uint8_t *p, uint32_t size)
+{
+    if (size < 4)
+        return -1;
+    const unsigned n = rd16(p);
+    if (!n || n > BM_DATA_MAX || 4 + (uint64_t)n * BM_DATA_ENTRY > size)
+        return -1;
+    for (unsigned i = 0; i < n; i++) {
+        const uint8_t *e = p + 4 + i * BM_DATA_ENTRY;
+        const uint32_t off = rd32(e + 16), sz = rd32(e + 20);
+        if (!e[0] || memchr(e, 0, BM_DATA_NAME) == NULL || off < 4 + n * BM_DATA_ENTRY || (uint64_t)off + sz > size)
+            return -1;
+        for (unsigned j = 0; j < i; j++)
+            if (!strncmp((const char *)e, (const char *)p + 4 + j * BM_DATA_ENTRY, BM_DATA_NAME))
+                return -1;
+    }
+    return (int)n;
+}
+
+int bm_data_find(const uint8_t *d, size_t len, const char *name, const uint8_t **blob, uint32_t *blob_len)
+{
+    if (len < BM_HEADER_SIZE || !bm_is_cart(d))
+        return -1;
+    const unsigned count = d[17];
+    if (BM_HEADER_SIZE + (uint64_t)count * 16 > len)
+        return -1;
+    for (unsigned i = 0; i < count; i++) {
+        const uint8_t *e = d + BM_HEADER_SIZE + i * 16;
+        const uint32_t off = rd32(e + 4), size = rd32(e + 8);
+        if (rd32(e) != BM_SEC_DATA)
+            continue;
+        if ((uint64_t)off + size > len)
+            return -1;
+        const uint8_t *p = d + off;
+        const int n = bm_data_check(p, size);
+        for (int k = 0; k < n; k++) {
+            const uint8_t *b = p + 4 + k * BM_DATA_ENTRY;
+            if (strncmp((const char *)b, name, BM_DATA_NAME))
+                continue;
+            *blob = p + rd32(b + 16);
+            *blob_len = rd32(b + 20);
+            return 0;
+        }
+        return -1;
+    }
+    return -1;
 }
 
 /* A LAYERS section (without the map's size, checked after): the number of
@@ -568,6 +619,7 @@ static int parse(const uint8_t *d, size_t len, bm_cart_t *c, char *err, size_t e
     }
     memcpy(c->title, d + 24, 48);
     memcpy(c->author, d + 72, 32);
+    bm_compat_read(d, &c->compat);
 
     unsigned count = d[17];
     if (BM_HEADER_SIZE + (uint64_t)count * 16 > len)
@@ -587,7 +639,7 @@ static int parse(const uint8_t *d, size_t len, bm_cart_t *c, char *err, size_t e
         case BM_SEC_INFO:
             if (size > BM_INFO_MAX) {
                 if (c->kind)
-                    return fail(err, errlen, "INFO over 16 KiB");
+                    return fail(err, errlen, "INFO over 16 KB");
                 break;
             }
             c->info = p;
@@ -615,6 +667,10 @@ static int parse(const uint8_t *d, size_t len, bm_cart_t *c, char *err, size_t e
             c->nboxes = (uint16_t)n;
             break;
         }
+        case BM_SEC_DATA:
+            if (bm_data_check(p, size) < 0)
+                return fail(err, errlen, "bad data (DATA)");
+            break;
         case BM_SEC_LUA:
             c->lua = (const char *)p;
             c->lua_size = size;
@@ -714,7 +770,9 @@ static int parse(const uint8_t *d, size_t len, bm_cart_t *c, char *err, size_t e
     for (unsigned i = 0; i < c->zones; i++) {
         bm_zone_t z;
         bm_zone(c, (int)i, &z);
-        if ((uint32_t)z.x + (uint32_t)z.w * z.frames > c->sheet_w || (uint32_t)z.y + z.h > c->sheet_h) {
+        const uint32_t across = z.slices > z.frames ? z.slices : z.frames;
+        const uint32_t zw = z.w * (z.vertical ? z.frames : across), zh = z.vertical ? z.h * z.slices : z.h;
+        if ((uint32_t)z.x + zw > c->sheet_w || (uint32_t)z.y + zh > c->sheet_h) {
             if (c->kind)
                 return fail(err, errlen, "a sprite zone out of the sheet");
             c->sprites = NULL;
@@ -812,6 +870,8 @@ int bm_zone(const bm_cart_t *c, int i, bm_zone_t *z)
     z->h = rd16(p + 22);
     z->frames = p[24];
     z->fps = p[25];
+    z->slices = p[26];              /* the low byte of the u16 that was reserved (zero) */
+    z->vertical = z->slices >= 2 && (p[27] & 1);   /* bit 0 of its high byte: the slices go down */
     return 0;
 }
 
@@ -879,6 +939,329 @@ uint8_t *bm_rewrite(const uint8_t *old, size_t oldlen, const char *lua, size_t l
                     const char *title, const char *author, int width, size_t *outlen)
 {
     return bm_rewrite_with(old, oldlen, lua, lua_len, title, author, width, NULL, 0, outlen);
+}
+
+void bm_compat_read(const uint8_t *head, bm_compat_t *out)
+{
+    memset(out, 0, sizeof *out);
+    const unsigned flags = rd16(head + 18);
+    const uint8_t *b = head + BM_COMPAT_AT;
+    if ((flags & BM_FLAG_COMPAT) && (b[0] & BM_TARGET_ALL)) {
+        out->declared = 1;
+        out->targets = b[0] & BM_TARGET_ALL;
+        out->input = b[1];
+        out->aspect = b[2];
+        out->needs = b[3];
+        out->min_ram_mib = rd16(b + 4);
+        out->min_spec = b[6];
+        out->min_w16 = b[7];
+        return;
+    }
+    /* an old file: a .bm is for the Pi, a .b16 (flag bit 1) for the Pi and the RGB30 */
+    out->targets = (flags & 2) ? BM_TARGET_ALL : BM_TARGET_PI;
+}
+
+void bm_compat_write(uint8_t *head, const bm_compat_t *in)
+{
+    unsigned flags = rd16(head + 18) & ~(unsigned)BM_FLAG_COMPAT;
+    uint8_t *b = head + BM_COMPAT_AT;
+    memset(b, 0, 8);
+    if (in->declared) {
+        flags |= BM_FLAG_COMPAT;
+        b[0] = in->targets & BM_TARGET_ALL;
+        b[1] = in->input;
+        b[2] = in->aspect;
+        b[3] = in->needs;
+        b[4] = (uint8_t)in->min_ram_mib;
+        b[5] = (uint8_t)(in->min_ram_mib >> 8);
+        b[6] = in->min_spec;
+        b[7] = in->min_w16;
+    }
+    head[18] = (uint8_t)flags;
+    head[19] = (uint8_t)(flags >> 8);
+}
+
+/* ---- the compatibility block from the INFO keys (docs/PROJECT-LAYOUT.md, bm.info) ---- */
+
+typedef struct { const char *name; unsigned bit; } compat_name_t;
+/* the same names and bits as COMPAT_BITS in scripts/mkbm.py (tests/bm/test_bm.c and tests/tools/test_mkbm_compat.py
+ * build the same cartridge from the same INFO text) */
+static const compat_name_t cn_targets[] = { { "pi", BM_TARGET_PI }, { "rgb30", BM_TARGET_RGB30 }, { 0, 0 } };
+static const compat_name_t cn_input[] = { { "pad", BM_IN_PAD }, { "keyboard", BM_IN_KEYBOARD }, { "text", BM_IN_TEXT },
+                                          { "mouse", BM_IN_MOUSE }, { "mouse_optional", BM_IN_MOUSE_OPT }, { 0, 0 } };
+static const compat_name_t cn_aspect[] = { { "wide", BM_ASPECT_WIDE }, { "square", BM_ASPECT_SQUARE },
+                                           { "any", BM_ASPECT_ANY }, { "safe_area", BM_ASPECT_SAFE }, { 0, 0 } };
+static const compat_name_t cn_needs[] = { { "3d", BM_NEED_3D }, { "audio", BM_NEED_AUDIO }, { "net", BM_NEED_NET },
+                                          { "mouse_hw", BM_NEED_MOUSE_HW }, { 0, 0 } };
+
+static int compat_key_error(char *err, size_t n, const char *key, const char *what)
+{
+    char m[96];
+    size_t k = 0;
+    for (const char *p = "bm.info: "; *p && k < sizeof m - 1;) m[k++] = *p++;
+    for (const char *p = key; *p && k < sizeof m - 1;) m[k++] = *p++;
+    for (const char *p = ": "; *p && k < sizeof m - 1;) m[k++] = *p++;
+    for (const char *p = what; *p && k < sizeof m - 1;) m[k++] = *p++;
+    m[k] = 0;
+    return fail(err, n, m);
+}
+
+/* "pad, keyboard" -> bits; 0 and *bits, or -1 for a name that is not in `t` */
+static int compat_list(const char *text, const compat_name_t *t, unsigned *bits)
+{
+    *bits = 0;
+    for (const char *p = text; *p;) {
+        while (*p == ' ' || *p == '\t' || *p == ',')
+            p++;
+        const char *q = p;
+        while (*q && *q != ',')
+            q++;
+        const char *e = q;
+        while (e > p && (e[-1] == ' ' || e[-1] == '\t'))
+            e--;
+        if (e > p) {
+            int found = 0;
+            for (const compat_name_t *c = t; c->name; c++) {
+                size_t l = strlen(c->name);
+                if ((size_t)(e - p) == l) {
+                    int same = 1;
+                    for (size_t i = 0; i < l; i++) {
+                        char ch = p[i];
+                        if (ch >= 'A' && ch <= 'Z')
+                            ch = (char)(ch + 32);
+                        same &= ch == c->name[i];
+                    }
+                    if (same) {
+                        *bits |= c->bit;
+                        found = 1;
+                    }
+                }
+            }
+            if (!found)
+                return -1;
+        }
+        p = q;
+    }
+    return 0;
+}
+
+/* a whole number 0..max in `text`; -1 if it is not one */
+static long compat_number(const char *text, long max)
+{
+    while (*text == ' ' || *text == '\t')
+        text++;
+    if (!*text)
+        return -1;
+    long v = 0;
+    for (; *text >= '0' && *text <= '9'; text++) {
+        v = v * 10 + (*text - '0');
+        if (v > max)
+            return -1;
+    }
+    while (*text == ' ' || *text == '\t')
+        text++;
+    return *text ? -1 : v;
+}
+
+int bm_compat_from_info(const uint8_t *data, size_t len, bm_compat_t *out, char *err, size_t errlen)
+{
+    memset(out, 0, sizeof *out);
+    if (len < BM_HEADER_SIZE || !bm_is_cart(data))
+        return 0;
+    bm_cart_t c;
+    memset(&c, 0, sizeof c);
+    for (unsigned i = 0, count = data[17]; i < count && BM_HEADER_SIZE + (size_t)(i + 1) * 16 <= len; i++) {
+        const uint8_t *e = data + BM_HEADER_SIZE + i * 16;
+        uint32_t off = rd32(e + 4), size = rd32(e + 8);
+        if (rd32(e) == BM_SEC_INFO && (uint64_t)off + size <= len) {
+            c.info = data + off;
+            c.info_size = size;
+            break;
+        }
+    }
+    /* a key with no value is as if it were not there (mkbm.py does the same) */
+    char targets[64], input[96], aspect[96], needs[96], ram[24], spec[24], width[24];
+    const int has_targets = bm_info_get(&c, NULL, NULL, "targets", targets, sizeof targets) && targets[0];
+    const int has_input = bm_info_get(&c, NULL, NULL, "input", input, sizeof input) && input[0];
+    const int has_aspect = bm_info_get(&c, NULL, NULL, "aspect", aspect, sizeof aspect) && aspect[0];
+    const int has_needs = bm_info_get(&c, NULL, NULL, "needs", needs, sizeof needs) && needs[0];
+    const int has_ram = bm_info_get(&c, NULL, NULL, "min_ram", ram, sizeof ram) && ram[0];
+    const int has_spec = bm_info_get(&c, NULL, NULL, "min_spec", spec, sizeof spec) && spec[0];
+    const int has_width = bm_info_get(&c, NULL, NULL, "min_width", width, sizeof width) && width[0];
+    if (!has_targets) {
+        if (has_input || has_aspect || has_needs || has_ram || has_spec || has_width)
+            return compat_key_error(err, errlen, "input, aspect, needs and the minimums", "go with targets");
+        return 0;
+    }
+    unsigned bits;
+    if (compat_list(targets, cn_targets, &bits) != 0 || !(bits & BM_TARGET_ALL))
+        return compat_key_error(err, errlen, "targets", "name pi, rgb30 or both");
+    out->declared = 1;
+    out->targets = (uint8_t)bits;
+    if (has_input) {
+        if (compat_list(input, cn_input, &bits) != 0)
+            return compat_key_error(err, errlen, "input", "an unknown name");
+        out->input = (uint8_t)bits;
+    }
+    if (has_aspect) {
+        if (compat_list(aspect, cn_aspect, &bits) != 0)
+            return compat_key_error(err, errlen, "aspect", "an unknown name");
+        out->aspect = (uint8_t)bits;
+    }
+    if (has_needs) {
+        if (compat_list(needs, cn_needs, &bits) != 0)
+            return compat_key_error(err, errlen, "needs", "an unknown name");
+        out->needs = (uint8_t)bits;
+    }
+    long v;
+    if (has_ram) {
+        if ((v = compat_number(ram, 65535)) < 0)
+            return compat_key_error(err, errlen, "min_ram", "0 to 65535 MB");
+        out->min_ram_mib = (uint16_t)v;
+    }
+    if (has_spec) {
+        if ((v = compat_number(spec, 255)) < 0)
+            return compat_key_error(err, errlen, "min_spec", "0 to 255");
+        out->min_spec = (uint8_t)v;
+    }
+    if (has_width) {
+        if ((v = compat_number(width, 4080)) < 0)
+            return compat_key_error(err, errlen, "min_width", "0 to 4080 pixels");
+        out->min_w16 = (uint8_t)((v + 15) / 16);
+    }
+    return 1;
+}
+
+/* ---- the compatibility policy (the development notes) ---- */
+
+typedef struct {
+    uint8_t kernel, default_action;
+    const char *default_reason;
+} bm_policy_kernel_t;
+
+typedef struct {
+    uint8_t kernel, action, market_action, edition;
+    uint8_t declared, not_listed, uses_3d;      /* 0: not asked, 1: must be false, 2: must be true */
+    const uint32_t *res;                        /* w << 16 | h */
+    uint8_t nres;
+    int64_t audio_over, size_over_mib;          /* -1: not asked */
+    const char *reason;
+} bm_policy_rule_t;
+
+#include "compat_table.h"
+
+static int name_ends(const char *name, const char *ext)
+{
+    const size_t n = strlen(name), m = strlen(ext);
+    if (n <= m)
+        return 0;
+    for (size_t i = 0; i < m; i++) {
+        char c = name[n - m + i];
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c + 32);
+        if (c != ext[i])
+            return 0;
+    }
+    return 1;
+}
+
+void bm_compat_facts(const uint8_t *head, size_t n, uint32_t file_size, const char *name, bm_compat_facts_t *f)
+{
+    memset(f, 0, sizeof *f);
+    f->size_bytes = file_size;
+    if (n < BM_HEADER_SIZE)
+        return;
+    bm_compat_t c;
+    bm_compat_read(head, &c);
+    const unsigned flags = rd16(head + 18);
+    f->edition = (flags & 1) ? BM_EDITION_PROJECT : (flags & 2) ? BM_EDITION_B16 : BM_EDITION_BM;
+    if (name && name_ends(name, ".bme"))
+        f->edition = BM_EDITION_PROJECT;
+    else if (name && name_ends(name, ".b16"))
+        f->edition = BM_EDITION_B16;
+    else if (name && name_ends(name, ".bm"))
+        f->edition = BM_EDITION_BM;
+    f->declared = c.declared;
+    f->targets = c.declared ? c.targets : f->edition == BM_EDITION_B16 ? BM_TARGET_ALL : BM_TARGET_PI;
+    f->w = rd16(head + 12);
+    f->h = rd16(head + 14);
+    const unsigned count = head[17];
+    for (unsigned i = 0; i < count && BM_HEADER_SIZE + 16u * (i + 1) <= n; i++) {
+        const uint8_t *e = head + BM_HEADER_SIZE + 16u * i;
+        const uint32_t type = rd32(e), size = rd32(e + 8);
+        if (type == BM_SEC_MESH)
+            f->uses_3d = 1;
+        else if (type == BM_SEC_AUDIO && f->audio_bytes + size >= f->audio_bytes)
+            f->audio_bytes += size;
+    }
+}
+
+void bm_compat_facts_named(int b16, uint32_t file_size, bm_compat_facts_t *f)
+{
+    memset(f, 0, sizeof *f);
+    f->edition = b16 ? BM_EDITION_B16 : BM_EDITION_BM;
+    f->targets = b16 ? BM_TARGET_ALL : BM_TARGET_PI;
+    f->size_bytes = file_size;
+}
+
+static int policy_tri(int want, int is)
+{
+    return want == 0 || (want == 2) == (is != 0);
+}
+
+static int policy_matches(const bm_policy_rule_t *r, const bm_compat_facts_t *f)
+{
+    if (r->edition != BM_EDITION_ANY && r->edition != f->edition)
+        return 0;
+    if (!policy_tri(r->declared, f->declared))
+        return 0;
+    if (!policy_tri(r->not_listed, f->declared && !(f->targets & r->kernel)))
+        return 0;
+    if (!policy_tri(r->uses_3d, f->uses_3d))
+        return 0;
+    if (r->nres) {
+        int hit = 0;
+        for (int i = 0; i < r->nres; i++)
+            hit |= r->res[i] == ((uint32_t)f->w << 16 | f->h);
+        if (!hit)
+            return 0;
+    }
+    if (r->audio_over >= 0 && !((int64_t)f->audio_bytes > r->audio_over))
+        return 0;
+    if (r->size_over_mib >= 0 && !((int64_t)f->size_bytes > r->size_over_mib * (1 << 20)))
+        return 0;
+    return 1;
+}
+
+int bm_compat_classify(const bm_compat_facts_t *f, unsigned kernel, int market, const char **reason, int *rule)
+{
+    const char *why = "";
+    int act = BM_ACT_SHOW, num = 0, known = 0;
+    for (unsigned i = 0; i < sizeof bm_policy_kernels / sizeof *bm_policy_kernels; i++)
+        if (bm_policy_kernels[i].kernel == kernel) {
+            known = 1;
+            act = bm_policy_kernels[i].default_action;
+            why = bm_policy_kernels[i].default_reason;
+        }
+    for (unsigned i = 0; known && i < sizeof bm_policy_rules / sizeof *bm_policy_rules; i++) {
+        const bm_policy_rule_t *r = &bm_policy_rules[i];
+        if (r->kernel == kernel && policy_matches(r, f)) {
+            act = market ? r->market_action : r->action;
+            why = r->reason;
+            num = (int)i + 1;
+            break;
+        }
+    }
+    if (reason)
+        *reason = why;
+    if (rule)
+        *rule = num;
+    return act;
+}
+
+int bm_compat_rule_count(void)
+{
+    return (int)(sizeof bm_policy_rules / sizeof *bm_policy_rules);
 }
 
 uint8_t *bm_rewrite_with(const uint8_t *old, size_t oldlen, const char *lua, size_t lua_len,
@@ -973,6 +1356,58 @@ uint8_t *bm_rewrite_with(const uint8_t *old, size_t oldlen, const char *lua, siz
     buf[17] = (uint8_t)n;
     strncpy((char *)buf + 24, title ? title : "", 47);
     strncpy((char *)buf + 72, author ? author : "", 31);
+    if (old) {                          /* the compatibility block stays: flag bit 4 and bytes 120..127 */
+        buf[18] |= old[18] & BM_FLAG_COMPAT;
+        memcpy(buf + BM_COMPAT_AT, old + BM_COMPAT_AT, 8);
+    }
+    wr32(buf + 20, crc32(buf + BM_HEADER_SIZE, (uint32_t)(total - BM_HEADER_SIZE)));
+    *outlen = total;
+    return buf;
+}
+
+/* A resource file ("BMRES", docs/RISORSE.md) from sections: the same bytes as scripts/bmres.py dump (the
+ * sections in the order given, bodies padded to 4, CRC-32 of all after the header). */
+static void res_text(uint8_t *to, const char *s, size_t room)
+{
+    size_t n = s ? strlen(s) : 0;
+    if (n > room - 1) {
+        n = room - 1;
+        while (n && (((const uint8_t *)s)[n] & 0xC0) == 0x80)    /* not in the middle of a UTF-8 character */
+            n--;
+    }
+    if (n)
+        memcpy(to, s, n);
+}
+
+uint8_t *bm_res_build(unsigned kind, const char *name, const char *author, const bm_put_t *sec, int n,
+                      size_t *outlen)
+{
+    if (kind < BM_RES_MODEL || kind >= BM_RES_KINDS || n < 0 || n > 255)
+        return NULL;
+    size_t total = BM_HEADER_SIZE + (size_t)n * 16;
+    for (int i = 0; i < n; i++) {
+        if (!sec[i].data || sec[i].size > 0x1000000u)
+            return NULL;
+        total += (sec[i].size + 3) & ~3u;
+    }
+    uint8_t *buf = calloc(total, 1);
+    if (!buf)
+        return NULL;
+    uint8_t *tab = buf + BM_HEADER_SIZE, *p = tab + (size_t)n * 16;
+    for (int i = 0; i < n; i++, tab += 16) {
+        wr32(tab, sec[i].type);
+        wr32(tab + 4, (uint32_t)(p - buf));
+        wr32(tab + 8, sec[i].size);
+        memcpy(p, sec[i].data, sec[i].size);
+        p += (sec[i].size + 3) & ~3u;
+    }
+    memcpy(buf, "BMRES\0\0\0", 8);
+    wr16(buf + 8, 1);
+    wr16(buf + 10, BM_HEADER_SIZE);
+    wr16(buf + 12, kind);
+    buf[17] = (uint8_t)n;
+    res_text(buf + 24, name, 48);
+    res_text(buf + 72, author, 32);
     wr32(buf + 20, crc32(buf + BM_HEADER_SIZE, (uint32_t)(total - BM_HEADER_SIZE)));
     *outlen = total;
     return buf;

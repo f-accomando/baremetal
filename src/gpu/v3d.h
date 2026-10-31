@@ -26,7 +26,6 @@
  * the reason in v3d_status() (QEMU has no V3D). */
 int v3d_init(void);
 const char *v3d_status(void);
-uint32_t v3d_ident(int i);          /* IDENT0..2 */
 
 /* bus address of ARM memory, for the V3D */
 uint32_t v3d_bus(const void *p);
@@ -56,7 +55,7 @@ void v3d_last_cost(v3d_cost_t *c);
 int v3d_run(uint32_t bin, uint32_t bin_end, uint32_t rnd, uint32_t rnd_end, uint32_t timeout_us,
             uint32_t *bin_us, uint32_t *rnd_us);
 
-/* M35: the same job started, not waited for (the binning list must end
+/* bm3d 4.1: the same job started, not waited for (the binning list must end
  * with V3D_INCREMENT_SEMAPHORE before its FLUSH, the rendering list start
  * with V3D_WAIT_ON_SEMAPHORE when there is binning): 0, or -1 (a job still
  * running, no V3D). v3d_busy: 1 while it runs. v3d_wait: waits for it as
@@ -73,13 +72,35 @@ int v3d_wait(uint32_t timeout_us, uint32_t *bin_us, uint32_t *rnd_us);
  * dev kit's "GPU wait"); it wraps */
 extern volatile uint32_t v3d_wait_us;
 
-/* M35: the 1 MiB sections wholly inside [p, p + size) of ARM memory made
+/* bm3d 4.1: the 1 MB sections wholly inside [p, p + size) of ARM memory made
  * uncached (on: the ARM's writes go out through the write buffer, merged,
  * with no line read first and no line of other data pushed out of the
  * cache) or cached again; the number of sections changed (0: none, as on
  * the PC). For the memory of the jobs, which the ARM writes and the V3D
  * reads. */
 int v3d_uncached(void *p, uint32_t size, int on);
+
+/* bm3d 7.x: QPU programs outside the drawing cycle ("user" programs: a
+ * program is launched through the V3D's queue registers SRQPC / SRQUA /
+ * SRQUL, with the code and the uniforms in ARM memory). A job is one QPU
+ * run: the bus address of its code, of its uniforms and their count.
+ * v3d_qpu_run starts the n jobs (n <= V3D_QPU_MAX), reserves part of the
+ * VPM for them while they run, and waits at most timeout_us for all of them
+ * to end. It returns -2 with a 3D job running or another QPU run in
+ * progress (nothing started, no harm done: the caller tries again later).
+ * It fails (-1) without V3D, or on a timeout or a queue error (the V3D's
+ * QPUs are then reset and the V3D's registers set again; v3d_qpu_status
+ * says why).
+ * The data cache is cleaned before and invalidated after: what the programs
+ * write reaches ARM memory only through the VPM's DMA store. */
+#define V3D_QPU_MAX     16              /* the depth of the launch queue */
+#define V3D_QPU_VPM     4               /* VPMBASE while they run: 4 x 256 bytes = rows 0..15 of 16 words */
+#define V3D_QPU_ROWS    16              /* the VPM rows a user program may use */
+typedef struct {
+    uint32_t code, unif, nunif;
+} v3d_qpu_job_t;
+int v3d_qpu_run(const v3d_qpu_job_t *jobs, int n, uint32_t timeout_us);
+const char *v3d_qpu_status(void);
 
 /* Registers of the last failed job (or now), one line each. */
 void v3d_dump(char *buf, size_t n);
@@ -142,7 +163,7 @@ void v3d_cl_f32(v3d_cl_t *cl, float v);
 #define V3D_LOAD_COLOUR_BGR565          (1u | 0u << 4 | 2u << 8)
 
 /* LOAD / STORE_TILE_BUFFER_GENERAL: depth and stencil (32 bits a pixel) in
- * T-format (4 KiB tiles of 32x32 pixels; width and height of the frame
+ * T-format (4 KB tiles of 32x32 pixels; width and height of the frame
  * rounded up to 32), as Mesa keeps depth buffers; a store clears the
  * buffers it stored unless told not to */
 #define V3D_LOADSTORE_ZS_TFORMAT        (2u | 1u << 4)

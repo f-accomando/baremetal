@@ -48,6 +48,13 @@ int plat_battery(int *mv, int *charge)
     return *mv < 0 ? -1 : 0;
 }
 
+int plat_battery_gauge(int *ma, int64_t *uah)
+{
+    *ma = rk817_battery_ma();
+    *uah = rk817_charge_uah();
+    return *ma == INT32_MIN || *uah < 0 ? -1 : 0;
+}
+
 int plat_power_in(void)
 {
     return rk817_plugged();                 /* SYS_STS bit 6: PLUG_IN_STS */
@@ -71,6 +78,16 @@ static void quiet(void)
     plat_display_off();
     wlbt_power_off();
     plat_led(0, 0);
+}
+
+long plat_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx)
+{
+    register uint64_t x0 __asm__("x0") = 0xc4000003u;   /* CPU_ON (SMC64) */
+    register uint64_t x1 __asm__("x1") = mpidr;
+    register uint64_t x2 __asm__("x2") = entry;
+    register uint64_t x3 __asm__("x3") = ctx;
+    __asm__ volatile("smc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return (long)(int32_t)x0;
 }
 
 void plat_reset(void)

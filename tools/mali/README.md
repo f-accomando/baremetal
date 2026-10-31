@@ -33,12 +33,26 @@ Mesa's postprocess.
 
 `src/rgb30/mali_shaders.h` is made and committed. Run: `mkshader OUT.h`.
 
+- `BM_VS3` (phase 3): attribute 0 a model-space vec4, 16 pushed words = a 4x4 matrix by rows (uniform buffer 0), position = M * v
+  (the matrix carries projection and viewport; w is the clip w); not run on a Mali yet. Its viewport scale is a vec3 constant
+  (`unit_scale` in `mkshader.c`).
+- `BM_VS` is built with `full_scale = 1` (W15c): it now carries y and z. Before W15c `nir_inline_sysval` made a one-component
+  constant for the vec3 viewport scale, the optimizer read its `.y` / `.z` as 0 and the shader stored `(x/w, 0, 0, 1/w)`.
 - Vertex shader (`BM_VS`, 160 bytes, 32 work registers): attribute 0 is a vec4 position already in
   pixels (w = 1); the viewport transform is made the identity (`nir_inline_sysval` scale 1, offset 0).
   No varyings.
 - Fragment shader (`BM_FS`, 160 bytes): writes one colour per draw, a vec4 of floats at offset 0 of
   uniform buffer 0, pushed: 8 push words, the colour is words 4-7 (`BM_FS_push`), words 0-3 (ubo 1) are
   unused and the draw's push buffer is 32 bytes with them zero.
+- Textured shaders: `BM_VS_TEX` passes the position and a (u, v, k) varying (u and v divided by depth).
+  `BM_FS_TEX` samples texture 0 with sampler 0 (`txl`, level 0), multiplies the texel by k and keeps blue at 1/255 or more (the key colour is `0xFF00FF`).
+  Both inputs need `driver_location`. `BIFROST_MESA_DEBUG=nopreload` stops the message preload fields.
+- Lit meshes (Q2): `BM_VS_LIT` has three attributes (position, face normal and emissive flag, base colour 0..255), the matrix by rows (words 0..15), the sun and up directions and the light A, B, D (vec4 at bytes 64..143) in uniform buffer 0, and gives the lit colour of a face as varying 0 (the colour is rounded to the RGB565 steps, as `be_mesh`). `BM_FS_VCOL` writes that varying. The compiler pushes the words in its own order (`BM_VS_LIT_push`): the driver writes word q of the push buffer from the uniform word `push[q]`.
+- `BM_VS_TEXM` (bm3d 7.32, textured meshes): the attributes and the uniform buffer of `BM_VS_LIT` (position, normal and emissive flag, then `u v` of the sheet in 0..1 instead of the colour), and varying 0 = `(u, v, k, 0)` for `BM_FS_TEX`, with k = the grey of the light (the mean of A + B ny + D max(n.sun, 0) over the three channels, at most 1; 1 for an emissive face). The push words are those of `BM_VS_LIT`.
+- `BM_VS_LITX` adds rim light, four lamps, gloss and fog: it reads uniform buffer 0 from memory (416 bytes, no pushed words) and has a fourth attribute, the face centre (lamps use the face centre). `BM_VS_LIT` reads sun, up and A, B, D from the same offsets.
+- `BM_VS_LITB` is `BM_VS_LITX` for skinned meshes: the uniform buffer has a mesh block (A, B, D, R, S, fog colour, misc, lamps; 240 bytes) and 192 bytes a bone (matrix, sun, up, view, half, camera matrix, fog amount); the fourth attribute's w is the bone, and the shader reads the bone's block at 240 + 192 bone.
+- `BM_FS_SPR` (2D sprites): `BM_FS_TEX` without the light, taking the texture index from the third value of the varying (up to 16 textures: the Draw's texture array), killing the texels with alpha under 1/2 and clamping green to 1/255 (the key colour 0xFF00FF); it takes the varying (u, v) of `BM_VS_TEX`. A rectangle uses `BM_VS_TEX` and `BM_FS_VCOL` with its colour as the varying.
+- Build here: `~/mesa-bifrost` (the tree) and `~/mb` (the build, kept across WSL restarts); `bash tools/mali/bld.sh` builds it; `bash tools/mali/mk.sh OUT.h` (from the repository root, OUT relative) builds `mkshader` and writes the header.
 - Compiled without IDVS (`no_idvs`): a Vertex job (type 5, a Compute Job layout) then a Tiler job.
   With IDVS these inputs give an empty shader.
 - Colour per vertex (a varying) was tried first: the vertex shader dropped the colour store and the

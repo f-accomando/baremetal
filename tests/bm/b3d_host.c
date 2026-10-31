@@ -89,7 +89,7 @@ static int last_number(void)
     int best = 0;
     for (int k = 1; k < 10000; k++) {
         char path[512];
-        snprintf(path, sizeof path, "%s/3D%04d.TXT", dir, k);
+        snprintf(path, sizeof path, "%s/3d%04d.txt", dir, k);
         FILE *f = fopen(path, "r");
         if (!f)
             break;
@@ -103,7 +103,7 @@ static int save(const char *text, size_t len, char *name, size_t n)
 {
     char path[512];
     const int k = last_number() + 1;
-    snprintf(path, sizeof path, "%s/3D%04d.TXT", dir, k);
+    snprintf(path, sizeof path, "%s/3d%04d.txt", dir, k);
     FILE *f = fopen(path, "w");
     if (!f || fwrite(text, 1, len, f) != len) {
         if (f)
@@ -111,7 +111,7 @@ static int save(const char *text, size_t len, char *name, size_t n)
         return -1;
     }
     fclose(f);
-    snprintf(name, n, "3D%04d.TXT", k);
+    snprintf(name, n, "3d%04d.txt", k);
     return 0;
 }
 
@@ -121,7 +121,7 @@ static int load_last(char **text, char *name, size_t n)
     if (!k)
         return -1;
     char path[512];
-    snprintf(path, sizeof path, "%s/3D%04d.TXT", dir, k);
+    snprintf(path, sizeof path, "%s/3d%04d.txt", dir, k);
     FILE *f = fopen(path, "r");
     if (!f)
         return -1;
@@ -137,7 +137,7 @@ static int load_last(char **text, char *name, size_t n)
     t[len] = 0;
     fclose(f);
     *text = t;
-    snprintf(name, n, "3D%04d.TXT", k);
+    snprintf(name, n, "3d%04d.txt", k);
     return 0;
 }
 
@@ -199,6 +199,13 @@ static int selftest(void)
     return bad != 0;
 }
 
+/* --qpufade: a stand-in for the Pi's QPU hook (the ARM's fade; "the QPUs did it" for the report's path) */
+static int fake_qpu_fade(g16_t *g1, const g16_fade_t *f)
+{
+    g16_fade_apply(g1, f);
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "--selftest"))
@@ -210,12 +217,14 @@ int main(int argc, char **argv)
     dir = argv[1];
     int full = 0;
     const char *only_tests = NULL, *only_profiles = NULL;
+    int qpufade = 0;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--full")) full = 1;
         if (!strcmp(argv[i], "-v")) verbose = 1;
         if (!strcmp(argv[i], "--frames")) frames = 1;
         if (!strncmp(argv[i], "--tests=", 8)) only_tests = argv[i] + 8;
         if (!strncmp(argv[i], "--profiles=", 11)) only_profiles = argv[i] + 11;
+        if (!strcmp(argv[i], "--qpufade")) qpufade = 1;
         if (!strncmp(argv[i], "--stop=", 7)) stop_at = atoi(argv[i] + 7);
     }
     uint16_t *px = test_aligned_alloc(64, 640 * 360 * 2);     /* where the emulated V3D can draw */
@@ -230,7 +239,7 @@ int main(int argc, char **argv)
         .g = &page, .us = us, .present = present, .count = NULL, .counting = 0, .key = key, .log = log_line,
         .save = save, .load_last = load_last, .kernel = "host", .machine = "PC, the V3D emulated",
         .date = "", .quick = !full, .page_shown = shown, .only_tests = only_tests, .only_profiles = only_profiles,
-        .stop = stop_at > 0 ? stop : NULL,
+        .stop = stop_at > 0 ? stop : NULL, .fade_qpu = qpufade ? fake_qpu_fade : NULL,
     };
     if (stop_at > 0) {
         /* stopped halfway: B3D_STOPPED, no report saved, no page shown */
@@ -253,6 +262,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "b3d: the report was not saved\n");
         return 1;
     }
-    printf("b3d: report %s/3D%04d.TXT, pages in %s\n", dir, last_number(), dir);
+    printf("b3d: report %s/3d%04d.txt, pages in %s\n", dir, last_number(), dir);
     return 0;
 }

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 
 NOW = datetime.datetime.now(datetime.timezone.utc)
@@ -150,6 +151,31 @@ with tempfile.TemporaryDirectory() as tmp:
     make_cross(tmp)
     for t in ("ec", "rsa", "old", "other", "cross"):
         serve(t, tmp)
-    r = subprocess.run([sys.argv[1], os.path.join(tmp, "ca.crt")]
-                       + [str(PORTS[t]) for t in ("ec", "rsa", "old", "other", "cross")])
+    # the agent relay (tools/bm_agent_relay.py): its own CA, a certificate for 127.0.0.1, a fake program
+    relay_dir = os.path.join(tmp, "relay")
+    relay = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                         "tools", "bm_agent_relay.py")
+    cert_out = subprocess.run([sys.executable, relay, "cert", "--ip", "127.0.0.1", "--dir", relay_dir],
+                              check=True, capture_output=True, text=True).stdout
+    code = [l.split()[1] for l in cert_out.splitlines() if l.strip().startswith("code:")][0]
+    fake = os.path.join(tmp, "fake_model.py")
+    open(fake, "w").write("import sys\nsys.stdin.read()\nprint('relay says hi')\n")
+    port_file = os.path.join(tmp, "relay.port")
+    rp = subprocess.Popen([sys.executable, relay, "serve", "--backend", "cmd", "--cmd", sys.executable + " " + fake,
+                           "--bind", "127.0.0.1", "--port", "0", "--dir", relay_dir, "--no-log", "--port-file", port_file,
+                           "--ca-port", "0"],
+                          stdout=subprocess.DEVNULL)
+    for _ in range(200):
+        if os.path.exists(port_file) and open(port_file).read():
+            break
+        time.sleep(0.05)
+    try:
+        r = subprocess.run([sys.argv[1], os.path.join(tmp, "ca.crt")]
+                           + [str(PORTS[t]) for t in ("ec", "rsa", "old", "other", "cross")]
+                           + [os.path.join(relay_dir, "ca.pem"), open(port_file).read().split()[0],
+                              open(os.path.join(relay_dir, "token")).read().strip(), code,
+                              os.path.join(relay_dir, "server.pem")])
+    finally:
+        rp.terminate()
+        rp.wait()
     sys.exit(r.returncode)

@@ -1,5 +1,5 @@
 /*
- * The reports (reports.h): saved as bm/reports/RPTnnnnn.TXT (8.3 names on
+ * The reports (reports.h): saved as bm/reports/rptnnnnn.txt (8.3 names on
  * the card; the long name is in the header), sent with github_put
  * (src/net/github.c), deleted from the card once on GitHub.
  */
@@ -181,7 +181,7 @@ static void mask(char *text, size_t len, const char *secret)
 
 /* The reports may go to a public repository: the secrets the console knows
  * never leave it (the network console's password is in the log). */
-static void mask_secrets(char *text, size_t len)
+void reports_mask_secrets(char *text, size_t len)
 {
     static const char *const keys[] = { "github_token", "wifi_psk", "net_password", "meshy_key" };
     for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
@@ -218,9 +218,9 @@ static int save_report(const char *kind, const char *fixed, const char *text, si
     memcpy(all + hl, text, len);
     if (!len || text[len - 1] != '\n')
         all[hl + len++] = '\n';
-    mask_secrets(all + hl, len);
+    reports_mask_secrets(all + hl, len);
     char name[16], path[40];
-    ksnprintf(name, sizeof name, "RPT%05d.TXT", scan(NULL) + 1);
+    ksnprintf(name, sizeof name, "rpt%05d.txt", scan(NULL) + 1);
     ksnprintf(path, sizeof path, DIR "/%s", name);
     int rc = fat_mkdirs(DIR) == 0 ? fat_write_file(DIR, name, all, hl + len) : -1;
     free(all);
@@ -306,7 +306,7 @@ int reports_send_pending(void)
         if (!first)
             break;
         char path[40];
-        ksnprintf(path, sizeof path, DIR "/RPT%05d.TXT", first);
+        ksnprintf(path, sizeof path, DIR "/rpt%05d.txt", first);
         if (send(path, 0) != 0) {
             kprintf("report: %s\n", last);
             break;

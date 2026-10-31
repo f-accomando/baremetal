@@ -31,6 +31,13 @@ footer: bm manuals - editor-animator
 - Models live in the MESH section of the cartridge, skeletons and animations in the ANIM section. bm Animator changes only those two sections (and the sprite sheet, when you put sprites in it).
 - The game uses the result with `model()` and `animate()`.
 
+## Which editor for what
+
+- **bm Studio**: static models. Objects, props and buildings, made of blocks and tiles. The 3D map of a game is made in the map page of bm SDK.
+- **bm Mesh**: organic models. Characters and heroes, and all fine editing of vertices and triangles.
+- **bm Animator**: rigs and animations. It puts a skeleton into a model and moves it. It does not build models.
+- bm Studio and bm Mesh write the same MESH section, so a model can go from one editor to the other.
+
 ## Good to know
 
 - The Pi Zero W has bm Animator. The kernel of the RGB30 does not have it: it does not offer the suite's programs.
@@ -44,6 +51,8 @@ footer: bm manuals - editor-animator
 - From a game: press **X** on its cover and choose **Open in bm Animator**.
 - From another tool of the suite: the menu entry **Open in bm Animator** (bm Studio has it) switches to the same file.
 
+*Open...* also lists the `.bmm` model files of `/bmm`. A `.bmm` opens with all its models and skeletons. **Save** writes the same `.bmm` again; **Save as** makes a `.bme` project; **Try the game** says that a model file has no game.
+
 If the file list is empty, the screen says `no .bm files: make models in bm Studio`. If you open a file with no 3D models, it says `no models: make them in bm Studio`. The text `open a .bm with 3D models (made in bm Studio)` is shown when the app starts with no file and there are `.bm` files.
 
 ## Projects and games
@@ -51,13 +60,13 @@ If the file list is empty, the screen says `no .bm files: make models in bm Stud
 | File | What it is | What bm Animator does with it |
 |---|---|---|
 | `.bme` | a project | opens it, changes it, saves it in its place |
-| `.bm`, `.b16` | a game | only reads it |
+| `.bm` | a game | only reads it |
 
-With a game open, the first save asks `Save an editable copy: NAME.BME?`. Answer yes: from then on you work on the copy, next to the game. The game itself is never changed.
+With a game open, the first save asks `Save an editable copy: name.bme?`. Answer yes: from then on you work on the copy, in `/bme`. The game itself is never changed.
 
 ## Good to know
 
-- The list of files shows the `.bm` and `.bme` files of `/carts` and of the root of the SD card.
+- The list of files shows the `.bme` projects of `/bme` and the `.bm` and `.bme` files of `/carts` and of the root of the SD card.
 - The menu page shows the file name and `*modified*` when there is something to save.
 
 ## Try it, step by step
@@ -68,14 +77,14 @@ With a game open, the first save asks `Save an editable copy: NAME.BME?`. Answer
 4. You see page **F1** with the model turning. The lists on the left are MODELS and ANIMATIONS, with names only; the name of the model and its vertices, triangles and bones are in the info strip to the right of the panel.
 
 ::: try
-Press `]` and `[` to move to the next and the previous model of the file. The status line says `model` and the name.
+Press `]` and `` to move to the next and the previous model of the file. The status line says `model` and the name.
 :::
 
 # The screen and the controls
 
 The layout is the one of the other console apps: on the left a panel with lists, above the 3D view two lines that say what is there and what is being done, at the bottom the keys of the page. Chosen things are in yellow. Hold **F12**, or press **?**, to see the keys of the page.
 
-![The player (F1): a model with its skeleton shown](shots/editor-animator-play.png)
+![The player (F1): a model with its skeleton shown
 
 ## Pages and global keys
 
@@ -89,6 +98,8 @@ The layout is the one of the other console apps: on the left a panel with lists,
 | `Ctrl+S` | save |
 | `Ctrl+Shift+S` | save as (8.3 name in `/carts`) |
 | `Ctrl+O` | open another file |
+| `Ctrl+I` | import a model from `/bmm` or `/glb` |
+| `Ctrl+E` | export the model to `/bmm` |
 | `F5` or `Ctrl+R` | try the game (saves first, then comes back to the same page) |
 | `F6` | the assistant, where the kernel has it |
 | `Ctrl+Z`, `Ctrl+Y` | undo, redo |
@@ -120,6 +131,7 @@ The layout is the one of the other console apps: on the left a panel with lists,
 | `n` | make the skeleton, or add a bone under the chosen one |
 | up, down | choose the bone |
 | `Tab` | work on the bone's tail or on its head |
+| `j` | head alone: **w a s d r f** move only the head of the bone, off the tail of its parent (press again: joints go together) |
 | `w` `a` `s` `d` `r` `f` | move the chosen end by 1/8 (uppercase: 1/32) |
 | `m` | mirror the bone and its children to the other side |
 | `p` | choose the parent |
@@ -128,10 +140,23 @@ The layout is the one of the other console apps: on the left a panel with lists,
 | `k` | skin: each face follows its nearest bone |
 | `K` | skin: each corner follows its nearest bone (smooth) |
 | `v` | skin mode: choose faces by hand |
+| `h` | show only the faces of this bone; again: with the bones below it; again: all |
+| `o` `i` | turn axis x, y, z / turn step 5, 15, 45, 90 degrees |
+| `,` `.` | turn this bone and the bones below it round its head, one step back or forward |
+| `u` | type the degrees to turn |
+| `t` | test pose: bend each bone and mark in red the faces that stretch or tear |
 | `q` `e` | turn the view by steps |
 | `z` | frame the model |
 
-In skin mode: arrows choose a face, space marks it, `c` marks the connected ones, `a` gives the marked faces to the bone, PgUp and PgDn change the bone, Backspace or Del clears the marks, `v` goes back to the bones.
+In skin mode: arrows choose a face, space marks it, `c` marks the connected ones, `b` marks all the faces of the bone, `a` gives the marked faces to the bone, PgUp and PgDn change the bone, Backspace or Del clears the marks, `v` goes back to the bones.
+
+### Parts and the angle of a weapon
+
+A part is a bone with its faces. **h** shows one part alone: the faces of the chosen bone, in the colour of the bone. Press **h** again to add the bones below it, and a third time to see all. Use it to check which faces follow a bone.
+
+**, and .** turn the chosen bone and all the bones below it round the head of the bone. The faces that follow these bones turn with them. The step is the one of **i** (5, 15, 45 or 90 degrees) and the axis is the one of **o**. The page shows both after `turn`, for example `turn z 15`. **u** asks the exact degrees. One **Ctrl+Z** takes back one turn. The turn changes the rest pose, so every animation uses the new angle: you turn a weapon once, not in each clip. The keys **[** and **]** still change the model, so the turn uses the comma and the point.
+
+Example: the Hunter in `dnhunter.bmm` has the saw on its own bone, `grip.R`, a child of `hand.R`. Choose `grip.R` with up and down, press **o** to pick the axis and **.** to turn the saw in steps of 15 degrees. Save with Ctrl+S.
 
 ## F3, animate
 
@@ -156,11 +181,26 @@ In skin mode: arrows choose a face, space marks it, `c` marks the connected ones
 | `m` | mirror the pose |
 | `o` | onion skin: the bones of the previous and next keyframes |
 | `l` | loop on, off |
-| `i` | linear, smooth, step |
+| `i` | change the ease: linear, smooth, step, ease-in, ease-out |
+| `t` | IK handle on, off (see Two-bone IK) |
 | `<` `>` | shorter, longer by one frame |
 | Enter | rename the animation (up to 16 letters) |
 | `Ctrl+D` | duplicate the animation |
 | Backspace twice | delete the animation |
+| `Ctrl+Shift+I` | take the animations of another model |
+
+The hint bar at the bottom of F3 shows the main keys only. The keys `,` `.` (keyframe before and after), `m` (mirror) and `o` (onion skin) are not on the bar. They are in the help: hold **F12**. The bar ends with the chip F12 keys. Click it, or hold F12, to see every key of the page.
+
+### Animations from another model (Ctrl+Shift+I)
+
+You can copy the animations of another model onto the skeleton you edit. Press **Ctrl+Shift+I**, or open the right-click menu of the animate page and choose *Animations from another model...*. You need a skeleton first (F2). Then:
+
+1. A list shows the models of `/bmm` and `/glb`. Choose one and press **Enter**.
+2. bm Animator matches the bones of the two skeletons by name. A bone matches when the names are exactly the same. If not, it matches when the names are the same in lower case with the signs `.`, `_` and `-` taken out.
+3. Each animation of the other model is added to your skeleton, with its times, length and loop. The rotations of the matched bones are copied. The translations are scaled by the ratio of the two heights (the height of your skeleton divided by the height of the other one). A bone with no match stays in its rest pose.
+4. The status line says, for example, `3 animations, 18 bones matched, missing: tail ear`. `missing` lists the bones of your skeleton that had no match.
+
+The new animations get the name of the source. If the name is already used, bm Animator makes it different. The first new animation is chosen. It is one undo step. A skeleton can hold 255 animations at most. If the other model has no skeleton, or no animations, or no bone with a name that matches, a message says so and nothing is added.
 
 ## F4, sprites
 
@@ -196,6 +236,7 @@ In skin mode: arrows choose a face, space marks it, `c` marks the connected ones
 ## Caveats
 
 - [TO FILL: the mouse. The suite's guide says Animator does not use it yet, but the code has mouse handlers (click a bone, drag to move or turn, click the timeline); check on the console]
+- In a dialog line (for example the file name), a click puts the caret between the letters.
 
 # Bones and rigging
 
@@ -213,6 +254,7 @@ The skeleton is what lets one model have many animations at small cost: the game
 - **n** on an empty model makes one bone, `root`, from the bottom of the model up to half its height. Every next **n** adds a child of the chosen bone, half a unit long in the same direction.
 - At most **64** bones in a skeleton.
 - Joints at the same point move together: a chain stays joined when you move a joint.
+- A shoulder or a hip is not at the end of its parent. Make the bone with **n**, move its tail, then choose its head with **Tab** and press **j**. Now **w a s d r f** move only this head. The parent stays the same, the tail stays, and the animations keep their keys. A bone cannot be shorter than 1/16. Press **j** again to join the joints. Each move is one step of **Ctrl+Z**.
 - **x** deletes a bone: its children go to its parent and its faces follow the parent (or the first bone). Deleting the only bone removes the skeleton.
 - **m** copies the bone and its children to the other side (x mirrored). The names end in `.L` and `.R`; a bone with no side yet gets `.L` if it is on the positive x side. The poses of the animations are mirrored too. The faces on the other side do not move by themselves: run the skin again with **k** or give them with **a**.
 - The parent of a bone is chosen among the bones before it in the list.
@@ -222,8 +264,10 @@ The skeleton is what lets one model have many animations at small cost: the game
 - **k** gives each face to its nearest bone: rigid parts, good for robots and boxy characters.
 - **K** gives each corner to its nearest bone: the model stretches at the joints.
 - In skin mode (**v**), if you have marked faces, **k** and **K** work only on them.
+- **t** tests the skin. It bends each bone in turn by 45 degrees (around x and around z) and marks in red the faces that break: a face whose edge grows to more than 1.6 times its length (it stretches), or a corner shared with a face of another bone that comes apart by more than 2% of the model's height (the skin tears). The status line says how many faces are red and which bone's bend marks most, or that the skin holds. Press **t** again to switch the test off. Then choose the red faces with **v** and give them to a bone with **a**.
+- Auto skin (**k**, **K**) switches the test off.
 
-![The rig page (F2): the bones of a model and their names in the list](shots/editor-animator-rig.png)
+!The rig page (F2): the bones of a model and their names in the list
 
 ## Try it, step by step
 
@@ -255,18 +299,32 @@ A walk cycle is a handful of poses. You make the poses, bm Animator makes the mo
 - **Every turn of a bone is a keyframe** at the current time: turn the bone and the keyframe is there.
 - **g** switches the same keys from turning to moving the bone (a small step; nothing else changes).
 - **Loop** on: after the last keyframe the animation goes on to the first one, over the rest of the length. A looping animation needs no keyframe at its last frame.
-- **i** chooses how the movement goes between two keyframes: linear, smooth (slow at both ends) or step (the pose jumps).
+- **i** chooses how the movement goes between two keyframes. Each press goes to the next of five modes: linear, smooth (slow at both ends), step (the pose jumps), ease-in (slow start) and ease-out (slow end).
+- **Warning:** a kernel from before ease-in and ease-out refuses a cartridge that has a clip with one of these two modes. It shows the message `bad skeletons (ANIM)`, and the cartridge does not load. Update the kernel, or keep to linear, smooth and step.
 - **<** and **>** shorten and lengthen the animation by one frame. It cannot become shorter than its last keyframe.
 - `,` and `.` jump between keyframes. `(` and `)` move the keyframe you are on by one frame.
 - The only keyframe left of an animation cannot be removed (`the last keyframe stays`).
 - Pressing **Backspace** once asks to confirm; a second press deletes the animation.
 - At most **255** animations for a model.
 
+## Two-bone IK
+
+With an IK handle you do not turn the bones one by one. You move the hand or the foot, and bm Animator turns the bones above it.
+
+- Choose a bone that has a parent and a grandparent (a hand, a foot) and press **t**. The handle sits on the head of the chosen bone. A cross shows the target. The menu entry is `IK handle`; when the handle is on it reads `IK off`.
+- If the bone has no parent and grandparent, a message says so and the handle stays off.
+- **w s a d q e** now move the target, not the bone. Uppercase keys make a step of one third. The gamepad and the mouse drag move the target in the same way.
+- After each move, bm Animator puts keyframes on the parent and the grandparent at the current time. The chosen bone keeps its turn in the world. The knee or the elbow bends toward the bend that the rest pose has.
+- If the target is too far, the limb goes straight to it and does not stretch. The screen shows `OUT OF REACH`.
+- Each move is one undo step. The result is ordinary rotation keys, so the animation plays the same everywhere.
+- The target is not saved. Press **t** again to turn the handle off.
+- The key **i** is still the ease key. The IK handle is on **t**.
+
 ## Onion skin
 
 **o** shows the bones of the previous keyframe and of the next one beside the current pose, in two colours. Use it to see where the movement comes from and where it goes.
 
-![The animate page (F3): the timeline with keyframes and the list of animations](shots/editor-animator-animate.png)
+!The animate page (F3): the timeline with keyframes and the list of animations
 
 ## Try it, step by step
 
@@ -288,7 +346,7 @@ Press **o** and step with `,` and `.`: the coloured bones show the poses before 
 
 For 2D games, the **sprites** page draws an animation with the console's 3D engine and puts the frames into the **sprite sheet**, ready for `zspr()`. It can also make the **boxes** of every frame from the bones.
 
-![The sprites page (F4): the settings and the preview with its boxes](shots/editor-animator-sprites.png)
+!The sprites page (F4): the settings and the preview with its boxes
 
 ## The settings
 
@@ -328,7 +386,7 @@ Press **Enter**. The screen says `drawing the sprites...` while it works, in ste
 
 - The sprites go **below what the sheet already has**, enlarging the sheet if needed (never past 4096 pixels).
 - One row of frames per direction: frame `f` of direction `d` is at `x0 + f * size`, `y0 + d * size`.
-- The page adds a **zone** to the sheet, named after the model and the animation in small letters (`model_animation`, up to 16 characters), with the frame count and the speed (frames divided by the animation's length). A zone with the same name is replaced.
+- The page adds a **zone** to the sheet, named after the model and the animation in small letters (`model_animation`, up to 16 characters), with the frame count and the speed (frames divided by the animation's length). A zone with the same name is replaced. If it was a stack zone, it keeps its slices when the new zone still fits the sheet.
 - The boxes are made in the editor session (the cartridge's BOXES section), for the zone, frame by frame (from frame 1), taken from the first direction. It was not confirmed that Ctrl+S writes them to the file.
 - A line at the bottom shows the zone and the `sspr()` call to draw the frames.
 
@@ -360,8 +418,8 @@ Rename a bone to `sword` in F2, bake again and look at the preview: its box turn
 ## Good to know
 
 - A file opened and saved with no changes stays identical.
-- **Save as** (`Ctrl+Shift+S`) asks for an 8.3 name; the file goes to `/carts` with the `.BME` ending.
-- A game (`.bm`, `.b16`) is never overwritten: the first save makes a `.BME` copy.
+- **Save as** (`Ctrl+Shift+S`) asks for an 8.3 name; the file goes to `/bme` with the `.BME` ending.
+- A game (`.bm`) is never overwritten: the first save makes a `.BME` copy.
 - **F5** saves first and plays the project. Start + Select (or Ctrl+Esc) leaves the game and brings you back to the same page.
 - To make the finished game, use **bm SDK** (Build, `Ctrl+B`): it writes the `.bm`. The menu of bm Animator has no build entry.
 - When the animation is for a game kept in the repository, the models and skeletons are saved by the console and put in `carts/<game>/` as `models.bm`; `make` takes them into the cartridge.
@@ -371,6 +429,20 @@ Rename a bone to `sword` in F2, bake again and look at the preview: its box turn
 1. Press **Esc**. The menu lists Continue, Open, Save, Save as, Try the game, Open in bm Studio and Exit.
 2. Choose **Save as...** and type a name such as `HERO`.
 3. The status line says `saved` and the path. The title of the menu shows the file without `*modified*`.
+
+## Import a .glb
+
+The SD card has two folders for models. `/glb` holds `.glb` files that you copy there; bm Animator only reads them. `/bmm` holds the converted models (`.bmm`); bm Animator writes them there. All the names are in lower case.
+
+1. Press **Ctrl+I**, or choose **Import a model...** in the menu (Esc). On the pad, press Y + B for the menu.
+2. The list shows `/bmm` and `/glb`. A name marked `.glb: converted to /bmm` has no `.bmm` yet.
+3. Choose a `.bmm` to read it. Choose a `.glb` to convert it: bm Animator writes `/bmm/NAME.bmm` and adds the model to the project.
+4. If the name has more than 8 characters, or `/bmm` has the name already, bm Animator asks for a new name (1 to 8 of a-z, 0-9, `_` and `-`).
+5. The status line shows the vertices and the triangles. If the file is not good, it shows the message of the console, for example the format limit of 65535 vertices or triangles.
+
+A `.glb` gives flat colours and no skeleton: make one on the rig page (F2). A `.bmm` with a skeleton keeps it, and its bones show in the status line. The texture of a `.bmm` goes on the sheet of the project only when the sheet is empty; if not, the faces that used it turn grey. A `.bmm` with several models gives the first one.
+
+**Ctrl+E**, or **Export to /bmm...** in the menu, writes the current model to `/bmm/NAME.bmm` with its skeleton and animations; if the file is there, bm Animator asks before it replaces it.
 
 # Using the animation in a game
 
@@ -397,7 +469,7 @@ All these calls are in the 3D API (`docs/api/light3d.md`). The animation is part
 | Call | What it does |
 |---|---|
 | `zspr(name, x, y, [frame, flip_x, flip_y, zoom])` | draws the zone made by F4; without `frame` it runs by itself at the zone's speed |
-| `zone(name)` | `x, y, w, h, frames, fps` of the zone |
+| `zone(name)` | `x, y, w, h, frames, fps, slices` of the zone; `slices` is 0 unless it is a stack zone |
 | `zboxes(name, [frame, kind])` | the boxes of the zone: `{x, y, w, h, kind, frame}`, with `kind` `"hurt"`, `"hit"` or `"body"` |
 
 `zspr` draws the first direction. For the other directions use `sspr()` with the numbers on the line at the bottom of F4.
@@ -423,7 +495,7 @@ function _draw()
 end
 :::
 
-This is the pattern of the repository's `carts/village`. For the 2D sprites:
+This is the pattern of the repository's a file that is not in this repository. For the 2D sprites:
 
 ::: copy
 zspr("hero_walk", 100, 80)

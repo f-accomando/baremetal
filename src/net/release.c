@@ -2,6 +2,7 @@
  * Release manifests (M19): the signature (ECDSA P-256 over SHA-256, the
  * key built into the kernel), the lines of the manifest, the files.
  */
+#include "sha_job.h"
 #include "release.h"
 
 #include "mbedtls/pk.h"
@@ -222,10 +223,29 @@ int release_parse(const uint8_t *m, size_t len, release_t *r, char *err, size_t 
     return 0;
 }
 
+void (*release_hash_tick)(void);
+
+#define HASH_PIECE (16u << 10)
+
 int release_check_file(const release_file_t *f, const uint8_t *data, size_t len)
 {
     unsigned char hash[32];
-    if (len != f->size || mbedtls_sha256(data, len, hash, 0) != 0)
+    if (len != f->size)
+        return -1;
+    if (sha_offload(data, len, hash, release_hash_tick) == 0)       /* a worker core hashed it */
+        return memcmp(hash, f->sha256, sizeof hash) == 0 ? 0 : -1;
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    int rc = mbedtls_sha256_starts(&ctx, 0);
+    for (size_t at = 0; rc == 0 && at < len; at += HASH_PIECE) {
+        rc = mbedtls_sha256_update(&ctx, data + at, len - at < HASH_PIECE ? len - at : HASH_PIECE);
+        if (release_hash_tick && len - at > HASH_PIECE)
+            release_hash_tick();
+    }
+    if (rc == 0)
+        rc = mbedtls_sha256_finish(&ctx, hash);
+    mbedtls_sha256_free(&ctx);
+    if (rc != 0)
         return -1;
     return memcmp(hash, f->sha256, sizeof hash) == 0 ? 0 : -1;
 }

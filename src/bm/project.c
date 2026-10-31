@@ -33,8 +33,8 @@ static int say(char *err, size_t en, const char *msg)
     return -1;
 }
 
-/* "/carts/Il mio gioco.bm" -> dir "/carts", base "ILMIOGIO": what an 8.3
- * name can hold of it, in upper case */
+/* "/bm/Il mio gioco.bm" -> dir "/bm", base "ilmiogio": what an 8.3
+ * name can hold of it, in lower case */
 static void split(const char *path, char *dir, size_t dn, char base[9])
 {
     const char *slash = strrchr(path, '/');
@@ -44,22 +44,22 @@ static void split(const char *path, char *dir, size_t dn, char base[9])
         memcpy(dir, path, k);
         dir[k] = 0;
     } else {
-        ksnprintf(dir, dn, slash ? "/" : "/carts");
+        ksnprintf(dir, dn, slash ? "/" : "/bm");
     }
     int n = 0;
     for (const char *p = name; *p && *p != '.' && n < 8; p++) {
         char c = *p;
-        if (c >= 'a' && c <= 'z')
-            c = (char)(c - 32);
-        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c + 32);
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')
             base[n++] = c;
     }
     if (!n)
-        n = ksnprintf(base, 9, "PROJECT");
+        n = ksnprintf(base, 9, "project");
     base[n] = 0;
 }
 
-/* candidate k of a name: BASE.EXT, then BASE1.EXT ... BASE9.EXT (the
+/* candidate k of a name: base.ext, then base1.ext ... base9.ext (the
  * eighth letter makes room for the digit) */
 static void candidate(const char *dir, const char *base, const char *ext, int k, char *out, size_t n)
 {
@@ -79,12 +79,30 @@ static int exists(const char *path)
     return fat_find(path, &e) == 0;
 }
 
+const char *bm_games_dir(void)
+{
+    return "/bm";
+}
+
+int bm_project_path(const char *name, char *out, size_t n)
+{
+    char dir[64], base[9];
+    split(name, dir, sizeof dir, base);
+    candidate(BM_PROJECTS_DIR, base, ".bme", 0, out, n);
+    return 0;
+}
+
+static int in_projects_dir(const char *dir)
+{
+    return strcasecmp(dir, BM_PROJECTS_DIR) == 0;
+}
+
 int bm_copy_name(const char *game, char *out, size_t n)
 {
     char dir[64], base[9];
     split(game, dir, sizeof dir, base);
     for (int k = 0; k < 10; k++) {
-        candidate(dir, base, ".BME", k, out, n);
+        candidate(BM_PROJECTS_DIR, base, ".bme", k, out, n);
         if (!exists(out))
             return 0;
     }
@@ -140,7 +158,7 @@ int bm_make_copy(const char *game, const char *to, char *err, size_t en)
     if (!data)
         return -1;
     set_flags(data, 1);
-    memset(data + BM_BUILT_FROM, 0, BM_HEADER_SIZE - BM_BUILT_FROM);
+    bm_set_built_from(data, NULL);
     const int r = store(to, data, len, err, en);
     free(data);
     return r;
@@ -169,71 +187,38 @@ int bm_build(const char *project, char *out, size_t n, char *err, size_t en)
         return -1;
     char dir[64], base[9], from[17];
     split(project, dir, sizeof dir, base);
+    if (in_projects_dir(dir))           /* a project in /bme: the game goes to the games folder */
+        ksnprintf(dir, sizeof dir, "%s", bm_games_dir());
     const char *slash = strrchr(project, '/');
     ksnprintf(from, sizeof from, "%s", slash ? slash + 1 : project);
     for (char *p = from; *p; p++)
-        if (*p >= 'a' && *p <= 'z')
-            *p = (char)(*p - 32);
+        if (*p >= 'A' && *p <= 'Z')
+            *p = (char)(*p + 32);
     set_flags(data, 0);
-    memset(data + BM_BUILT_FROM, 0, BM_HEADER_SIZE - BM_BUILT_FROM);
-    memcpy(data + BM_BUILT_FROM, from, strlen(from));
+    bm_set_built_from(data, from);
+    {                                   /* the INFO keys targets, input, ... give the compatibility block; with
+                                         * no targets key the bytes 120..127 of the project stay */
+        bm_compat_t cc;
+        char why[96];
+        const int r = bm_compat_from_info(data, len, &cc, why, sizeof why);
+        if (r < 0) {
+            free(data);
+            return say(err, en, why);
+        }
+        if (r > 0)
+            bm_compat_write(data, &cc);
+    }
     /* the game it built before, else the first free name */
     int k, found = 0;
     for (k = 0; k < 10 && !found; k++) {
-        candidate(dir, base, ".BM", k, out, n);
+        candidate(dir, base, ".bm", k, out, n);
         found = built_from(out, from);
     }
     for (k = 0; k < 10 && !found; k++) {
-        candidate(dir, base, ".BM", k, out, n);
+        candidate(dir, base, ".bm", k, out, n);
         found = !exists(out);
     }
     int r = found ? store(out, data, len, err, en) : say(err, en, "no free name for the game");
-    free(data);
-    return r;
-}
-
-int bm_build_b16(const char *src, char *out, size_t n, char *err, size_t en)
-{
-    if (!bm_is_project(src) && !ends_ci(src, ".bm"))
-        return say(err, en, "only a project (.bme) or game (.bm) is exported to .b16");
-    size_t len;
-    uint8_t *data = load(src, &len, err, en);
-    if (!data)
-        return -1;
-    if (len > 8 * 1024 * 1024) {
-        free(data);
-        return say(err, en, "over a .b16's 8 MiB");
-    }
-    char dir[64], base[9], from[17];
-    split(src, dir, sizeof dir, base);
-#ifdef BM_RGB30
-    if (strcasecmp(dir, "/carts") == 0 && exists("/bm"))
-        ksnprintf(dir, sizeof dir, "/bm");
-#endif
-    const char *slash = strrchr(src, '/');
-    ksnprintf(from, sizeof from, "%s", slash ? slash + 1 : src);
-    for (char *p = from; *p; p++)
-        if (*p >= 'a' && *p <= 'z')
-            *p = (char)(*p - 32);
-    set_flags(data, 0);
-    data[18] |= BM_FLAG_B16;
-    unsigned w = data[12] | data[13] << 8, h = data[14] | data[15] << 8;
-    if (w != h) {
-        data[12] = 360 & 0xff; data[13] = 360 >> 8;
-        data[14] = 360 & 0xff; data[15] = 360 >> 8;
-    }
-    memset(data + BM_BUILT_FROM, 0, BM_HEADER_SIZE - BM_BUILT_FROM);
-    memcpy(data + BM_BUILT_FROM, from, strlen(from));
-    int k, found = 0;
-    for (k = 0; k < 10 && !found; k++) {
-        candidate(dir, base, ".B16", k, out, n);
-        found = built_from(out, from);
-    }
-    for (k = 0; k < 10 && !found; k++) {
-        candidate(dir, base, ".B16", k, out, n);
-        found = !exists(out);
-    }
-    int r = found ? store(out, data, len, err, en) : say(err, en, "no free name for the .b16");
     free(data);
     return r;
 }

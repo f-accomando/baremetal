@@ -1,5 +1,7 @@
 # Screen resolutions — menu, console and games
 
+
+
 Which resolutions bm can use, how they reach the TV and what they cost.
 Written to choose the menu resolution (M27, BareMetal UI).
 
@@ -47,7 +49,7 @@ Written to choose the menu resolution (M27, BareMetal UI).
   480×270, 640×360, 960×540, 1280×720 or 1920×1080 between one frame and the next. On
   1080p they are all integer-pixel (6×, 5×, 4×, 3×, 2×, 1×) except 1280×720 (1.5×: irregular
   pixels with `scaling_kernel=8`). The triple-page framebuffer at 1920×1080 is
-  12.4 MB of GPU memory (64 MiB). Above 640×360 the GPU is needed: the ARM
+  12.4 MB of GPU memory (64 MB). Above 640×360 the GPU is needed: the ARM
   rasteriser pays for every pixel. Overbit offers it in the menu (RESOLUTION) and saves it.
 
 ## 3. Possible resolutions for the menu
@@ -99,7 +101,7 @@ With 32 bits (XRGB8888) the bytes double: 640×360 costs ~9.2 ms of copy, 960×5
 - **Mode change** at every switch between menu and game (games stay at 640×360 or
   320×180). Today it already happens (the menu is 16 bit, the console 32), but with the same
   size.
-- GPU memory: 960×540 × 2 bytes × 3 pages = 3.1 MB, well within the default 64 MiB
+- GPU memory: 960×540 × 2 bytes × 3 pages = 3.1 MB, well within the default 64 MB
   *(D)*.
 
 ## 5. Choice
@@ -117,11 +119,7 @@ the conditions of section 4.
 
 - The menu is **a single one** (`src/kernel/menu_ui.c`) for the Pi and the RGB30: same bar, same
   covers and panels. The height is 360 for all; the width decides the columns.
-- **Pi, the ARM draws**: 640×360, as above (4 covers per row, 3× on 1080p).
-- **Pi, `menu_scale=3`** in `bm/config.txt`: 1920×1080 with the same layout scaled 3×.
-  The ARM scales it every frame (~4 MB written to video memory, like the background copy
-  at 1080p in section 3): it is a test, it does not run at 60 fps. The next step is to have
-  the GPU draw the menu (M37: covers, bars and text as V3D quads), and then
-  1080p will also be able to have finer text and icons.
+- **Pi, default** (`menu_scale=1` or no key): the 640×360 layout drawn by the ARM, enlarged by the HDMI scaler (no CPU cost).
+- **Pi, `menu_scale=2`, `3` or `4`** in `bm/config.txt` (Settings > Screen > Menu size): the GPU (V3D) draws the menu at 1280×720, 1920×1080 or (4) 640×360, 1:1, with 24x48 text at 1080p and no enlarge copy (1080p verified on Pi Zero W hardware, 24 Oct; 720p not yet). The ARM never enlarges the menu. If the GPU cannot start, the menu stays at 360p on the ARM.
 - **RGB30**: 360×360 RGB565, scaled 2× by the video controller onto the 720×720 panel (integer
   pixels, no CPU cost); 2 covers per row.

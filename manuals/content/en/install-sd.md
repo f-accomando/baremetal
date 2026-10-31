@@ -31,7 +31,7 @@ bm has no installer you download and double-click: you build the card from the b
 - The Pi Zero W starts only from a FAT card. bm uses FAT32.
 - The Pi and the RGB30 use **different** cards: never put one board's card in the other.
 - The RGB30 keeps its own system (ROCKNIX) on its other card. bm goes on a spare card, so you can go back by putting the old card back.
-- The `.bm` games are for the Pi; the RGB30 plays `.b16` games and, for testing, the Pi's `.bm`.
+- The `.bm` games run on the Pi and on the RGB30. The header of a game says which kernels it is made for.
 
 ## Prepare the PC
 
@@ -61,7 +61,7 @@ sudo apt install gcc-aarch64-linux-gnu picolibc-aarch64-linux-gnu mtools dosfsto
 
 # Installing on the Pi Zero W
 
-You make one disk image, `dist/bm.img` (64 MiB), and write it to the card. The image has one FAT32 partition labelled `BM` with the Pi's boot files, `config.txt`, `kernel.img`, the games in `carts/` and `bm/`.
+You make one disk image, `dist/bm.img` (64 MB), and write it to the card. The image has one FAT32 partition labelled `BM` with the Pi's boot files, `config.txt`, `kernel.img`, the games in `carts/` and `bm/`.
 
 ## Step by step
 
@@ -75,7 +75,7 @@ You make one disk image, `dist/bm.img` (64 MiB), and write it to the card. The i
 8. Put the card in the Pi.
 9. Power the Pi on. You should see the bm menu on the screen.
 
-![The card as the PC shows it after writing the image](shots/install-sd-pi-files.png)
+!The card as the PC shows it after writing the image
 
 ::: copy
 make firmware
@@ -96,7 +96,7 @@ Writing an image erases the whole card. Check that you picked the card and not a
 
 The screen is driven at 1080p60: the kernel draws 640x360 and the Pi's GPU scales it up with sharp pixels. The menu has the tabs **Market**, **Games**, **Dev** and **Settings**.
 
-![The bm menu on the Pi](shots/install-sd-pi-menu.png)
+!The bm menu on the Pi
 
 [TO FILL: what appears between power-on and the menu on the Pi Zero W (splash, how long), and what its LED does; not recorded in the repository]
 
@@ -122,7 +122,7 @@ After the first boot, press the keyboard or the pad and move through the four ta
 
 # Installing on the RGB30
 
-You make `dist/rgb30/bm-rgb30.img` (256 MiB), with a hidden bootloader in front of the partition, and write it to a spare microSD.
+You make `dist/rgb30/bm-rgb30.img` (256 MB), with a hidden bootloader in front of the partition, and write it to a spare microSD.
 
 ## Step by step
 
@@ -136,7 +136,7 @@ You make `dist/rgb30/bm-rgb30.img` (256 MiB), with a hidden bootloader in front 
 8. Watch the LED: red on means it is booting; solid green means bm is running.
 9. You should see the bm logo, hear a short two-note sound, and then see the menu with the tabs **Market**, **Games**, **Dev** and **Settings**.
 
-![The card of the RGB30 as the PC shows it](shots/install-sd-rgb30-files.png)
+!The card of the RGB30 as the PC shows it
 
 ::: copy
 make TARGET=rgb30 firmware
@@ -153,7 +153,7 @@ Do not format or repartition the RGB30's card: its bootloader sits before the pa
 - **L1** and **R1** change tab.
 - Start + Select leaves a game and returns to the menu.
 
-![The bm menu on the RGB30](shots/install-sd-rgb30-menu.png)
+!The bm menu on the RGB30
 
 ## What the LEDs say
 
@@ -179,21 +179,21 @@ What is on the card depends on the board. The text in `LEGGIMI.txt` on the RGB30
 | `config.txt` | Pi | the Pi firmware's settings: which kernel, the HDMI mode |
 | `kernel.img` | Pi | the bm kernel |
 | `kernel7.img` | Pi Zero 2 W | present only if the image was built for it (`ZERO2=1`) |
-| `carts/` | Pi | the games, `.bm`; `carts/nano8/` has the nano8 ROMs |
+| `carts/` | Pi | the games, `.bm`; a file that is not in this repository has the nano8 ROMs |
 | `kernel8.img` | RGB30 | the bm kernel |
 | `extlinux/` | RGB30 | the instructions for U-Boot: do not touch |
 | `LEGGIMI.txt` | RGB30 | a note about the card |
 | `bm/` | both | everything bm writes and reads for itself; on the RGB30 also the games |
 | `bm/config.txt` | both | bm's settings, `key=value` lines |
 | `bm/ca.pem` | both | the certificates for the network |
-| `bm/save/` | both | the save files of the games (8 slots each, up to 32 KiB a slot) |
-| `bm/shots/` | both | the screenshots (`PONG0001.PNG`) |
+| `bm/save/` | both | the save files of the games (8 slots each, up to 32 KB a slot) |
+| `bm/shots/` | both | the screenshots (`pong0001.png`) |
 | `bm/lib/` | both | resources (`.bmm`, `.bmi`, `.bms`...) the apps and games can share |
 | `bm/backup/` | both | the previous kernel, kept by every update |
 | `bm/reports/` | both | test reports waiting to be sent |
-| `bm/bench/` | both | reports of the 3D bench (`3D0001.TXT`) |
+| `bm/bench/` | both | reports of the 3D bench (`3d0001.txt`) |
 | `bm/bootlog.txt`, `bm/bootprev.txt`, `bm/lastrun.txt` | RGB30 | what the kernel printed at this boot, at the one before, and in the last session |
-| `docs/` | both | documents of the apps that ask for them, such as bm Write (`LETTER.BMD`) |
+| `docs/` | both | documents of the apps that ask for them, such as bm Write (`letter.bmd`) |
 
 The WiFi and Bluetooth firmware is in `bm/` too: on the Pi the files `BCM43430A1.hcd` and `brcmfmac43430-sdio.*`; on the RGB30 `rtl8821cs_fw.bin` and `rtl8821cs_config.bin`.
 
@@ -280,7 +280,7 @@ The Market is the catalogue of free games. There are no accounts and no payments
 4. The console checks the signature of the catalogue and the SHA-256 of each file before it writes anything to the card. Wait until the game is written.
 5. Open the **Games** tab. You should see the game; select it to play.
 
-On the Pi the game goes to `carts/`. On the RGB30 it goes to `bm/`, the folder its menu lists. The Pi lists the `.bm` games of the Market and the RGB30 the `.b16` ones.
+On the Pi the game goes to `carts/`. On the RGB30 it goes to `bm/`, the folder its menu lists. Both devices list the `.bm` games of the Market. A game made for the other device shows a faded cover.
 
 ## From the PC
 
@@ -332,12 +332,15 @@ The console writes it when you change a setting. You can also edit it on the PC,
 | `wifi_ssid` | the WiFi network |
 | `wifi_psk` | its password |
 | `wifi_boot` | `0`: no WiFi at the start; `1`: the console joins at every start |
-| `net_password` | the 6-digit Console password, used from the next start |
+| `net_password` | the Console password. If the key is missing, the console makes a random 6-digit number when the network console starts and saves it here. Edit it to choose your own; it is used from the next start |
+| `rec` | `on`: the screen recorder writes every game run to `/bm/rec` (off by default) |
+| `rec_format` | the pixel format of the recorder: `rle565` (the default, lossless), `rgb565` or `rgb332` |
 | `layout` | `it` or `us`: the keyboard |
 | `volume` | 0 to 10 |
 | `confirm` | `a`: A confirms (RGB30) |
-| `show_bm` | `0`: no `.bm` in the RGB30's menu |
-| `menu_scale` | `3`: the Pi's menu at 1920x1080 |
+| `show_bm` | `0`: no `.bm` in the RGB30's Games tab (they are shown by default, for tests) |
+| `market_bm` | `0`: no `.bm` in the RGB30's Market (by default it lists them, grey when they are not made for the RGB30) |
+| `menu_scale` | `1`, `2` or `3`: the Pi's menu at 360p on the ARM (default), or 720p / 1080p drawn by the GPU (360p if the GPU cannot) |
 | `github_token` | a GitHub token for the test reports |
 
 ## Set up WiFi from the PC

@@ -5,18 +5,21 @@
  * the keys and the pad.
  */
 #include "b3dpi.h"
+#include "config.h"
 #include "input.h"
 #include "pmu.h"
 #include "reports.h"
 #include "syskeys.h"
+#include "tick.h"
 #include "version.h"
 #include "bm/b3d.h"
 #include "bm/runtime.h"
-#include "bm/stress.h"
 #include "drivers/prop.h"
 #include "drivers/timer.h"
 #include "drivers/uart.h"
 #include "fs/fat.h"
+#include "gpu/qpu.h"
+#include "gpu/qpucheck.h"
 #include "gpu/v3d.h"
 #include "lib/printf.h"
 #include "net/net.h"
@@ -31,6 +34,24 @@ static framebuffer_t *fbp;
 static g16_t page;
 
 static uint32_t us(void) { return timer_ticks(); }
+
+/* Waits until the kernel has run for ms milliseconds, with a countdown: right after boot the WiFi joins its
+ * network and a paired pad comes back, and the first tests would pay for it. The keys that stop a test end
+ * the wait too (syskeys_test_stop). */
+static void settle(uint32_t ms)
+{
+    uint32_t shown = 0;
+    while (tick_ms() < ms && !syskeys_test_stop()) {
+        uint32_t left = (ms - tick_ms() + 999) / 1000;
+        if (left != shown) {
+            kprintf("\r3d bench: waiting %2lu s for the boot to settle (WiFi, Bluetooth)", left);
+            shown = left;
+        }
+        timer_delay_ms(20);
+    }
+    if (shown)
+        kprintf("\n");
+}
 
 static uint32_t present(void) { return bm_video_present(fbp, &page); }
 
@@ -109,7 +130,7 @@ static int save(const char *text, size_t len, char *name, size_t n)
     if (fat_mkdirs(DIR) != 0)
         return -1;
     char file[16];
-    ksnprintf(file, sizeof file, "3D%04d.TXT", last_report() + 1);
+    ksnprintf(file, sizeof file, "3d%04d.txt", last_report() + 1);
     if (fat_write_file(DIR, file, text, len) != 0)
         return -1;
     ksnprintf(name, n, "bm/bench/%s", file);
@@ -127,7 +148,7 @@ static int load_last(char **text, char *name, size_t n)
     if (!k)
         return -1;
     char path[32];
-    ksnprintf(path, sizeof path, DIR "/3D%04d.TXT", k);
+    ksnprintf(path, sizeof path, DIR "/3d%04d.txt", k);
     fat_entry_t e;
     uint8_t *data;
     size_t len;
@@ -142,8 +163,16 @@ static int load_last(char **text, char *name, size_t n)
     t[len] = 0;
     free(data);
     *text = t;
-    ksnprintf(name, n, "bm/bench/3D%04d.TXT", k);
+    ksnprintf(name, n, "bm/bench/3d%04d.txt", k);
     return 0;
+}
+
+/* the QPU check for the 3D Bench (b3d_platform_t.qpu_row): one line */
+static void gpu_qpu_row(char *line, size_t n)
+{
+    qpucheck_t r;
+    const int all = qpu_check(&r, us);
+    qpu_check_line(&r, all, line, (unsigned)n);
 }
 
 void bm_bench3d(framebuffer_t *fb)
@@ -155,7 +184,7 @@ int bm_bench3d_part(framebuffer_t *fb, const char *tests, const char *profiles, 
 {
     const uint32_t con_w = fb->width, con_h = fb->height;
     syskeys_test_begin();
-    bm_stress_settle(20000);            /* as the stress test: the boot's work done */
+    settle(20000);                      /* the boot's work done */
     if (syskeys_test_stopped()) {       /* stopped while it waited */
         kprintf("3D Bench: stopped; no report saved or sent\n");
         return 1;
@@ -186,6 +215,8 @@ int bm_bench3d_part(framebuffer_t *fb, const char *tests, const char *profiles, 
         .date = net_time() ? net_time_text() : "",
         .only_tests = tests, .only_profiles = profiles, .no_wait = no_wait, .clocks = real ? clocks : NULL,
         .stop = syskeys_test_stop,
+        .qpu_row = gpu_qpu_key() ? gpu_qpu_row : NULL,      /* gpu3d_qpu=1 only (default off) */
+        .fade_qpu = gpu_qpu_key() ? qpu_fade_hook : NULL,   /* the fade test's QPU profile: gpu3d_qpu=1 only */
     };
     free(sent);                         /* (nothing left from a run before) */
     sent = NULL;

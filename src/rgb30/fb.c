@@ -54,7 +54,8 @@ int fb_init_mode(framebuffer_t *fb, uint32_t width, uint32_t height, uint32_t bu
     uint32_t pitch = (width * (depth / 8) + FB_ROW_ALIGN - 1) & ~(FB_ROW_ALIGN - 1);
     uint32_t rows = (height + FB_TILE - 1) & ~(FB_TILE - 1);
     uint32_t page = (pitch * rows + FB_PAGE_ALIGN - 1) & ~(FB_PAGE_ALIGN - 1);
-    if ((uint64_t)page * buffers > PLAT_GPU_START - PLAT_FB_START)
+    /* the 8 MB below the GPU memory are the GPU's too: the draw arena (6 MB) and the texture pool (mali.c) */
+    if ((uint64_t)page * buffers > PLAT_GPU_START - PLAT_FB_START - (13u << 20))
         return -1;
     fb->width = width;
     fb->height = height;
@@ -138,15 +139,4 @@ int fb_flip(framebuffer_t *fb)
     fb->vsync = plat_display_wait_vsync();
     fb->base = page_addr(fb, (drawn + 1) % fb->buffers);
     return fb->vsync;
-}
-
-int fb_vsync_probe(uint32_t *us, int n)
-{
-    for (int i = 0; i < n; i++) {
-        uint32_t t0 = timer_ticks();
-        if (!plat_display_wait_vsync())
-            return -1;
-        us[i] = timer_ticks() - t0;
-    }
-    return 0;
 }

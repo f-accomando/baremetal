@@ -51,3 +51,20 @@ Newest first. Dates are commit dates of the original development history.
 - **2026-09-26 Text console (M2)**: framebuffer console with ANSI colours and a status bar.
 - **2026-09-25 Serial and chainloader (M1)**: serial console, exception handling, a serial chainloader, QEMU tests and CI.
 - **2026-09-25 Boot (M0)**: bare-metal boot and an HDMI colour test pattern on the Pi Zero W (verified on the real board on 2026-09-26).
+
+### Screenshots
+
+![The framebuffer text console, 2026-09-26](docs/img/m2-console.png)
+*M2: the console on the Pi Zero W (kernel and board information, ANSI colours, status bar).*
+
+![Texture Room, 3D benchmark scene](docs/img/texroom.png)
+*Software and GPU 3D: the Texture Room scene with its frame time and triangle count.*
+
+![bm Studio](docs/img/studio-console.png)
+*bm Studio: tile-based 3D models on the console.*
+
+![bm Sound](docs/img/sound.png)
+*bm Sound: pattern editor of the sound suite.*
+
+![bm SDK](docs/img/sdk.png)
+*bm SDK: the project hub of the suite (2026-10-04).*

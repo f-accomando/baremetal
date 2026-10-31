@@ -333,7 +333,7 @@ static int cap_require(lua_State *G)
         if (!lua_isnil(G, -1))
             return 1;
         lua_pop(G, 1);
-        if (luaL_loadbuffer(G, (const char *)bm_lib_bmlib, (size_t)(bm_lib_bmlib_end - bm_lib_bmlib), "=bmlib") !=
+        if (luaL_loadbufferx(G, (const char *)bm_lib_bmlib, (size_t)(bm_lib_bmlib_end - bm_lib_bmlib), "=bmlib", "t") !=
             LUA_OK)
             return lua_error(G);
         lua_call(G, 0, 1);
@@ -514,7 +514,7 @@ int bm_mesh_capture(lua_State *L, const char *lua, size_t len, int width, int he
     lua_sethook(G, cap_hook, LUA_MASKCOUNT, CAP_EVERY);
 
     /* the code, then _init, _update and _draw once */
-    if (luaL_loadbuffer(G, lua, len, "=main.lua") == LUA_OK) {
+    if (luaL_loadbufferx(G, lua, len, "=main.lua", "t") == LUA_OK) {
         cap_phase(G, err, sizeof err);
         static const char *const calls[] = { "_init", "_update", "_draw", NULL };
         for (const char *const *c = calls; *c; c++) {
@@ -530,7 +530,7 @@ int bm_mesh_capture(lua_State *L, const char *lua, size_t len, int width, int he
 
     /* the names, from the variables that hold the meshes */
     lua_sethook(G, NULL, 0, 0);
-    if (cap.n && luaL_loadbuffer(G, WALK, sizeof WALK - 1, "=walk") == LUA_OK) {
+    if (cap.n && luaL_loadbufferx(G, WALK, sizeof WALK - 1, "=walk", "t") == LUA_OK) {
         luaL_requiref(G, "debug", luaopen_debug, 0);
         luaL_getmetatable(G, CAP_MT);
         lua_getfield(G, LUA_REGISTRYINDEX, "bm.capture.std");

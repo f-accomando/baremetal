@@ -11,7 +11,7 @@ monitor), the hub of the bm Suite. With a USB keyboard (and, if you like, a game
 
 | Key | Page |
 |---|---|
-| **F1** | the project: title, author, screen, target (`.bm` or `.b16`), what the file holds (code and tokens, sprites, flags, zones, map layers, models, sounds) and the suite's other programs (`1`–`6`: bm Code, bm Pixel, bm Studio, bm Animator, bm Mesh, bm Sound). **F1 again**: the dev kit (fps, ms, RAM and tokens of the last try) |
+| **F1** | the project: title, author, screen, target (Pi, RGB30, or both), what the file holds (code and tokens, sprites, flags, zones, map layers, models, sounds) and the suite's other programs (`1`–`6`: bm Code, bm Pixel, bm Studio, bm Animator, bm Mesh, bm Sound). **F1 again**: the dev kit (fps, ms, RAM and tokens of the last try) |
 | **F2** | the code (Ctrl+X or Ctrl+K cuts the line, Ctrl+C / Ctrl+V, Ctrl+D duplicates, Ctrl+G goes to the error, F9 the assistant explains it) |
 | **F3** | the sprites: arrows, space draws, `x` picks the colour, `f` fills, `,` `.` colour, Tab chooses on the sheet, `z` 8×8/16×16, `h`/`v` mirror, `u` undoes, `0`–`7` turn the tile's **flags** on and off (below: wall, platform...). **F3 again**: the map: space places the tile, `x` picks it, `f` fills, Tab chooses the tile, `z` 8×8/16×16 (a tile of 2×2 cells, on even cells), PgUp/PgDn and Home/End a page, `l` the next **layer**, Shift+L adds one (also *New map layer* in the menu), `o` that layer alone, `c` shows the flags |
 | **F4** | 3D: the project's models and animations, turning; `i` writes the code that draws them, Enter opens them in bm Studio |
@@ -37,17 +37,16 @@ Studio and bm Animator it opens with F6.
 If the game stops with an error, the SDK goes back to the line in red (Ctrl+G finds it
 again). Everything else in this guide holds for the SDK too.
 
-**Projects and games**: what the tools change is a **project**, a `.bme` in `/carts` with an
-8.3 name (e.g. `MYGAME.BME`), in the Dev tab with a "Project" badge (A opens it in the SDK,
-*Try it* plays it). A `.bm` is a **game**, in Games: the tools open it to read it and take its
+**Projects and games**: what the tools change is a **project**, a `.bme` in `/bme` with an
+8.3 name (e.g. `mygame.bme`). It is not listed in the menu tabs: the editors open it (the SDK's
+*Open*, Ctrl+O). A `.bm` is a **game**, in Games: the tools open it to read it and take its
 code, sprites, models and sounds, but do not change it. Saving one, they ask to make its
-**editable copy** (`NAME.BME`, next to it); the copy is also in a game's options (X), *Make an
-editable copy*. When the project is ready, **Ctrl+B** in the SDK (or *Build the game (.bm)*
-in its options) makes its game: `MYGAME.BM` in Games, replaced at every build.
+**editable copy** (`/bme/name.bme`). When the project is ready, **Ctrl+B** in the SDK
+makes its game: `mygame.bm` in Games, replaced at every build.
 
 For 3D models: **bm Studio**; for skeletons, animations and pre-rendered sprites: **bm
-Animator** ([sdk/README.md](../sdk/README.md)). They are on the console, in the Dev tab (X on
-a game's cover, *Open in bm Studio* / *Open in bm Animator*): they build with blocks and
+Animator** ([sdk/README.md](../sdk/README.md)). They are on the console, in the Dev tab (they
+open a project with their own *Open*): they build with blocks and
 tiles, choose and move faces and corners, paint on the model, make skeletons, animations
 and sprites, save and try the game, with the keyboard or the gamepad. The SDK, when it
 saves, keeps the models and the animations; **bm Pixel** draws the sprite sheet.
@@ -69,12 +68,11 @@ A `.bm` cartridge is one file that holds:
 Resolution: **640×360** (default), **480×270** with `--res 480x270` (the compromise for
 textured 3D), **320×180** with `--res 320x180` (bigger pixels, 16-bit style, and more time
 per frame) **256×256** square with `--res 256x256` (in the middle of the screen, 4×
-bigger on 1080p, black borders) or **360×360** square with `--res 360x360` (the `.b16`'s
-screen: ×2 exactly on the RGB30's 720×720 panel, in the middle of a 640×360 screen on the Pi). Colours: `0xRRGGBB`, the screen is 16-bit (RGB565).
+bigger on 1080p, black borders) or **360×360** square with `--res 360x360` (×2 exactly on the RGB30's 720×720 panel, in the middle of a 640×360 screen on the Pi). Colours: `0xRRGGBB`, the screen is 16-bit (RGB565).
 
 ## 2. The smallest game
 
-`carts/ball/main.lua`:
+a file that is not in this repository:
 
 ```lua
 local x, y, c = 320, 180, 0xFFD050
@@ -169,7 +167,7 @@ layer), `--flags flags.csv`, `--sprites zones.txt`, `--cover cover.png`, `--res 
 
 ```sh
 sudo mount -t drvfs D: /mnt/d
-sudo cp ball.bm /mnt/d/carts/
+sudo cp ball.bm /mnt/d/bm/
 sync && sudo umount /mnt/d
 ```
 
@@ -180,7 +178,7 @@ card again). On leaving, the line at the bottom of the menu shows fps and millis
 **In the repository's build:** put the game in `carts/<name>/main.lua`, add `<name>` to
 `GAMES` in the `Makefile` and a line `title_<name> := Title` (plus `res_<name> := 320x180`
 if needed). `make` creates it in `build/carts/<name>.bm` and `make sdcard` copies it into
-`dist/carts/`. From the same folder `sheet.png`, `map.csv`, `flags.csv`, `sprites.txt` and
+`dist/bm/`. From the same folder `sheet.png`, `map.csv`, `flags.csv`, `sprites.txt` and
 `cover.png` are taken by themselves, if they are there; the map's other layers are
 `map_<name>.csv`, in the order of `layers_<game> := name ...`.
 
@@ -263,9 +261,8 @@ mset(cx, cy, 5)                                       -- changing a cell (doors,
 ```
 
 Without `--map` the map is 256×256 empty and is filled with `mset` (`msize(w, h)` gives it
-another size). A big map (Hunter's Night: 256×256 cells, 2048×2048 pixels) is better made
-by a script: see the `hunt` sample game (not in this repository), which writes `assets/sheet.png` and `assets/map.csv`. Or a
-script makes the first one and the SDK's map page retouches it by hand: Yharnam's layers
+another size). A big map (Yharnam: 256×256 cells, 2048×2048 pixels) is better made
+by a script. A script makes the first one and the SDK's map page retouches it by hand: Yharnam's layers
 (the `yharnam` sample game (not in this repository)), 16×16 tiles placed with `z`. A layer the game never draws can
 hold placeholders, tiles that say where things go: Yharnam reads its `objects` layer with
 `mget` and builds a house, a tree or a lamp where each one is.
@@ -317,8 +314,10 @@ lists, adds and renames them. For movement with walls, platforms and gravity the
 ## 6. 3D models
 
 The 3D is software (in C on the ARM; the Pi's GPU draws it when it can): triangles with a
-z-buffer, per-face light, fog, textures. A rough budget: about 1200 triangles drawn at 60
-fps.
+z-buffer, per-face light, fog, textures. The budget depends on the path. On the Pi Zero W a
+game-like scene holds about 2300 drawn triangles at 60 fps with the ARM rasteriser, about 4500
+with the GPU, and about 78000 with the GPU and the vertex shader. The numbers for each thing
+(heroes, sprites, tiles, draw calls) are in [`docs/PERF-BUDGET.md`](PERF-BUDGET.md).
 
 **Ready-made shapes:** `mesh_cube(colour)`, `mesh_sphere(rings, segments, c1, c2)`.
 
@@ -367,19 +366,19 @@ end
   pixels (16 → 5.3), at 720p two thirds, so the same models are chosen whatever the
   resolution. Animated models too,
   by the box of their pose. `gpu3d(nil, nil, nil, nil, 0)` turns it off. The player can turn
-  it on for every game in *Settings > Screen and sound > 3D impostors* (`r3d_impostor` in
-  `bm/config.txt`).
+  it on for every game with `r3d_impostor` in
+  `bm/config.txt` (no Settings row).
 - 2D and 3D mix: a background with `rectfill`/`map`, models with `draw3d`, the HUD with
   `print` at the end.
 - **The Pi's GPU:** `gpu3d()` says whether it draws the 3D, and how (`on, aa, vs, version,
   queue, impostor, later`). The console's options make the 3D faster without touching the game: with
-  *3D frame shown: A frame later* (`gpu3d_later=1`, with `gpu3d_queue=2`) each frame is shown
+  the hidden key `gpu3d_later=1` (no Settings row; with `gpu3d_queue=2`) each frame is shown
   a frame later and the next `_update` and `_draw` run while the GPU draws it. The pictures
   are the same; it asks only what every game should do anyway: the state changes in
   `_update`, the HUD after the 3D (`docs/API.md`, *A frame later*). `queue` comes back as the
   level in force (`1`, `2`) or `false`; asking for it with `true` (`gpu3d(true, false, 2, true)`)
   keeps the console's own level, so a game that picks its renderer does not undo the player's
-  `gpu3d_queue=2` or `gpu3d_later`.
+  `gpu3d_queue=2` or `gpu3d_later`. The frame queue (`gpu3d_queue=1`) is on by default on the Pi; `gpu3d_queue=0` turns it off.
 
 **With bm Studio** ([sdk/README.md](../sdk/README.md)): models are made on the console
 placing the sprite sheet's tiles on a grid, and they live in the `.bm` itself; in the game
@@ -418,9 +417,9 @@ head, then the tail: to attach a sword or a light to it). bm Animator also makes
 **pre-rendered sprites**: the animation drawn from 1 to 8 directions in the sprite sheet, to
 use with `sspr()` in a 2D game (it prepares the Lua code that draws them).
 
-**From Blender** (or other programs): a `.glb` is imported into bm Studio (its textures end
-up in the sprite sheet) and from there into the `.bm`; for a game of the repository putting
-`models.glb` in its folder is enough (see `carts/village`).
+**From Blender** (or other programs): copy the `.glb` into `/glb` on the SD card: bm Studio, bm Animator and bm Mesh list it (Ctrl+I, Import a model), convert it to `/bmm/NAME.bmm` and open it. On the PC,
+`python3 scripts/bmres.py convert IN.glb OUT.bmm` converts it to a `.bmm`. For a game of the repository,
+the build reads `assets/models.bm` or `assets/models.glb` (`models.bm` first). `tests/fixtures/mktestkit.py` makes a small cart with models for the tests (`build/carts/testkit.bm`).
 
 ## 7. Sound
 
@@ -554,8 +553,8 @@ light_end()                                   -- applies the light to everything
 print("life", 4, 4, 0xFFFFFF)                 -- the HUD after: it stays at full light
 ```
 
-A flickering flame: the radius multiplied by `0.95 + math.random() * 0.1`. A complete
-example: the `hunt` sample game (not in this repository).
+A flickering flame: the radius multiplied by `0.95 + math.random() * 0.1`. The other kind of
+light (`dark_begin`, `glow`) is in the `yharnam` sample game (not in this repository).
 
 ## 9. Saves
 
@@ -568,7 +567,7 @@ end
 save({ record = record })
 ```
 
-Numbers, strings, booleans and tables, up to 32 KiB, in `/bm/save/` on the SD card. With
+Numbers, strings, booleans and tables, up to 32 KB, in `/bm/save/` on the SD card. With
 bmlib: `lib.best("record", score)` keeps the record and writes only when it is beaten.
 
 More games in progress: the **slots** from 1 to 8, each a table of its own. Without a slot
@@ -582,7 +581,7 @@ if saves()[3] then print("slot 3: game saved", 8, 8, 7) end
 ```
 
 An app that makes files for the player (texts, drawings, exports) writes them in `/docs`,
-shared by all the apps: `doc_write("NOTES.TXT", text)`, `doc_read`, `doc_list`,
+shared by all the apps: `doc_write("notes.txt", text)`, `doc_read`, `doc_list`,
 `doc_delete` (8.3 names; the first time the console asks the player). bm Write keeps its
 documents there.
 
@@ -699,7 +698,12 @@ Other useful things: `lib.script` for scenes written in a row (`lib.wait(1)`,
 `lib.waitfor(...)`), `lib.tween` for titles and menus that come in, `lib.menu` for your
 own menus, `lib.btnr` for buttons that repeat, `lib.rng(seed)` for worlds that are always
 the same from the same seed, `lib.ray` to see whether an enemy sees the hero, `lib.dir8`
-for 8-direction sprites.
+for 8-direction sprites, `lib.input()` for the games' input standard (`confirm`, `cancel`,
+`pause` and `act1`..`act4` on the same buttons in every game of a scheme: `lib.input({ scheme =
+"scroller" | "topdown" | "stick" })`, default `"scroller"`; other keys such as `{ act3 = "x" }`
+change single actions, listed in `lib.input_exceptions` and declared in the game's
+the development notes<game>.md`; `lib.INPUT_STD` is the common part; see
+design/games-input-standard.md).
 
 ## 12. Hits: hitboxes and hurtboxes
 
@@ -849,11 +853,56 @@ with `BMHOST_NET_ID=0` and `1` are two consoles (`make test-bmnet`).
   (`_update`, `_draw`, the 3D calls, the audio, the wait for the GPU) and a GPU bar, in % of
   the 16.7 ms of a frame; the longest part is where to start. `profile(true)` measures the
   functions: `profile()` returns the costliest (ms a frame: their own time and with what
-  they call), and the session report lists the ten first.
+  they call), and the session report lists the ten first (see *The profiler* below).
+  Numbers for what a frame holds (tiles, sprites, meshes) are in
+  [`docs/PERF-BUDGET.md`](PERF-BUDGET.md).
   For stalls you cannot catch in time, at the end of a run the dev kit writes the last
   session's report into the reports (`session_<game>_<board>.txt`, replaced by every new run):
   the frame in its parts, the longest frames, and how much of each is `_update`, `_draw` and
   how much neither.
+- **The profiler** (`profile(true)`, `stat(17)`, `stat(18)`): use them to find the function or
+  the part of the frame that costs the most.
+  - `profile(true)` starts the profiler for this run. `profile(false)` stops it and forgets the
+    rows. Off, it costs nothing. The cost when it is on is `not measured`.
+  - `profile()` returns two values: a table and the number of frames measured. The table holds
+    up to 32 rows, the costliest first (by `self`). A row has `name`, `where` (`"main.lua:120"`,
+    or `"[C]"` for the console's functions), `c` (`true` for a function written in C), `self`
+    and `total` (ms a frame), and `calls` (calls a frame, C functions only).
+  - `self` is the own time of the function. `total` is the time with the functions that it
+    calls. A function with a big `total` and a small `self` spends its time in other functions.
+  - The values are the mean of the last 60 frames. In the first second the table is empty
+    and the frames number is `0`. After that the numbers change once a second.
+  - The console's functions are timed exactly. Lua functions are timed in pieces of 1000 VM
+    instructions, so a short Lua function can get a time that is a little wrong. Read the
+    biggest rows only.
+  - `_update` and `_draw` have the names `_update` and `_draw`. The main chunk is
+    `(main chunk)`.
+  - `stat(17)` is the ms of audio processing in the last frame (the audio interrupt).
+    `stat(18)` is the ms that the ARM waited for the GPU in the last frame. `stat(16)` is
+    the ms of the GPU job. Read them with `stat(1)` (the ms of the whole frame). A big
+    `stat(18)` means that the GPU sets the pace: draw fewer triangles or pixels. A small
+    `stat(18)` and a big `stat(1)` mean that the ARM sets the pace: look at `profile()`.
+    `stat(16)` and `stat(18)` are `0` when the ARM draws the 3D, on the RGB30 and in QEMU.
+    `stat(17)` is `0` where the console has no audio interrupt to time.
+  - These are measurements. They differ between consoles. Never use them in game logic,
+    or a lockstep match falls out of step.
+
+  ```lua
+  function _init() profile(true) end
+
+  function _draw()
+    -- ... the drawing ...
+    if stat(3) % 120 == 0 then
+      log("frame", stat(1), "gpu", stat(16), "audio", stat(17), "gpu wait", stat(18))
+      local rows, frames = profile()
+      for i = 1, math.min(5, #rows) do
+        log(rows[i].name, rows[i].where, rows[i].self, rows[i].total)
+      end
+    end
+  end
+  ```
+
+  Compare the numbers with the budget in [`docs/PERF-BUDGET.md`](PERF-BUDGET.md).
 - **Debugger** (bm Code): F8 puts a breakpoint on the line, F5 tries the game, which stops
   there and shows the variables and the stack; F10 the next line, F8 into a call, Shift+F8
   out, F5 goes on, Esc stops (back on the line). From the code `breakpoint("why")` stops the
@@ -878,14 +927,41 @@ with `BMHOST_NET_ID=0` and `1` are two consoles (`make test-bmnet`).
 - **Do not write again what is there:** before writing a helper function look in bmlib
   (chapter 11); the assistant (F6) knows it.
 
+### One game, many screens
+
+One `.bm` can run on a TV (16:9) and on the RGB30 (a square panel). Do this:
+
+- **Set the design size in the header** (`--res 640x360`, or the size of your art). It is the size your game draws at. `SCREEN_W` and `SCREEN_H` start at this size.
+- **Let the kernel add the bars.** If the screen has another aspect, the kernel shows your page in the middle with black bars. You do not draw the bars.
+- **Keep the HUD in the safe area.** `safe_area()` gives `x, y, w, h, dw, dh`: the part of the screen with the aspect of your design. `lib.view()` gives the same as a table with `scale` (screen pixels of one design pixel) and `wide`, `square`, `tall`.
+- **Place the HUD with `lib.anchor`.** `lib.anchor("tr", 64, 16, 4, 4)` gives `x, y` of a 64 by 16 element at the top right of the safe area, 4 pixels from the edges. The places are `tl t tr l c r bl b br`. `lib.safe_clip()` limits the drawing to the safe area. `lib.fit(dw, dh)` gives `scale, x, y` for a layer made for another size.
+- **Lay out again in `_screen(w, h)`.** If you define this function, the runtime calls it once before `_init` and once at the start of each frame that follows a size change. Put the code that depends on the size in it. Do not read `SCREEN_W` once at load.
+- **Offer the sizes with `screen_modes()`.** It returns the `{w, h}` modes of this device and the index of the current one. Call `screen(i)` or `screen(w, h)` to change.
+
+```lua
+local lib = require "bmlib"
+local hud = {}
+
+function _screen(w, h)                    -- first mode, then after each screen()
+  hud.x, hud.y = lib.anchor("tr", 64, 16, 4, 4)
+end
+
+function _draw()
+  cls(0)
+  -- ... the game, drawn in the safe area
+  print("SCORE", hud.x, hud.y, 0xFFFFFF)
+end
+```
+
+Two header fields say where the game is made to run. `targets` lists the devices (`--targets pi,rgb30`). `aspect` lists the shapes (`--aspect wide,square,any,safe_area`; `safe_area` says the game uses `safe_area()`). The same keys exist in `bm.info` of a `.bme`. A cartridge that is not made for the device is shown **grey** in the menu with the reason. It is not hidden and not blocked: the kernel asks for a confirm before it starts. See `docs/BM-FORMAT.md` for the bytes.
+
 ## 16. Examples to start from
 
 | Game | What it shows |
 |---|---|
 | `carts/pong` | the simplest: shapes, input, sounds, saves |
 | `carts/snake` | a grid, game time, record |
-| `carts/demo` | a real PNG sprite sheet and CSV map |
-| `carts/village` | 3D models made with bm Studio and a villager animated with bm Animator (`models.bm`): `model()`, `animate()` with two animations blended, `bone3d()`, terrain without z-buffer, night with `lamp3d` and fog, pre-rendered sprites |
+| a file that is not in this repository | a real PNG sprite sheet and CSV maps (floor, height, walls), a 3D plaza with walking heroes |
 | the SDK's templates (Ctrl+N) | *Platform 2D*, *Top-down 2D* and *Shooter 2D* with bmlib and the tiles' flags; *Versus 2D*: two players on one console, punches with hitboxes and hurtboxes; *Online 2D*: a lobby and lockstep with bmnet |
 | `tests/gameapi/cart.lua` | every function of the map's layers, the tiles' flags, the named zones and their boxes, bmlib (hits, the players' screen and the split screen too), with its cases |
 | `tests/bmnet/cart.lua` | bmnet between two consoles: the lobby, sure messages with lost packets, a lockstep match, a player leaving |

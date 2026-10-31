@@ -10,6 +10,7 @@
  *   4. kernel_main(device tree).
  */
 
+#define BOOT_HEAD       0x100           /* the copy loop stays within these bytes */
 #define SCTLR_EL1_RES1  0x30d00800      /* RES1 bits, MMU/caches off, LE */
 
     .section .text.boot, "ax"
@@ -39,14 +40,32 @@ entry:
     and     x3, x3, #~7
     cmp     x2, x1
     b.hi    copy_down
-copy_up:                            /* destination below the source: forward */
+copy_up:                            /* destination below the source: forward. The loop sits in the
+                                     * first BOOT_HEAD bytes: they are copied first, then the loop
+                                     * goes on from its copy at the link address, so the copy never
+                                     * overwrites the code that runs it (QEMU virt loads us above) */
+    mov     x6, x3
+    mov     x7, #BOOT_HEAD
+    cmp     x3, x7
+    csel    x3, x3, x7, lo
     mov     x4, #0
-1:  ldr     x5, [x1, x4]
+copy_up_loop:
+    ldr     x5, [x1, x4]
     str     x5, [x2, x4]
     add     x4, x4, #8
     cmp     x4, x3
-    b.lo    1b
-    b       copied
+    b.lo    copy_up_loop
+    cmp     x3, x6
+    b.eq    copied
+copy_up_end:
+    mov     x3, x6
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    isb
+    ldr     x7, =copy_up_loop
+    br      x7
+    .globl  copy_up_end             /* kernel.ld: ASSERT(copy_up_end - _start <= BOOT_HEAD) */
 copy_down:                          /* destination above: backward (overlap) */
     mov     x4, x3
 1:  sub     x4, x4, #8
@@ -65,6 +84,8 @@ relocated:
     /* 2. EL2 -> EL1 */
     mrs     x0, CurrentEL
     lsr     x0, x0, #2
+    ldr     x1, =a64_boot_el        /* the EL we were started at: QEMU's PSCI conduit is SMC at EL2, HVC at EL1 */
+    str     x0, [x1]
     cmp     x0, #2
     b.ne    at_el1
     mov     x0, #(1 << 31)          /* HCR_EL2.RW: EL1 runs AArch64 */
@@ -121,3 +142,9 @@ at_el1:
     b       3b
 
     .ltorg
+
+    .section .data
+    .globl  a64_boot_el
+    .balign 8
+a64_boot_el:
+    .quad   0

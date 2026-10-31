@@ -26,6 +26,7 @@
  * console need: drawing, map, text, lighting, buttons, notes; prompt()
  * draws a plain chip. timeslice() does nothing: a coroutine runs through.
  */
+#include <time.h>
 #include "bm/bm.h"
 #include "bm/gfx16.h"
 #include "audio/synth.h"
@@ -67,10 +68,13 @@ static int oval(lua_State *L, int idx, int def) { return lua_isnoneornil(L, idx)
 static float fnum(lua_State *L, int idx, float def) { return (float)luaL_optnumber(L, idx, def); }
 
 static int l_cls(lua_State *L)      { g16_cls(&rt.g, col(L, 1, 0)); return 0; }
-static int l_pset(lua_State *L)     { g16_pset(&rt.g, ival(L, 1), ival(L, 2), col(L, 3, 0xFFFFFF)); return 0; }
-static int l_line(lua_State *L)     { g16_line(&rt.g, ival(L, 1), ival(L, 2), ival(L, 3), ival(L, 4), col(L, 5, 0xFFFFFF)); return 0; }
-static int l_rect(lua_State *L)     { g16_rect(&rt.g, ival(L, 1), ival(L, 2), ival(L, 3), ival(L, 4), col(L, 5, 0xFFFFFF)); return 0; }
-static int l_rectfill(lua_State *L) { g16_rectfill(&rt.g, ival(L, 1), ival(L, 2), ival(L, 3), ival(L, 4), col(L, 5, 0xFFFFFF)); return 0; }
+/* what a frame asks of the 2D (for the GPU's share of the draw): the calls, and the pixels of rectangles and sprites */
+static long c_shape, c_rectfill, c_rect_px, c_spr, c_spr_px, c_sspr, c_sspr_px, c_map_calls, c_map_tiles, c_text, c_chars;
+
+static int l_pset(lua_State *L)     { c_shape++; g16_pset(&rt.g, ival(L, 1), ival(L, 2), col(L, 3, 0xFFFFFF)); return 0; }
+static int l_line(lua_State *L)     { c_shape++; g16_line(&rt.g, ival(L, 1), ival(L, 2), ival(L, 3), ival(L, 4), col(L, 5, 0xFFFFFF)); return 0; }
+static int l_rect(lua_State *L)     { c_shape++; g16_rect(&rt.g, ival(L, 1), ival(L, 2), ival(L, 3), ival(L, 4), col(L, 5, 0xFFFFFF)); return 0; }
+static int l_rectfill(lua_State *L) { c_rectfill++; c_rect_px += (long)ival(L, 3) * ival(L, 4); g16_rectfill(&rt.g, ival(L, 1), ival(L, 2), ival(L, 3), ival(L, 4), col(L, 5, 0xFFFFFF)); return 0; }
 static int l_circ(lua_State *L)     { g16_circ(&rt.g, ival(L, 1), ival(L, 2), ival(L, 3), col(L, 4, 0xFFFFFF)); return 0; }
 static int l_circfill(lua_State *L) { g16_circfill(&rt.g, ival(L, 1), ival(L, 2), ival(L, 3), col(L, 4, 0xFFFFFF)); return 0; }
 static int l_camera(lua_State *L)   { g16_camera(&rt.g, oval(L, 1, 0), oval(L, 2, 0)); return 0; }
@@ -86,6 +90,8 @@ static int l_pget(lua_State *L)
 
 static int l_spr(lua_State *L)
 {
+    c_spr++;
+    c_spr_px += (long)oval(L, 4, 1) * oval(L, 5, 1) * 64;
     g16_spr(&rt.g, &rt.sheet, ival(L, 1), ival(L, 2), ival(L, 3), oval(L, 4, 1), oval(L, 5, 1),
             lua_toboolean(L, 6), lua_toboolean(L, 7));
     return 0;
@@ -93,6 +99,8 @@ static int l_spr(lua_State *L)
 
 static int l_sspr(lua_State *L)
 {
+    c_sspr++;
+    c_sspr_px += (long)ival(L, 3) * ival(L, 4);
     lua_Number zoom = luaL_optnumber(L, 9, 1);
     if (zoom == 1)
         g16_sspr(&rt.g, &rt.sheet, ival(L, 1), ival(L, 2), ival(L, 3), ival(L, 4), ival(L, 5), ival(L, 6),
@@ -105,6 +113,14 @@ static int l_sspr(lua_State *L)
 
 static int l_map(lua_State *L)
 {
+    c_map_calls++;
+    {
+        const int cx = ival(L, 1), cy = ival(L, 2), cw = oval(L, 5, rt.map.w), ch = oval(L, 6, rt.map.h);
+        for (int yy = cy; yy < cy + ch; yy++)
+            for (int xx = cx; xx < cx + cw; xx++)
+                if (xx >= 0 && yy >= 0 && xx < rt.map.w && yy < rt.map.h && rt.map.cells[yy * rt.map.w + xx])
+                    c_map_tiles++;
+    }
     g16_map(&rt.g, &rt.sheet, &rt.map, ival(L, 1), ival(L, 2), oval(L, 3, 0), oval(L, 4, 0),
             oval(L, 5, rt.map.w), oval(L, 6, rt.map.h));
     return 0;
@@ -132,6 +148,8 @@ static int l_print(lua_State *L)
     int scale = oval(L, 5, 1);
     if (scale > 8) scale = 8;
     const char *s = luaL_tolstring(L, 1, NULL);
+    c_text++;
+    c_chars += (long)strlen(s);
     lua_pushinteger(L, g16_text_scaled(&rt.g, x, y, s, c, scale));
     return 1;
 }
@@ -165,7 +183,22 @@ static int l_lastinput(lua_State *L) { lua_pushstring(L, "pad"); return 1; }
 /* no typed keys on the PC's bot */
 static int l_keyp(lua_State *L) { lua_pushnil(L); return 1; }
 
-static int btn_index(lua_State *L) { return (int)luaL_checkinteger(L, 1); }
+/* a button is a number, or its name from docs/api/input.md; "ok" is A and "back" is B (the
+   RGB30 and keyboard mapping). An unknown name is -1: the button is never down */
+static int btn_index(lua_State *L)
+{
+    static const char *const names[] = { "left", "right", "up", "down", "a", "b", "x", "y",
+                                         "start", "select", "l1", "r1" };
+    if (lua_type(L, 1) == LUA_TSTRING) {
+        const char *s = lua_tostring(L, 1);
+        if (!strcmp(s, "ok")) return 4;
+        if (!strcmp(s, "back")) return 5;
+        for (int i = 0; i < 12; i++)
+            if (!strcmp(s, names[i])) return i;
+        return -1;
+    }
+    return (int)luaL_checkinteger(L, 1);
+}
 
 static int l_btn(lua_State *L)
 {
@@ -206,6 +239,20 @@ static int l_log(lua_State *L)
 
 static int l_quit(lua_State *L) { (void)L; rt.quit = 1; return 0; }
 static int l_nothing(lua_State *L) { (void)L; return 0; }
+/* cart_config(key): the keys of bm/config.txt come from the environment here (yharnam_autoplay: YHARNAM_AUTOPLAY) */
+static int l_cart_config(lua_State *L)
+{
+    char name[96];
+    size_t n = 0;
+    for (const char *k = luaL_checkstring(L, 1); *k && n < sizeof name - 1; k++)
+        name[n++] = (*k >= 'a' && *k <= 'z') ? (char)(*k - 32) : *k;
+    name[n] = 0;
+    const char *v = getenv(name);
+    if (v && *v) lua_pushstring(L, v);
+    else lua_pushnil(L);
+    return 1;
+}
+
 
 /* ---- sound */
 static unsigned voice_arg(lua_State *L) { return (unsigned)luaL_checkinteger(L, 1) % SYNTH_VOICES; }
@@ -351,10 +398,25 @@ static int l_fades(lua_State *L)
     return 1;
 }
 
+/* the host time of a frame's parts: the draw, and inside it the light (dark_begin, glow, dark_end) */
+static double now_us(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1e6 + (double)t.tv_nsec / 1e3;
+}
+static double t_draw, t_light, t_fade;
+static long n_glow, n_lit;
+
 static int l_dark_begin(lua_State *L)
 {
+    const double t0 = now_us();
     fade_ready(L);
+    if (g16_fade_set_step(&rt.fade, (int)luaL_optinteger(L, 2, 1)) != 0)
+        return luaL_error(L, "not enough memory for lighting");
     g16_fade_clear(&rt.fade, (int)luaL_optinteger(L, 1, 0));
+    n_lit++;
+    t_light += now_us() - t0;
     return 0;
 }
 
@@ -362,17 +424,23 @@ static int l_glow(lua_State *L)
 {
     if (!rt.fade.lv)
         return luaL_error(L, "glow() before dark_begin()");
+    const double t0 = now_us();
     const float d = fnum(L, 5, 0.5f);
+    n_glow++;
     g16_fade_glow(&rt.fade, (int)floorf(fnum(L, 1, 0)) - rt.g.cam_x, (int)floorf(fnum(L, 2, 0)) - rt.g.cam_y,
                   (int)fnum(L, 3, 32), (int)luaL_checkinteger(L, 4), (int)(d * 256));
+    t_light += now_us() - t0;
     return 0;
 }
 
 static int l_dark_end(lua_State *L)
 {
     (void)L;
+    const double t0 = now_us();
     if (rt.fade.lv)
         g16_fade_apply(&rt.g, &rt.fade);
+    t_fade += now_us() - t0;
+    t_light += now_us() - t0;
     return 0;
 }
 
@@ -382,7 +450,7 @@ static const luaL_Reg api[] = {
     { "clip", l_clip }, { "spr", l_spr }, { "sspr", l_sspr }, { "map", l_map }, { "mget", l_mget },
     { "mset", l_mset }, { "print", l_print }, { "font", l_font }, { "prompt", l_prompt },
     { "lastinput", l_lastinput }, { "keyp", l_keyp }, { "btn", l_btn }, { "btnp", l_btnp }, { "pad", l_pad }, { "time", l_time },
-    { "stat", l_stat }, { "log", l_log }, { "quit", l_quit }, { "timeslice", l_nothing },
+    { "stat", l_stat }, { "log", l_log }, { "quit", l_quit }, { "cart_config", l_cart_config }, { "timeslice", l_nothing },
     { "note", l_note }, { "noteoff", l_noteoff }, { "freq", l_freq }, { "envelope", l_envelope },
     { "duty", l_duty }, { "tone", l_tone }, { "play", l_play }, { "instruments", au_lua_instruments },
     { "instrument", au_lua_instrument },
@@ -578,7 +646,10 @@ int main(int argc, char **argv)
         rt.raw = held & 0xC00;
         for (int b = 0; b < 10; b++)
             if (held >> b & 1) rt.raw |= 1u << to_pad[b];
-        if (call(L, "_update") != 0 || call(L, "_draw") != 0) return 1;
+        if (call(L, "_update") != 0) return 1;
+        const double td = now_us();
+        if (call(L, "_draw") != 0) return 1;
+        t_draw += now_us() - td;
         for (int k = 0; k < RATE / FPS; k += BLOCK) {
             unsigned m = RATE / FPS - k < BLOCK ? (unsigned)(RATE / FPS - k) : BLOCK;
             player_advance(&rt.player, m);
@@ -605,6 +676,18 @@ int main(int argc, char **argv)
         }
     }
     fprintf(stderr, "bmplay: %ld frames\n", rt.frame);
+    if (rt.frame > 0)
+        fprintf(stderr, "bmplay: 2D a frame: %.0f map tiles (%.1f map calls), %.0f spr (%.0f px), %.0f sspr (%.0f px), "
+                "%.0f rectfill (%.0f px), %.0f other shapes, %.0f print (%.0f chars)\n", (double)c_map_tiles / rt.frame,
+                (double)c_map_calls / rt.frame, (double)c_spr / rt.frame, (double)c_spr_px / rt.frame,
+                (double)c_sspr / rt.frame, (double)c_sspr_px / rt.frame, (double)c_rectfill / rt.frame,
+                (double)c_rect_px / rt.frame, (double)c_shape / rt.frame, (double)c_text / rt.frame,
+                (double)c_chars / rt.frame);
+    if (rt.frame > 0)
+        fprintf(stderr, "bmplay: host time a frame: draw %.0f us, of it light %.0f us (fade %.0f us), the rest %.0f us; "
+                "%.1f glow a frame, light in %.0f%% of the frames\n", t_draw / rt.frame, t_light / rt.frame,
+                t_fade / rt.frame, (t_draw - t_light) / rt.frame, (double)n_glow / rt.frame,
+                100.0 * n_lit / rt.frame);
     if (png) {
         FILE *f = fopen(png, "wb");
         if (f) {

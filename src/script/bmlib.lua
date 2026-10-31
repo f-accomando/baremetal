@@ -224,7 +224,7 @@ end
 
 -- The flags of the tiles (fget/fset) as bmlib reads them: a convention,
 -- the game can choose others with lib.tiles{}
-lib.SOLID, lib.PLATFORM, lib.LADDER, lib.WATER, lib.HURT = 1, 2, 4, 8, 16
+lib.SOLID, lib.PLATFORM, lib.LADDER, lib.WATER, lib.HURT, lib.TRIGGER = 1, 2, 4, 8, 16, 32
 lib.GRAVITY, lib.MAXFALL = 0.25, 6
 
 local T = { layer = 1, solid = 1, platform = 2, edge = false }
@@ -727,6 +727,177 @@ function lib.sweep(list)
   return lib.each(list, function(it) return not it.dead end)
 end
 
+----------------------------------------------------------------- entities
+
+local World = {}
+World.__index = World
+
+-- the entities of a game (the player, the foes, the bullets, the pickups) in
+-- one list. kinds = { name = { w=, h=, hp=, team=, dmg=, ttl=, layer=,
+-- update=function(e, world), draw=function(e, world), hurt=function(e, by, n),
+-- die=function(e, world) } }: an entity reads what it does not hold from its
+-- kind, so a spawn makes one table and copies nothing.
+function lib.world(kinds)
+  return setmetatable({ kinds = kinds, list = {}, meta = {}, pend = {} }, World)
+end
+
+-- a new entity of the kind with the fields in props (x, y, vx, vy, hp...).
+-- It starts to update in the next frame. Returns the entity
+function World:spawn(name, props)
+  local kind = self.kinds[name] or error("lib.world: no kind called " .. tostring(name), 2)
+  local mt = self.meta[name]
+  if not mt then
+    mt = { __index = kind }
+    self.meta[name] = mt
+  end
+  local e = setmetatable(props or {}, mt)
+  e.kind, e.age = name, 0
+  e.x, e.y, e.vx, e.vy = e.x or 0, e.y or 0, e.vx or 0, e.vy or 0
+  local list = self.busy and self.pend or self.list   -- a spawn in die waits for the end of update
+  list[#list + 1] = e
+  return e
+end
+
+-- the entities from data (a map's object layer, a wave): rows are
+-- {kind, x, y, props} or {kind = , x = , y = , ...}
+function World:load(rows)
+  for i = 1, #rows do
+    local r = rows[i]
+    local p = {}
+    local name = r.kind
+    if name == nil then
+      name, p.x, p.y = r[1], r[2], r[3]
+      if r[4] then
+        for k, v in pairs(r[4]) do p[k] = v end
+      end
+    else
+      for k, v in pairs(r) do
+        if k ~= "kind" then p[k] = v end
+      end
+    end
+    self:spawn(name, p)
+  end
+  return self
+end
+
+-- the entity leaves at the end of this update (its die function runs once)
+function World:kill(e)
+  e.dead = true
+end
+
+-- n damage to e from by: the hurt function of its kind runs, and at hp 0 it
+-- dies. While e.invuln (frames) is above 0 e is safe. Returns true if it hurt
+function World:hurt(e, n, by)
+  if e.dead or (e.invuln or 0) > 0 then return false end
+  e.hp = (e.hp or 1) - n
+  if e.hurt then e:hurt(by, n) end
+  if e.hp <= 0 then e.dead = true end
+  return true
+end
+
+-- one frame: each entity ages, moves by vx, vy, loses its ttl and runs the
+-- update function of its kind; the dead leave (die runs once for each)
+function World:update()
+  local list = self.list
+  for i = 1, #list do
+    local e = list[i]
+    if not e.dead then
+      e.age = e.age + 1
+      e.x, e.y = e.x + e.vx, e.y + e.vy
+      if e.invuln and e.invuln > 0 then e.invuln = e.invuln - 1 end
+      if e.ttl then
+        e.ttl = e.ttl - 1
+        if e.ttl <= 0 then e.dead = true end
+      end
+      if e.update and not e.dead then e:update(self) end
+    end
+  end
+  self.busy = true
+  lib.each(list, function(e)
+    if not e.dead then return true end
+    if e.die and not e.died then
+      e.died = true
+      e:die(self)
+    end
+    return false
+  end)
+  self.busy = false
+  local pend = self.pend
+  for i = 1, #pend do
+    list[#list + 1] = pend[i]
+    pend[i] = nil
+  end
+end
+
+-- the contacts of one frame by team: each entity with dmg (a bullet, a
+-- blade) hurts each entity of another team that has hp and a box, once a
+-- frame; an attacker with e.pierce does not die by it. No table is made.
+-- Returns the number of hits
+function World:fight()
+  local list, hits = self.list, 0
+  for i = 1, #list do
+    local a = list[i]
+    local d = a.dmg
+    if d and not a.dead and a.w then
+      for j = 1, #list do
+        local b = list[j]
+        if i ~= j and not b.dead and b.hp and b.w and b.team ~= a.team
+            and lib.overlap(a.x, a.y, a.w, a.h, b.x, b.y, b.w, b.h) then
+          if self:hurt(b, d, a) then
+            hits = hits + 1
+            if not a.pierce then
+              a.dead = true
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+  return hits
+end
+
+-- the first live entity of the kind (name is the kind's name), nil if none
+function World:find(name)
+  local list = self.list
+  for i = 1, #list do
+    local e = list[i]
+    if not e.dead and e.kind == name then return e end
+  end
+end
+
+-- how many live entities of the kind (name is the kind's name)
+function World:count(name)
+  local c, list = 0, self.list
+  for i = 1, #list do
+    local e = list[i]
+    if not e.dead and e.kind == name then c = c + 1 end
+  end
+  return c
+end
+
+-- every entity with a draw function, the lower layers first (kind.layer, 0
+-- if missing); entities keep their order inside a layer
+function World:draw()
+  local list = self.list
+  local top = 0
+  for i = 1, #list do
+    local l = list[i].layer or 0
+    if l > top then top = l end
+  end
+  for layer = 0, top do
+    for i = 1, #list do
+      local e = list[i]
+      if e.draw and (e.layer or 0) == layer then e:draw(self) end
+    end
+  end
+end
+
+-- every entity goes (no die function runs)
+function World:clear()
+  self.list = {}
+end
+
 ----------------------------------------------------------------- particles
 
 local Parts = {}
@@ -798,6 +969,157 @@ end
 
 function Parts:count() return #self.list end
 function Parts:clear() self.list = {} end
+
+----------------------------------------------------------------- particles3d
+
+local P3 = {}
+P3.__index = P3
+
+function lib.particles3d(maxn)
+  particles(maxn or 1024)
+  return setmetatable({}, P3)
+end
+
+function P3:add(x, y, z, vx, vy, vz, life, color)
+  return particles_add(x, y, z, vx, vy, vz, life, color)
+end
+
+function P3:burst(x, y, z, n, o)
+  o = o or {}
+  local speed = o.speed or 2
+  local life = o.life or 30
+  local color = o.color or 0xFFFFFF
+  local up = o.up or 0
+  for _ = 1, n do
+    local a = random() * lib.TAU
+    local u = random() * 2 - 1
+    local s = sqrt(1 - u * u)
+    local sp = speed * (0.3 + 0.7 * random())
+    self:add(x, y, z, sp * cos(a) * s, sp * (u + up), sp * sin(a) * s, life * (0.7 + 0.6 * random()), color)
+  end
+end
+
+function P3:update(gravity)
+  return particles_step(gravity or 0.02)
+end
+
+function P3:draw(radius)
+  return particles_draw(radius or 0.1)
+end
+
+function P3:count()
+  return particles_count()
+end
+
+----------------------------------------------------------------- crowd3d / batch3d
+
+local Crowd = {}
+Crowd.__index = Crowd
+
+-- Activates the high-throughput 3D pipeline on bare metal GPU:
+-- Vertex Shader 2, Command Queue 2, and frame pipelining (gpu3d_later).
+function lib.gpu3d_fast(opt)
+  opt = opt or {}
+  if gpu3d == nil then return false end
+  local vs = opt.vs ~= nil and opt.vs or 2
+  local q = opt.queue ~= nil and opt.queue or 2
+  local lat = opt.later ~= nil and opt.later or true
+  local msaa = opt.msaa or false
+  local imp = opt.impostor or nil
+  return gpu3d(true, msaa, vs, q, imp, lat)
+end
+
+-- A high-throughput instanced crowd / batch renderer with pose deduplication.
+function lib.crowd3d(mesh, o)
+  o = o or {}
+  local num_poses = o.poses or 16
+  local buckets = {}
+  for b = 1, num_poses do buckets[b] = {} end
+  return setmetatable({
+    mesh = mesh,
+    clip = o.clip or "walk",
+    poses = num_poses,
+    radius = o.radius or 1.3,
+    buckets = buckets,
+    x = {}, y = {}, z = {}, yaw = {}, scale = {}, phase = {}, flags = {},
+    count = 0,
+    time = 0,
+  }, Crowd)
+end
+
+function Crowd:add(x, y, z, yaw, scale, phase, flags)
+  local i = self.count + 1
+  self.count = i
+  self.x[i] = x or 0
+  self.y[i] = y or 0
+  self.z[i] = z or 0
+  self.yaw[i] = yaw or 0
+  self.scale[i] = scale or 1
+  self.phase[i] = phase or (i * 0.37)
+  self.flags[i] = flags or 0
+  return i
+end
+
+function Crowd:set(i, x, y, z, yaw)
+  if x then self.x[i] = x end
+  if y then self.y[i] = y end
+  if z then self.z[i] = z end
+  if yaw then self.yaw[i] = yaw end
+end
+
+function Crowd:snap_to_map(map)
+  if not map3d_height then return end
+  for i = 1, self.count do
+    self.y[i] = map3d_height(map, self.x[i], self.z[i]) or self.y[i]
+  end
+end
+
+function Crowd:clear()
+  self.count = 0
+end
+
+function Crowd:draw(t, default_flags)
+  t = t or self.time or 0
+  default_flags = default_flags or 0
+  local mesh = self.mesh
+  local radius = self.radius
+  local num_poses = self.poses
+  local buckets = self.buckets
+
+  for b = 1, num_poses do
+    local bkt = buckets[b]
+    for j = 1, #bkt do bkt[j] = nil end
+  end
+
+  local vis = visible3d
+  for i = 1, self.count do
+    local xi, yi, zi = self.x[i], self.y[i], self.z[i]
+    if not vis or vis(xi, yi + 1, zi, radius) then
+      local ph = t + self.phase[i]
+      local pidx = floor((ph % 1.0) * num_poses) + 1
+      local bkt = buckets[pidx]
+      bkt[#bkt + 1] = i
+    end
+  end
+
+  local anim = animate
+  local d3d = draw3d
+  for b = 1, num_poses do
+    local bkt = buckets[b]
+    local n = #bkt
+    if n > 0 then
+      local pose_ph = (b - 0.5) / num_poses
+      if anim and self.clip then
+        anim(mesh, self.clip, pose_ph)
+      end
+      for j = 1, n do
+        local i = bkt[j]
+        local f = self.flags[i] ~= 0 and self.flags[i] or default_flags
+        d3d(mesh, self.x[i], self.y[i], self.z[i], 0, self.yaw[i], 0, self.scale[i], f)
+      end
+    end
+  end
+end
 
 ----------------------------------------------------------------- camera
 
@@ -1073,6 +1395,56 @@ function lib.btnr(i, p, delay, rate)
   return r.n == 1 or (r.n > delay and (r.n - delay) % rate == 0)
 end
 
+-- The input standard for games (the development notes): the
+-- same actions on the same buttons in every game of a scheme. A game picks
+-- its scheme (decided by the user, 19 Oct 2026):
+--   "scroller" (default): act1 jump = ok (B on the RGB30), act2 attack = y,
+--                         act3 = the A/B button that is not ok, act4 = x
+--   "topdown":            act1 attack/interact = ok, act2 dodge = the A/B
+--                         button that is not ok, act3 = y, act4 = x
+--   "stick":              act1 = r2, act2 = l2, act3 = l1, act4 = r1 and the
+--                         face buttons ok, the other A/B, y, x as act5..act8
+-- Everywhere: confirm = "ok", cancel = "back", pause = "start"; scroller and
+-- topdown also have shoulder_l = "l1", shoulder_r = "r1". The other A/B
+-- button is "a" when controller().ok is "b", else "b" (no controller: "a").
+-- over = { scheme = "stick", act1 = "x" } picks the scheme and changes single
+-- actions: those keys are the game's declared exceptions (lib.input_exceptions,
+-- to list in its the development notes<game>.md). Returns the keymap table.
+lib.INPUT_STD = { confirm = "ok", cancel = "back", pause = "start" }
+
+function lib.input(over)
+  local t = {}
+  for k, v in pairs(lib.INPUT_STD) do t[k] = v end
+  local c = controller and controller()
+  local other = (c and c.ok == "a") and "b" or "a"
+  local scheme = over and over.scheme or "scroller"
+  if scheme ~= "stick" and scheme ~= "topdown" then scheme = "scroller" end -- a typo keeps the old default
+  if scheme == "stick" then
+    t.act1, t.act2, t.act3, t.act4 = "r2", "l2", "l1", "r1"
+    t.act5, t.act6, t.act7, t.act8 = "ok", other, "y", "x"
+  elseif scheme == "topdown" then
+    t.act1, t.act2, t.act3, t.act4 = "ok", other, "y", "x"
+    t.shoulder_l, t.shoulder_r = "l1", "r1"
+  else
+    t.act1, t.act2, t.act3, t.act4 = "ok", "y", other, "x"
+    t.shoulder_l, t.shoulder_r = "l1", "r1"
+  end
+  lib.input_scheme = scheme
+  lib.input_exceptions = {}
+  if over then
+    for k, v in pairs(over) do
+      if k ~= "scheme" then
+        t[k] = v
+        lib.input_exceptions[#lib.input_exceptions + 1] = k
+      end
+    end
+    table.sort(lib.input_exceptions)
+  end
+  if keymap then keymap(t) end          -- a host without the keymap (the tools' tests) just gets the table
+  if controls then controls(scheme) end -- restored
+  return t
+end
+
 local Menu = {}
 Menu.__index = Menu
 
@@ -1345,6 +1717,121 @@ function lib.best(k, v)
   return b, false
 end
 
+----------------------------------------------------------------- save slots
+
+local Slots = {}
+Slots.__index = Slots
+
+-- the game's saves in progress. Slot 1 of the cartridge stays for lib.store
+-- (settings and records); lib.slots() gives the slots 2..8 as slots 1..7:
+-- S:get(i), S:put(i, t), S:used(i), S:del(i), S:list(). The functions of
+-- the system (save, saved, saves, delsave) can be replaced in api (tests)
+function lib.slots(api)
+  api = api or {}
+  return setmetatable({ n = 7, api = api }, Slots)
+end
+
+local function slot_id(self, i)
+  if type(i) ~= "number" or i < 1 or i > self.n or i % 1 ~= 0 then
+    error("lib.slots: slot " .. tostring(i) .. " is not between 1 and " .. self.n, 3)
+  end
+  return i + 1
+end
+
+-- the table saved in slot i, or nil
+function Slots:get(i)
+  return (self.api.saved or saved)(slot_id(self, i))
+end
+
+-- saves table t in slot i (when a match ends, not in every frame); true, or false and the reason
+function Slots:put(i, t)
+  return (self.api.save or save)(t, slot_id(self, i))
+end
+
+-- true if slot i holds a save
+function Slots:used(i)
+  local u = (self.api.saves or saves)()
+  return u[slot_id(self, i)] ~= nil
+end
+
+-- empties slot i; true, or false and the reason
+function Slots:del(i)
+  return (self.api.delsave or delsave)(slot_id(self, i))
+end
+
+-- the slots in use as { {slot = i, bytes = n}, ... } in order: for a "load game" page (makes
+-- a table: call it when the page opens, not in every frame)
+function Slots:list()
+  local u, out = (self.api.saves or saves)(), {}
+  for i = 1, self.n do
+    local b = u[i + 1]
+    if b then out[#out + 1] = { slot = i, bytes = b } end
+  end
+  return out
+end
+
+----------------------------------------------------------------- sound events
+
+local Sounds = {}
+Sounds.__index = Sounds
+
+-- the sounds of a game by name, so the rules say lib.sounds:play("hit") and the
+-- voices, notes and tunes sit in one table. events = { name = { ... } } with one of
+--   note = { voice, hz, ms, wave, vol }        a note()
+--   sfx = n [, semis =, vol =]                 sound effect n of the bank
+--   play = sound [, pnote =, ms =, vol =]      play() of an instrument or a sound of the bank
+--   tune = { {hz, frames}, ... }               a short tune on voice `voice` (3), 0 hz is a rest;
+--                                              wave (TRIANGLE), vol (120), ms (14 per frame)
+-- and, for any of them, gap (frames: it does not sound again before they pass) and prio
+-- (a tune does not cut a tune of a higher prio; 0 by default). api replaces note, sfx, play (tests).
+function lib.sounds(events, api)
+  api = api or {}
+  return setmetatable({ ev = events, api = api, t = 0, last = {}, tune = nil, ti = 0, tt = 0, tprio = 0 },
+                      Sounds)
+end
+
+-- plays the event; false if its gap is not over, the name is unknown or a tune of a higher prio runs
+function Sounds:play(name)
+  local e = self.ev[name]
+  if e == nil then return false end
+  local last = self.last[name]
+  if e.gap and last and self.t - last < e.gap then return false end
+  if e.tune then
+    if self.tune and (e.prio or 0) < self.tprio then return false end
+    self.tune, self.ti, self.tt, self.tprio, self.tev = e.tune, 1, 0, e.prio or 0, e
+  elseif e.note then
+    local n = e.note
+    local f = self.api.note or note; f(n[1], n[2], n[3], n[4], n[5])
+  elseif e.sfx then
+    local f = self.api.sfx or sfx; f(e.sfx, nil, e.semis, e.vol)
+  elseif e.play then
+    local f = self.api.play or play; f(e.play, e.pnote, e.ms, e.vol)
+  end
+  self.last[name] = self.t
+  return true
+end
+
+-- once a frame, first in _update: counts the frames and plays the next note of the tune
+function Sounds:update()
+  self.t = self.t + 1
+  local tune = self.tune
+  if not tune then return end
+  self.tt = self.tt - 1
+  if self.tt > 0 then return end
+  local n = tune[self.ti]
+  if not n then self.tune, self.tprio = nil, 0; return end
+  if n[1] > 0 then
+    local e = self.tev
+    local f = self.api.note or note; f(e.voice or 3, n[1], n[2] * (e.ms or 14), e.wave or TRIANGLE, e.vol or 120)
+  end
+  self.tt, self.ti = n[2], self.ti + 1
+end
+
+-- stops the tune
+function Sounds:stop()
+  self.tune, self.tprio = nil, 0
+end
+
 ----------------------------------------------------------------- animation and colour
 
 -- the element of frames that time t (time() if missing) shows at fps
@@ -1458,6 +1945,272 @@ end
 
 function Build:build()
   return mesh(self.v, self.f)
+end
+
+----------------------------------------------------------------- layout
+
+-- The elastic layout (R10, 2026-10-23): the screen cut into regions on the
+-- text grid, from the size the screen has now (SCREEN_W, SCREEN_H, read at
+-- each call), so an app lays itself out again when screen() changes.
+--
+--   L.rect(x, y, w, h)          a region {x, y, w, h}
+--   L.screen()                  the whole screen as a region
+--   L.split(r, "v", sizes)      r cut top to bottom ("h": left to right):
+--                               a size is pixels (16), rows or columns of
+--                               text ("3r", "20c"), or a share of what is
+--                               left ("*", "2*"); shares fall on the grid
+--                               (whole columns, whole rows) and the last one
+--                               takes the rest. Returns the regions, in order
+--   L.narrow([w])               a screen too narrow for panels side by side
+--                               (under 480 pixels): the pages stack them
+--   L.cols(r), L.rows(r)        whole columns and rows of text in r
+--   L.row(r, i)                 x, y of the text row i (1 = the first) of r
+--   L.snap(x)                   x on the next column (text starts there)
+--   L.fit(s, cols)              s cut to cols characters
+--   L.wrap(s, cols, [n])        s in lines of at most cols characters, cut
+--                               between words (at most n lines)
+--   L.inside(a, b), L.overlap(a, b)   regions (lib.inside, lib.overlap take numbers)
+--   L.side_by_side(r, [cols])   cut r into a panel (cols columns; 16 when
+--                               narrow, 30 when wide) and the work region
+--   L.on_resize(fn, [now])      fn(w, h) runs when the screen changes size;
+--                               with now it runs once at once
+--   L.poll()                    call it in _update: runs the on_resize
+--                               functions if the size changed since the last
+--                               call. Returns true then
+--   L.big_ok()                  whether the GPU draws (a screen over 640x360
+--                               is worth it only then)
+--   L.auto(), L.switch(), L.label(), L.is_big()   the suite's screen choice (bm_screen)
+--   L.want(w, h)                screen(w, h) if the size is already it, or
+--                               it is one of the console's and, over
+--                               640x360, the GPU draws. true if the screen
+--                               is that size now or from the next frame
+local Lay = {}
+lib.layout = Lay
+
+local function cell_w() return (font_size()) end
+local function cell_h() local _, h = font_size(); return h end
+
+function Lay.rect(x, y, w, h) return { x = x, y = y, w = w, h = h } end
+function Lay.screen() return Lay.rect(0, 0, SCREEN_W, SCREEN_H) end
+
+function Lay.snap(x) local cw = cell_w(); return (x + cw - 1) // cw * cw end
+function Lay.cols(r) return r.w // cell_w() end
+function Lay.rows(r) return r.h // cell_h() end
+function Lay.row(r, i) return r.x, r.y + (i - 1) * cell_h() end
+function Lay.narrow(w) return (w or SCREEN_W or 640) < 480 end
+
+function Lay.side_by_side(r, panel_cols)
+  local narrow = Lay.narrow(r.w)
+  local cols
+  if type(panel_cols) == "table" then
+    cols = narrow and (panel_cols.narrow or panel_cols[1]) or (panel_cols.wide or panel_cols[2] or 30)
+  elseif type(panel_cols) == "number" then
+    cols = (narrow and panel_cols > 20) and 16 or panel_cols
+  elseif type(panel_cols) == "string" then
+    local n = tonumber(panel_cols:match("^(%d+)c?$"))
+    cols = n and ((narrow and n > 20) and 16 or n) or (narrow and 16 or 30)
+  else
+    cols = narrow and 16 or 30
+  end
+  local out = Lay.split(r, "h", { tostring(cols) .. "c", "*" })
+  return out[1], out[2]
+end
+
+-- a size of a split: pixels, or nil and the weight of a share
+local function fixed(s)
+  if type(s) == "number" then return s end
+  local n, u = tostring(s):match("^(%d+)([rc])$")
+  if n then return tonumber(n) * (u == "r" and cell_h() or cell_w()) end
+  local k = tostring(s):match("^(%d*)%*$")
+  if not k then error("layout: a size is pixels, \"3r\", \"20c\" or \"*\": " .. tostring(s), 3) end
+  return nil, tonumber(k ~= "" and k or "1")
+end
+
+function Lay.split(r, dir, sizes)
+  local v = dir == "v"
+  if not v and dir ~= "h" then error("layout: split \"v\" or \"h\", not " .. tostring(dir), 2) end
+  local total, unit = v and r.h or r.w, v and cell_h() or cell_w()
+  local px, weight, used, shares = {}, {}, 0, 0
+  for i, s in ipairs(sizes) do
+    px[i], weight[i] = fixed(s)
+    if px[i] then used = used + px[i] else shares = shares + weight[i] end
+  end
+  if used > total then error(string.format("layout: %d pixels do not fit in %d", used, total), 2) end
+  -- the shares: whole cells of the grid, the last share the rest
+  local free, last = total - used, nil
+  for i = #sizes, 1, -1 do if not px[i] then last = i; break end end
+  local given = 0
+  for i in ipairs(sizes) do
+    if not px[i] and i ~= last then
+      px[i] = free * weight[i] // shares // unit * unit
+      given = given + px[i]
+    end
+  end
+  if last then px[last] = free - given end
+  local out, at = {}, v and r.y or r.x
+  for i in ipairs(sizes) do
+    if v then out[i] = Lay.rect(r.x, at, r.w, px[i]) else out[i] = Lay.rect(at, r.y, px[i], r.h) end
+    at = at + px[i]
+  end
+  return out
+end
+
+function Lay.fit(s, cols)
+  s = tostring(s)
+  if cols <= 0 then return "" end
+  if #s <= cols then return s end
+  return s:sub(1, cols)
+end
+
+function Lay.wrap(s, cols, n)
+  local out, line = {}, ""
+  for w in tostring(s):gmatch("%S+") do
+    local word = w
+    while #word > cols do                      -- a word longer than the line: cut
+      if line ~= "" then out[#out + 1] = line; line = "" end
+      out[#out + 1] = word:sub(1, cols)
+      word = word:sub(cols + 1)
+    end
+    if line == "" then line = word
+    elseif #line + 1 + #word <= cols then line = line .. " " .. word
+    else out[#out + 1] = line; line = word end
+  end
+  if line ~= "" or #out == 0 then out[#out + 1] = line end
+  if n and #out > n then
+    for i = #out, n + 1, -1 do out[i] = nil end
+  end
+  return out
+end
+
+function Lay.inside(a, b)
+  return a.x >= b.x and a.y >= b.y and a.x + a.w <= b.x + b.w and a.y + a.h <= b.y + b.h
+end
+
+function Lay.overlap(a, b)
+  return a.x < b.x + b.w and b.x < a.x + a.w and a.y < b.y + b.h and b.y < a.y + a.h
+end
+
+-- the size changed: screen() takes effect at the next frame, and an app that
+-- laid itself out at the old size does it again here
+local on_size, known_w, known_h = {}, SCREEN_W, SCREEN_H
+
+function Lay.on_resize(fn, now)
+  on_size[#on_size + 1] = fn
+  if now then fn(SCREEN_W, SCREEN_H) end
+  return fn
+end
+
+function Lay.poll()
+  if SCREEN_W == known_w and SCREEN_H == known_h then return false end
+  known_w, known_h = SCREEN_W, SCREEN_H
+  for _, fn in ipairs(on_size) do fn(known_w, known_h) end
+  return true
+end
+
+function Lay.big_ok()
+  return gpu3d ~= nil and (gpu3d()) == true
+end
+
+-- The suite's screen choice (bm_screen in bm/config.txt, shared by the SDK
+-- and every editor: "1280x720", "640x360", or none = 1280x720 where the GPU
+-- draws). Call auto() once when the cart loads, switch() from a menu row.
+local BIG_W, BIG_H = 1280, 720
+
+function Lay.auto()
+  local pref = cart_config and cart_config("bm_screen")
+  if pref == "1280x720" then
+    return screen(BIG_W, BIG_H) == true
+  elseif pref == nil then
+    return Lay.want(BIG_W, BIG_H)
+  end
+  return false
+end
+
+function Lay.is_big() return SCREEN_W >= BIG_W end
+
+function Lay.label()
+  return "Screen: " .. (Lay.is_big() and "1280x720" or "640x360") .. " (switch)"
+end
+
+function Lay.switch()
+  local big = not Lay.is_big()
+  if cart_config then cart_config("bm_screen", big and "1280x720" or "640x360") end
+  if big then screen(BIG_W, BIG_H) else screen(640, 360) end
+  return big
+end
+
+function Lay.want(w, h)
+  if SCREEN_W == w and SCREEN_H == h then return true end
+  if w * h > 640 * 360 and not Lay.big_ok() then return false end
+  return screen(w, h) == true
+end
+
+----------------------------------------------------------------- view
+
+-- One game, many screens (2026-10-25): the safe area (safe_area(): the part
+-- of the screen with the aspect of the cartridge's design, in the middle)
+-- as a table, and the places in it.
+--
+--   lib.view()                  {x, y, w, h, scale, wide, square, tall}: the safe
+--                               area; scale = screen pixels of one design
+--                               pixel (1.0 on the design size); wide, square,
+--                               tall: the shape of the screen (aspect())
+--   lib.anchor(where, w, h, [mx, my])   x, y of an element w by h at "tl" "t" "tr"
+--                               "l" "c" "r" "bl" "b" "br" of the safe area,
+--                               margin mx, my (0) from the edges it touches
+--   lib.safe_clip()             clip() to the safe area; returns x, y, w, h
+--   lib.fit(dw, dh)             scale, x, y: a layer made for dw by dh, whole
+--                               and in the middle of the safe area
+-- Call them in _draw, or in _screen(w, h) (the runtime calls it when the size
+-- changes), not once at load: the size can change.
+
+function lib.view()
+  local x, y, w, h, dw = safe_area()
+  local _, kind = aspect()
+  return {
+    x = x, y = y, w = w, h = h,
+    scale = dw and dw > 0 and w / dw or 1,
+    wide = kind == "wide", square = kind == "square", tall = kind == "tall",
+  }
+end
+
+local ANCHORS = {
+  tl = { 0, 0 }, t = { 1, 0 }, tr = { 2, 0 },
+  l = { 0, 1 }, c = { 1, 1 }, r = { 2, 1 },
+  bl = { 0, 2 }, b = { 1, 2 }, br = { 2, 2 },
+}
+
+local function span(a, size, area, m, edge)
+  if edge == 0 then return a + m end
+  if edge == 1 then return a + floor((area - size) / 2) end
+  return a + area - size - m
+end
+
+function lib.anchor(where, w, h, mx, my)
+  local a = ANCHORS[where]
+  if not a then
+    error("lib.anchor: where is tl t tr l c r bl b br, not " .. tostring(where), 2)
+  end
+  if type(w) ~= "number" or type(h) ~= "number" then
+    error("lib.anchor: w and h are numbers", 2)
+  end
+  local x, y, vw, vh = safe_area()
+  return span(x, w, vw, mx or 0, a[1]), span(y, h, vh, my or 0, a[2])
+end
+
+function lib.safe_clip()
+  local x, y, w, h = safe_area()
+  clip(x, y, w, h)
+  return x, y, w, h
+end
+
+function lib.fit(dw, dh)
+  if type(dw) ~= "number" or type(dh) ~= "number" or dw <= 0 or dh <= 0 then
+    error("lib.fit: dw and dh are sizes above 0", 2)
+  end
+  local x, y, w, h = safe_area()
+  local s = min(w / dw, h / dh)
+  return s, x + floor((w - dw * s) / 2), y + floor((h - dh * s) / 2)
 end
 
 return lib

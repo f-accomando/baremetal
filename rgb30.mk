@@ -47,6 +47,11 @@ COMMON  := $(ARCH) --specs=picolibc.specs $(SYSINC) -std=c11 -O2 -Wall -Wextra -
 CFLAGS   = $(COMMON) -D_DEFAULT_SOURCE -Ithird_party/lua \
            -Ithird_party/mbedtls/include -Ithird_party/lwip/src/include -Isrc/net \
            -DMBEDTLS_CONFIG_FILE='"bm_mbedtls.h"' $(WARN)
+# PI_O3_FILES: same knob as the Pi build (see Makefile); default empty, nothing changes.
+PI_O3_FILES ?=
+ifneq ($(strip $(PI_O3_FILES)),)
+$(patsubst %,$(BUILD)/k/%.o,$(PI_O3_FILES)): CFLAGS += -O3
+endif
 # -Wa,-I$(BUILD): the cartridges built here that bm_embed.S takes with .incbin
 ASFLAGS := $(ARCH) $(PLAT_DEF) $(CLEAN_DEFS) -g -Isrc -Isrc/rgb30 -Wa,-I$(BUILD)
 LDFLAGS := $(ARCH) --specs=picolibc.specs -nostartfiles -static -no-pie -Wl,--gc-sections \
@@ -56,10 +61,11 @@ LDLIBS  := -Wl,--start-group -lc -lm -lgcc -Wl,--end-group
 LUA_SRCS := $(wildcard third_party/lua/*.c)
 # the parts of bm that run unchanged on the RGB30
 SHARED_SRCS := src/gfx/console.c src/gfx/draw.c src/gfx/font8x16.c src/gfx/font8x14.c \
+               src/gfx/font16x32.c src/gfx/font24x48.c src/gfx/font_bm12x32.c src/gfx/font_bm18x48.c \
                src/gfx/font6x12.c src/lib/printf.c src/lib/crc32.c \
                src/script/luavm.c src/script/lib_bm.c \
-               src/kernel/version.c src/kernel/crumbs.c src/kernel/config.c src/fs/fat.c \
-           src/kernel/fiber.c
+               src/kernel/version.c src/kernel/crumbs.c src/kernel/config.c src/kernel/sdlog.c \
+               src/fs/fat.c src/fs/sdlock.c src/kernel/fiber.c
 # Bluetooth: the Pi's stack (HCI, L2CAP, HID, BLE + SMP) over H5 to the
 # Realtek chip; SMP's elliptic curves come from mbedTLS, and WPA2's SHA-1
 # and AES (src/rgb30/wpa.c)
@@ -79,20 +85,23 @@ NET_SRCS += src/net/stream.c src/net/tls.c src/net/http.c src/net/http_kernel.c 
             src/kernel/update.c
 # the reports to a git repository (src/kernel/reports.c, as on the Pi)
 NET_SRCS += src/net/github.c src/net/report.c src/kernel/reports.c
-# the Market (its .b16 games) and the nearby consoles, in fibers as on the Pi
+# the Market and the nearby consoles, in fibers as on the Pi
 NET_SRCS += src/net/catalog.c src/net/lan.c src/kernel/market.c
+# ai_pair (bm Agent): the relay CA checked against the pairing code
+NET_SRCS += src/net/aipair.c src/net/aiconf.c
 # the Pi's cartridges (.bm, listed for testing; show_bm=0 hides them): the runtime unchanged,
 # the Pi's drivers it calls replaced by src/rgb30/bm_port.c and bm_input.c; the menu is
 # the Pi's (menu_ui.c, its icons) at 360x360
-BM_SRCS := $(filter-out src/bm/stress.c src/bm/roombench.c,$(wildcard src/bm/*.c)) \
+BM_SRCS := $(wildcard src/bm/*.c) \
            src/audio/audio.c src/audio/synth.c src/audio/player.c src/audio/n8snd.c \
            src/audio/presets.c src/audio/lua_tone.c \
            src/ai/music.c src/ai/music_net.c src/ai/lua_music.c src/ai/nn.c src/ai/net.c \
            src/kernel/prompts.c src/kernel/pointer.c \
-           src/kernel/menu_ui.c src/kernel/icons.c src/kernel/syskeys.c src/kernel/settings.c \
+           src/kernel/menu_ui.c src/kernel/menu_bg.c src/kernel/icons.c src/kernel/syskeys.c src/kernel/settings.c src/kernel/controls.c \
+           src/kernel/sdmap.c src/kernel/sdmap_core.c src/kernel/library.c \
            src/kernel/ledstate.c src/kernel/notice.c src/kernel/splash.c src/kernel/logo_data.c
 # the Dev tab's bm SDK (RGB30) runs as a tool, as the Pi's suite: the same loop
-BM_SRCS += src/kernel/devtool.c
+BM_SRCS += src/kernel/devtool.c src/kernel/jobs.c
 SHARED_SRCS += $(BT_SRCS) $(MBEDTLS_SRCS) $(LWIP_SRCS) $(NET_SRCS) $(BM_SRCS)
 RGB30_SRCS := $(wildcard src/rgb30/*.c src/rgb30/*.S)
 KERNEL_SRCS := $(RGB30_SRCS) $(SHARED_SRCS) $(LUA_SRCS)
@@ -113,12 +122,12 @@ $(BUILD)/k/src/rgb30/bm_embed.S.o: keys/release-pub.pem keys/market-pub.pem src/
                                     $(BUILD)/sdk_b16.bm
 FORCE:
 
-# bm SDK (RGB30) (carts/sdk_b16: the SDK's .b16 edition, 360x360 and the pad), built
+# bm SDK (RGB30) (carts/sdk_b16: the SDK for the RGB30, 360x360 and the pad), built
 # into this kernel as the Pi's SDK is into its own: the Dev tab opens it as a tool
 # (src/rgb30/ui.c, src/kernel/devtool.c). Its two Lua files joined by its build.py,
 # then the cartridge, which bm_embed.S takes with .incbin. Not in the Pi's kernel.
-$(BUILD)/sdk_b16/main.lua: carts/sdk_b16/layout.lua carts/sdk_b16/main.lua carts/sdk_b16/build.py
-	$(PYTHON) carts/sdk_b16/build.py $@
+$(BUILD)/sdk_b16/main.lua: carts/sdk_b16/layout.lua carts/sdk_b16/main.lua carts/sdk_b16/build/build.py
+	$(PYTHON) carts/sdk_b16/build/build.py $@
 
 SDK_B16_RES ?= 360x360
 $(BUILD)/sdk_b16.bm: $(BUILD)/sdk_b16/main.lua carts/editor/icon.png scripts/mkbm.py
@@ -143,7 +152,7 @@ firmware:
 
 # Whole SD card image: the boot loader at the sectors the RK3566 boot ROM
 # and U-Boot's SPL read (64, 16384), then one FAT32 partition "BM" from
-# 16 MiB with extlinux.conf, kernel8.img and bm/. Write it with balenaEtcher,
+# 16 MB with extlinux.conf, kernel8.img and bm/. Write it with balenaEtcher,
 # Raspberry Pi Imager or Rufus; updates: copy kernel8.img onto the card.
 SD_FILES64 = $(BUILD)/kernel8.img=kernel8.img boot/rgb30/extlinux.conf=extlinux/extlinux.conf \
              boot/rgb30/README.txt=README.txt boot/ca.pem=bm/ca.pem \
@@ -247,7 +256,7 @@ test-audio: build/rgb30-host/audio_sim_test
 	build/rgb30-host/audio_sim_test 1188 32 31
 
 # M41: the Mali probe (mali.c) on a simulated G52, CRU and PMU
-build/rgb30-host/mali_test: tests/rgb30/mali_test.c src/rgb30/mali.c src/rgb30/mali.h src/rgb30/mali_desc.c src/rgb30/mali_desc.h src/rgb30/mali_shaders.h
+build/rgb30-host/mali_test: tests/rgb30/mali_test.c src/rgb30/mali.c src/rgb30/mali.h src/rgb30/mali_desc.c src/rgb30/mali_desc.h src/rgb30/mali_shaders.h src/rgb30/mali_variants.h
 	@mkdir -p $(dir $@)
 	$(HOSTCC) -O1 -Wall -Wextra -Isrc -Isrc/rgb30 -o $@ tests/rgb30/mali_test.c src/rgb30/mali.c src/rgb30/mali_desc.c
 

@@ -31,24 +31,25 @@ Un gioco ha l'aspetto di ciò che c'è sul suo sheet. Con bm Pixel disegni sulla
 
 ## Da sapere
 
-- Le pagine sono tre: **F1** disegno, **F2** sheet, **F3** palette. **Esc** apre il menu.
+- Le pagine sono quattro: **F1** disegno, **F2** sheet, **F3** palette, **F4** stack. **Esc** apre il menu.
 - Tieni premuto **F12**, o premi **?**, per vedere i tasti della pagina. **Tab** (sul pad **X**) apre l'elenco dei comandi della pagina.
 - Con il mouse, il mouse fa ciò che fanno i tasti.
+- In una riga di dialogo, un clic mette il cursore tra le lettere. Nella pagina della palette la rotella sposta la scelta di una riga; sopra R, G o B cambia quel valore.
 
 ## Attenzione
 
-- bm Pixel modifica lo sheet e la palette. Non dà nomi alle zone, non disegna hitbox e non imposta i flag delle tile (vedi i capitoli dedicati).
+- bm Pixel modifica lo sheet e la palette. Crea solo zone stack (F4). Non dà nomi alle altre zone, non disegna hitbox e non imposta i flag delle tile (vedi i capitoli dedicati).
 
 # Aprire un file
 
 ## Da dove partire
 
-Parti dalla scheda **Dev** del menu, oppure premi **X** sulla copertina di un gioco e scegli **Open in bm Pixel**. Se avvii bm Pixel senza file, mostra l'elenco dei file `.bm` e `.bme` che trova in `/carts` e nella radice della scheda, e dietro c'è già un nuovo sheet vuoto.
+Parti dalla scheda **Dev** del menu, oppure premi **X** sulla copertina di un gioco e scegli **Open in bm Pixel**. Se avvii bm Pixel senza file, mostra l'elenco dei progetti `.bme` di `/bme` e dei file `.bm` e `.bme` che trova in `/carts` e nella radice della scheda, e dietro c'è già un nuovo sheet vuoto.
 
 ## Progetti e giochi
 
 - Un **progetto** è un file `.bme`. Gli editor cambiano i progetti e li salvano dove sono.
-- Un **gioco** è un file `.bm` (o `.b16`). È di sola lettura. Quando ne apri uno, lo schermo dice `a game: saving makes its copy`, e salvando si scrive una copia `.BME` modificabile, mai il gioco stesso.
+- Un **gioco** è un file `.bm`. È di sola lettura. Quando ne apri uno, lo schermo dice `a game: saving makes its copy`, e salvando si scrive una copia `.BME` modificabile, mai il gioco stesso.
 - Nel file salvato cambiano solo lo sheet e la palette: codice, mappa, copertina, suoni e modelli restano come erano.
 
 ## Il menu (Esc)
@@ -77,7 +78,7 @@ Un nuovo sheet salvato con *Save as* diventa una cartuccia il cui codice si limi
 
 Lo sprite scelto, ingrandito a sinistra. A destra: i colori, lo strumento, il numero dello sprite con la sua posizione sullo sheet, lo sprite come lo disegna il gioco e, accanto, l'animazione. Una riga sotto indica la velocità e se pausa, onion skin, box e specchio sono attivi.
 
-![F1, la pagina di disegno](shots/editor-pixel-draw.png)
+!F1, la pagina di disegno
 
 La misura dello sprite è 8, 16, 32, 64 o 128 pixel: **z** passa alla misura successiva. **PgUp** e **PgDn** vanno allo sprite prima e dopo. **t** mostra o nasconde la griglia.
 
@@ -85,11 +86,31 @@ La misura dello sprite è 8, 16, 32, 64 o 128 pixel: **z** passa alla misura suc
 
 Tutto lo sheet. Le frecce scelgono uno sprite (nella misura scelta), **Enter** lo disegna. **+** e **-** fanno zoom. I fotogrammi dell'animazione sono contornati dopo lo sprite.
 
-![F2, lo sprite sheet](shots/editor-pixel-sheet.png)
+!F2, lo sprite sheet
 
 ## F3: la palette
 
 Tutti i colori, fino a 256, con i valori di rosso, verde e blu di quello scelto. Vedi il capitolo sulle palette.
+
+## F4: lo stack
+
+Una *zona stack* è una zona con *n* fette della stessa misura, una accanto all'altra sullo sheet, da sinistra a destra. La fetta 1 è la più bassa. Nella cartuccia è la riga `stack nome x y w h n`; un gioco la disegna con `zstack`. La pagina Stack mostra a sinistra una fetta, ingrandita. A destra mostra le zone stack, una fila di piccole immagini delle fette e lo stack intero che gira (`stack` con un angolo di rotazione). Lo stack legge lo sheet a ogni fotogramma: una modifica a una fetta si vede subito. Una zona `stackv` ha le fette una sotto l'altra sullo sheet, dall'alto in basso; la pagina legge e scrive tutte e due le disposizioni. La riga finisce con `h` (una accanto all'altra, `stack`) o `v` (una sotto l'altra, `stackv`).
+
+| Tasto | Azione |
+|---|---|
+| sinistra / destra | la fetta prima / dopo |
+| su / giù | la zona stack prima / dopo |
+| PgUp / PgDn | 8 fette |
+| Enter | disegna la fetta in F1 (solo fette quadrate; **F4** torna qui) |
+| k | onion skin: la fetta prima, attenuata, nei pixel vuoti di questa fetta |
+| c | copia questa fetta sulla successiva e ci va (estrusione; **Ctrl+Z** annulla) |
+| Del o x | cancella la zona (premi due volte; i pixel restano sullo sheet) |
+| n | nuova zona: nome, x, y, w, h, n, `h` o `v` (per esempio `tree 0 0 16 16 8 h`) |
+| e | modifica la zona (la stessa riga; un nome nuovo crea una zona nuova) |
+| p | lo stack gira o si ferma |
+| , e . | gira lo stack a mano |
+
+Se non esiste nessuna zona stack, **n** crea la prima. La riga parte dallo sprite scelto in F1. **Ctrl+S** scrive le zone e il numero di fette (byte 26 della zona) insieme allo sheet. La riga della zona non ha l'annulla; la copia di una fetta sì. L'onion skin disegna al massimo 600 quadratini, solo quando è attivo. Con il mouse: clic su una zona o su una piccola immagine per sceglierla, doppio clic su una piccola immagine per disegnarla, la rotella cambia fetta, trascinare sullo stack che gira lo ruota a mano, un clic sopra lo ferma o lo fa ripartire, il tasto destro apre l'elenco dei comandi. Sul pad: sinistra / destra la fetta, su / giù la zona, **A** disegna la fetta, **B** gira o ferma, **X** + sinistra / destra gira a mano, **X** (tocco) l'elenco dei comandi.
 
 ## L'anteprima delle hitbox (j)
 
@@ -99,7 +120,7 @@ Premi **j** in F1 o F2 per mostrare o nascondere i box della sezione `BOXES` del
 
 | Tasti | Azione |
 |---|---|
-| Y + sinistra / destra | cambia pagina |
+| Y + sinistra / destra | cambia pagina (F4 è una pagina) |
 | Y + B | menu |
 | Y + A | annulla |
 | Y + su / giù | lo sprite prima / dopo |
@@ -129,7 +150,9 @@ In F1 un puntatore si muove con le frecce. **Spazio** usa lo strumento. Con mati
 | l | linea |
 | u / U | rettangolo / rettangolo pieno |
 | o / O | ovale / ovale pieno |
-| m | seleziona |
+| m | seleziona un rettangolo (cancella anche una selezione a bacchetta) |
+| w | selezione a bacchetta: l'area di un colore |
+| q | vista a piastrella sì / no |
 | , e . | il colore prima / dopo |
 | x | il colore usato prima |
 | 1 - 9, 0 | i primi dieci colori |
@@ -142,10 +165,17 @@ In F1 un puntatore si muove con le frecce. **Spazio** usa lo strumento. Con mati
 | z | misura dello sprite |
 | PgUp / PgDn | sprite prima / dopo |
 | j | mostra o nasconde i box |
+| Ctrl+E | esporta un PNG o una GIF in `/docs` |
 | F6 | l'assistente: una base per uno sprite |
 | Tab | l'elenco dei comandi |
 
 Il colore 0 è trasparente.
+
+La barra dei suggerimenti in fondo alla pagina di disegno mostra solo i tasti principali: gli strumenti `b e g m w`, le forme `l u o`, `Ctrl+E PNG`, i tasti del colore, **z** e **Tab**. Gli altri tasti (`j q` e il resto) sono nell'aiuto di **F12**. La barra termina con il chip F12 keys. Fai clic su di esso, oppure tieni premuto F12, per vedere ogni tasto della pagina.
+
+## Vista a piastrella (q)
+
+Premi **q** per vedere lo sprite come una piastrella. L'anteprima a destra mostra lo sprite 3 per 3, affiancato. Vedi le giunzioni tra le copie. Il testo sotto l'anteprima dice `tile view 3x3 (q)`. Gli sprite fino a 32x32 stanno nell'anteprima. Premi di nuovo **q** per tornare indietro. Il menu ha la voce *Tile view (q)*.
 
 ## Forme e selezioni
 
@@ -160,9 +190,33 @@ Per linee, rettangoli, ovali e selezioni: premi **spazio** per fissare un angolo
 | h / v | specchia sinistra-destra / alto-basso |
 | r | ruota di un quarto |
 | Del | cancella la selezione, o tutto lo sprite |
+| Ctrl+E | esporta lo sprite, l'animazione o il foglio come PNG, oppure l'animazione come GIF |
 | Shift+w a s d | fa scorrere lo sprite di un pixel (ciò che esce rientra dall'altro lato) |
 
 I pixel trasparenti di un blocco incollato lasciano ciò che c'è sotto.
+
+### Selezione a bacchetta (w)
+
+Premi **w** e poi **spazio** su un pixel. bm Pixel seleziona l'area connessa dello stesso colore: i pixel che toccano quello scelto, in alto, in basso, a sinistra e a destra, e hanno il suo colore. Una linea tratteggiata gira intorno all'area. La riga di stato dice quanti pixel hai scelto. Ora **Ctrl+C**, **Ctrl+X**, **Del**, **Enter** (solleva), **h**, **v** e **r** agiscono solo su questi pixel. Il resto dello sprite resta. Premi **m** e seleziona un rettangolo per cancellare la selezione a bacchetta.
+
+## Esportare un PNG
+
+Premi **Ctrl+E** (menu: *Export a PNG or GIF to /docs...*) per scrivere un file PNG o un file GIF. Un elenco chiede cosa esportare:
+
+- *this sprite*: lo sprite che disegni;
+- *the animation as a PNG*: i suoi frame affiancati in una striscia;
+- *the animation as a GIF: N frames, F a second*: un'immagine animata, con un'immagine per ogni frame, nell'ordine dell'anteprima;
+- *the whole sheet*: tutto il foglio.
+
+Poi una riga chiede il nome del file e ne propone uno fatto dal nome del file. Il PNG va in `/docs` sulla scheda. I pixel di colore 0 sono trasparenti nel PNG. Il nome è 8.3 in minuscolo: lettere, cifre e `_`, e l'estensione `.png`. Se il nome ha più di 8 lettere, bm Pixel lo taglia a 8 e la riga di stato dice `name cut to 8 letters`. La riga di stato mostra `saved /docs/NOME.png` quando il file è scritto. Se l'esportazione fallisce, la riga di stato dice perché.
+
+La GIF ha queste regole:
+
+- Si ripete per sempre.
+- I pixel trasparenti restano trasparenti.
+- La velocità viene dagli fps dello sprite, quindi è la velocità dell'anteprima.
+- Il nome del file ha al massimo 8 lettere e l'estensione `.gif`. Il file va in `/docs`.
+- Una GIF contiene al massimo 255 colori. Se i frame ne hanno di più, bm Pixel li riduce a 255.
 
 ## L'assistente (F6)
 
@@ -246,7 +300,7 @@ Un box è dato dall'angolo in alto a sinistra del fotogramma, in pixel, e può u
 - In F2 sono disegnati sopra ogni fotogramma di ogni zona visibile.
 - Un box compare solo quando lo sprite su cui sei coincide con una zona del file.
 
-![F1 con i box di una zona](shots/editor-pixel-boxes.png)
+!F1 con i box di una zona
 
 ## Attenzione
 
@@ -304,7 +358,7 @@ Una risorsa è una cosa estratta da una cartuccia in un file suo. Per le immagin
 
 ## Cosa puoi fare oggi
 
-- Nella scheda **Lib** del menu, il gruppo **Images** elenca le zone di SPRITES. `docs/RISORSE.md` descrive **A** che ne apre una in bm Pixel, ma nel codice non è stato confermato. La scheda è nascosta a meno che `lib_tab=1` sia in `bm/config.txt`.
+- Il menu non ha una scheda per i file di risorse. Apri un file di risorse dagli editor.
 - Su PC, `scripts/bmres.py` estrae una zona di sprite in un `.bmi` (con i suoi box), aggiunge una risorsa a un `.bm` e converte da e verso `.png`, `.hex` e `.gpl`.
 
 ::: copy
@@ -329,9 +383,9 @@ python3 scripts/bmres.py add GAME.bm COIN.bmi
 5. Premi **b** per la matita. Muovi il puntatore con le frecce e premi **spazio**. Tieni premuto spazio e muoviti per disegnare una linea di pixel.
 6. Premi **y** per disegnare in modo speculare: ciò che disegni da un lato appare dall'altro. Premi di nuovo **y** per fermarlo.
 7. Se sbagli, premi **Ctrl+Z**.
-8. Premi **Esc**, scegli **Save as...**, scrivi un nome come `HERO.BME` e premi Enter. Lo schermo dice `saved`.
+8. Premi **Esc**, scegli **Save as...**, scrivi un nome come `hero.bme` e premi Enter. Lo schermo dice `saved`.
 
-![Il tuo primo sprite](shots/editor-pixel-first.png)
+!Il tuo primo sprite
 
 ::: try
 Disegna una moneta: un ovale pieno con **O**, poi scegli un colore più scuro e disegna il contorno con **o**.

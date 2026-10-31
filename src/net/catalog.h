@@ -14,8 +14,8 @@
 
 #define CATALOG_MAX     256             /* games */
 #define CATALOG_MAX_LEN (256 * 1024)    /* bytes of index.txt */
-/* a file of the catalog: GitHub refuses files over 100 MiB, its limit and not
- * bm's (a .bm has none; the .b16 will have its own, docs/B16.md) */
+/* a file of the catalog: GitHub refuses files over 100 MB, its limit and not
+ * bm's (a .bm has none) */
 #define CATALOG_MAX_FILE (100u << 20)
 
 typedef struct {
@@ -32,6 +32,7 @@ typedef struct {
     char license[41];
     char about[121];
     uint8_t is_app;             /* 1: an app (utility / dev tool), 0: a game */
+    uint8_t targets;            /* BM_TARGET_* bits from the line "targets N"; 0: the line is missing (old rules by name) */
     catalog_file_t file;        /* the .bm or .b16 */
     catalog_file_t cover;       /* a PNG cover */
 } catalog_game_t;
@@ -59,7 +60,7 @@ int catalog_parse(const uint8_t *index, size_t len, catalog_t *c, char *err, siz
 void catalog_free(catalog_t *c);
 /* 0 if data is the file the catalog lists (size and SHA-256). */
 int catalog_check_file(const catalog_file_t *f, const uint8_t *data, size_t len);
-/* Called, if set, between the pieces (64 KiB) of catalog_check_file's
+/* Called, if set, between the pieces (64 KB) of catalog_check_file's
  * hash: a 6 MB game's check (some 0.3 s on the Pi) gives the CPU back
  * (the Market sets fiber_slice). */
 extern void (*catalog_hash_tick)(void);

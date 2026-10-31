@@ -11,14 +11,18 @@
  *                a 640x360 one (360x360, the .b16's) or a 1280x720 one (720x720); whole on a square panel)
  *   16  u8       pixel format (1 = RGB565; 2 = XRGB8888, reserved)
  *   17  u8       section count
- *   18  u16      flags: bit 0 a project (.bme), bit 1 a .b16 edition (src/bm/project.h); the other bits
- *                are kept as they are by every writer. Nothing reads them: the kind is told by the file's
- *                extension
+ *   18  u16      flags: bit 0 a project (.bme), bit 1 a .b16 edition (src/bm/project.h), bits 2-3 the
+ *                type (game, app, utility), bit 4 BM_FLAG_COMPAT: the compatibility block at 120 is
+ *                present; the other bits are kept as they are by every writer. The kind (project,
+ *                .b16) is told by the file's extension
  *   20  u32      CRC-32 of everything after the header
  *   24  char[48] title
  *   72  char[32] author
  *   104 char[16] built from: the 8.3 name of the project a game was built from (src/bm/project.h); 0 if none
- *   120 ...      reserved (0) up to 128
+ *   120 u8[8]    compatibility block, valid only when flag bit 4 is set (else all 0 = an old file):
+ *                120 targets (BM_TARGET_*), 121 input (BM_IN_*), 122 aspect (BM_ASPECT_*),
+ *                123 needs (BM_NEED_*), 124 u16 min RAM in MB (0 = none), 126 min spec revision,
+ *                127 min screen width in units of 16 pixels. Not covered by the CRC. See bm_compat_t.
  *   128 section table: count x { u32 type, u32 offset, u32 size, u32 reserved }
  *
  * Section types:
@@ -42,9 +46,10 @@
  *            of each face that far inwards, so the next tile of the sheet
  *            never shows along the edges), u32 reserved (0), then per model:
  *              char[16] name (UTF-8, zero padded; unique in the section),
- *              u16 vertices (1..65535; 4096 before 2026-10-05, M39), u16 faces
+ *              u16 vertices (1..65535; 4096 before 2026-10-05, bm3d 5.0), u16 faces
  *              (1..65535; 16384 before), u32 flags (bit 0
- *              "lit": the light is baked in the faces, see below; else 0),
+ *              "lit": the light is baked in the faces, see below; bits 1-3:
+ *              the map class, BM_MODEL_SOLID, _FLOOR, _DECOR; else 0),
  *              vertices x { f32 x, y, z }: y up, like mesh();
  *              faces x { u16 a, b, c: 0-based vertex indices, clockwise
  *                        seen from the side that shows (as for mesh());
@@ -71,7 +76,7 @@
  *              vertices x u8: the bone each vertex of the model follows,
  *              zero padded to a multiple of 4,
  *              clips x { char[16] name; u16 keys (1..1024); u8 mode (0
- *                        linear, 1 smooth, 2 step); u8 flags (bit 0: loop);
+ *                        linear, 1 smooth, 2 step, 3 ease-in, 4 ease-out); u8 flags (bit 0: loop);
  *                        f32 length (seconds); keys x { f32 time (rising,
  *                        0..length); bones x { f32 q[4] (x, y, z, w: the
  *                        turn, relative to the parent), f32 t[3] (a move) } } }.
@@ -80,7 +85,7 @@
  *   (6 and 7 were MESH and ANIM in the first files of bm Studio: a type 6
  *   section that is not a sound bank ("BMAU") is still read as MESH, a type
  *   7 one as ANIM; they are written as 8 and 9.)
- *   10 INFO  about the file and its parts, UTF-8 text of at most 16 KiB:
+ *   10 INFO  about the file and its parts, UTF-8 text of at most 16 KB:
  *            lines "key: value" (name, desc, author, license as an SPDX id,
  *            version, tags separated by commas, origin = the SHA-256 of the
  *            resource file it came from, date YYYY-MM-DD), then a block for
@@ -140,8 +145,13 @@
  * the system keys or the config keys gain something a cartridge can depend on. A cartridge says what it needs with
  * the INFO key "spec: N" (bm.info); an older kernel then refuses it with a message instead of failing half way.
  * Revision 1: everything of 2026-10-11 (container v1, sections 1-14, resource files, projects, the .b16 marker).
- * Revision 2 (2026-10-13): 720x720 cartridges, shot(), the INFO key "spec", tool names reserved against games. */
-#define BM_SPEC_REV 2
+ * Revision 2 (2026-10-13): 720x720 cartridges, shot(), the INFO key "spec", tool names reserved against games.
+ * Revision 3 (2026-10-17): the cartridge type in bits 2-3 of the flags (bm.info "type"), the /bme folder for projects.
+ * Revision 4 (2026-10-22): the web API for cartridges (web_get, web_poll, web_info, web_body, web_cancel, image_load, file_write), the folder bm/web.
+ * Revision 5 (2026-10-25): safe_area(), aspect() and the 720x405 screen() mode.
+ * Revision 6 (2026-10-29): a chat model (ai_ask, ai_reply, ai_info, ai_setup, ai_pair, ai_pair_finish), the protected
+ * files bm/ai.txt and bm/ca-user.pem. */
+#define BM_SPEC_REV 6
 
 #include <stddef.h>
 #include <stdint.h>
@@ -163,6 +173,8 @@
 #define BM_SEC_LAYERS      12
 #define BM_SEC_FLAGS       13
 #define BM_SEC_BOXES       14
+#define BM_SEC_DATA        15              /* named blobs of an app: the kernel reads them (bm_data_find) */
+#define BM_SEC_PREVIEW     16              /* a turning picture of a resource file (below); a kernel that does not know it ignores it */
 #define BM_SEC_OLD_ANIM    7               /* the first files of bm Studio (see above) */
 #define BM_LAYERS_MAX      8               /* map layers, the MAP section counted */
 #define BM_LAYER_NAME      16              /* bytes of a layer's name in LAYERS */
@@ -172,6 +184,9 @@
 #define BM_FRAMES_MAX      16
 #define BM_BOXES_MAX       4096            /* boxes of a BOXES section */
 #define BM_BOX_SIZE        28              /* bytes of a box */
+#define BM_DATA_MAX        64              /* blobs of a DATA section */
+#define BM_DATA_NAME       16              /* bytes of a blob's name in DATA */
+#define BM_DATA_ENTRY      24              /* bytes of a blob's entry: name[16], u32 offset, u32 size */
 
 /* the kinds of resource file (offset 12 of a "BMRES" header) */
 enum { BM_RES_CART, BM_RES_MODEL, BM_RES_IMAGE, BM_RES_SOUND, BM_RES_MAP, BM_RES_PALETTE, BM_RES_KIT,
@@ -181,17 +196,56 @@ enum { BM_RES_CART, BM_RES_MODEL, BM_RES_IMAGE, BM_RES_SOUND, BM_RES_MAP, BM_RES
  * 2026-10-04 (mkbm.py writes 88x88, the menu's card), 128x80 before: the
  * menu fits any shape (menu_load_cover) */
 #define BM_COVER_SIZE      88
+/* PREVIEW (16), only in a resource file (a COVER is the still picture): u16 frame w, u16 frame h, u16 frames
+ * (1..64), u16 fps, u16 colours (1..256), u16 reserved (0), colours x { u8 r, g, b } (colour 0 is clear), then
+ * frames x w x h palette numbers, frame after frame, row by row. A model turns once round in `frames`. Frames
+ * up to 256x256. */
 #define BM_MODEL_NAME      16              /* bytes of a model name in MESH */
-#define BM_MODEL_VERTS     65535           /* M39 (bm3d 5.0): 4096 and 16384 before */
+#define BM_MODEL_VERTS     65535           /* bm3d 5.0: 4096 and 16384 before */
 #define BM_MODEL_FACES     65535
 #define BM_MODELS_MAX      256
 #define BM_MESH_FACE       24              /* bytes of a face in MESH */
+/* Model flags (the u32 in the model header, bit 0 is "lit"). The map class says what a model is for in a map
+ * (a bm SDK 3D map, a .bmk kit): at most one of the three; none = not said. A kernel that does not know them
+ * ignores them. */
+#define BM_MODEL_SOLID     2u              /* blocks, as a wall does */
+#define BM_MODEL_FLOOR     4u              /* can be walked on */
+#define BM_MODEL_DECOR     8u              /* no collision */
 #define BM_BONES_MAX       64
 #define BM_CLIPS_MAX       255
 #define BM_KEYS_MAX        1024
 #define BM_BONE_SIZE       44              /* bytes of a bone in ANIM */
 #define BM_POSE_SIZE       28              /* bytes of one bone of a key */
 
+/* The compatibility block of the header (bytes 120..127, flag bit 4). docs/BM-FORMAT.md. */
+#define BM_FLAG_COMPAT      16              /* u16 at 18: the block at 120 is present */
+#define BM_COMPAT_AT        120             /* offset of the block in the header */
+#define BM_TARGET_PI        1               /* targets: the Pi Zero W (kernel.img) */
+#define BM_TARGET_RGB30     2               /* targets: the RGB30 (kernel8.img) */
+#define BM_TARGET_ALL       (BM_TARGET_PI | BM_TARGET_RGB30)
+#define BM_IN_PAD           1               /* input: playable with a pad alone */
+#define BM_IN_KEYBOARD      2               /* input: playable with a keyboard */
+#define BM_IN_TEXT          4               /* input: needs real text entry */
+#define BM_IN_MOUSE         8               /* input: uses mouse() as the main control */
+#define BM_IN_MOUSE_OPT     16              /* input: uses the mouse, works without it */
+#define BM_ASPECT_WIDE      1               /* aspect: made for 16:9 */
+#define BM_ASPECT_SQUARE    2               /* aspect: made for 1:1 */
+#define BM_ASPECT_ANY       4               /* aspect: elastic layout */
+#define BM_ASPECT_SAFE      8               /* aspect: uses safe_area() */
+#define BM_NEED_3D          1               /* needs: 3D */
+#define BM_NEED_AUDIO       2               /* needs: audio */
+#define BM_NEED_NET         4               /* needs: network */
+#define BM_NEED_MOUSE_HW    8               /* needs: a mouse device */
+typedef struct {
+    uint8_t declared;               /* 1 if flag bit 4 is set: the fields below are the file's own */
+    uint8_t targets;                /* BM_TARGET_* bits */
+    uint8_t input;                  /* BM_IN_* bits (0 = not declared) */
+    uint8_t aspect;                 /* BM_ASPECT_* bits (0 = not declared) */
+    uint8_t needs;                  /* BM_NEED_* bits */
+    uint16_t min_ram_mib;           /* 0 = none */
+    uint8_t min_spec;               /* 0 = none */
+    uint8_t min_w16;                /* minimum screen width / 16, 0 = none */
+} bm_compat_t;
 typedef struct {
     char title[49];
     char author[33];
@@ -225,6 +279,7 @@ typedef struct {
     uint8_t nlayers;                /* the map's layers: 0 without a map, else 1..8 */
     const uint8_t *flags;           /* FLAGS: the bytes, row by row, or NULL */
     uint16_t flags_per_row, flags_rows;
+    bm_compat_t compat;             /* the header's compatibility block (old rules for an old file) */
 } bm_cart_t;
 
 /* A zone of the SPRITES section. */
@@ -232,6 +287,8 @@ typedef struct {
     char name[BM_MODEL_NAME + 1];
     uint16_t x, y, w, h;            /* the first frame, sheet pixels */
     uint8_t frames, fps;            /* the next frames: w x h boxes to the right */
+    uint8_t slices;                 /* 0 for a plain zone; 2..255 for a stack zone (w x h slices to the right) */
+    uint8_t vertical;               /* 1 for a stack zone whose slices lie one under the other (stackv) */
 } bm_zone_t;
 
 /* A box of the BOXES section. */
@@ -256,7 +313,7 @@ typedef struct {
 } bm_model_t;
 
 int bm_parse(const uint8_t *data, size_t len, bm_cart_t *c, char *err, size_t errlen);
-/* Called every 64 KiB of the CRC check, if set (the loading screen, the
+/* Called every 64 KB of the CRC check, if set (the loading screen, the
  * menu's fibers); nonzero stops the parse (it fails: "stopped"). */
 extern int (*bm_parse_tick)(void);
 /* bm_parse for a cartridge or a resource file ("BMRES": no code, the
@@ -277,6 +334,13 @@ int bm_box(const bm_cart_t *c, int i, bm_box_t *b);
 int bm_sprites_check(const uint8_t *p, uint32_t size);
 /* Checks a BOXES section: number of boxes (1..4096), or -1 if broken. */
 int bm_boxes_check(const uint8_t *p, uint32_t size);
+
+/* Checks a DATA section: the number of blobs (1..64), or -1 if it is broken. */
+int bm_data_check(const uint8_t *p, uint32_t size);
+
+/* The blob `name` of the DATA section of the .bm file d (len bytes): 0 and its place, or -1 (no such blob, no DATA
+ * section, a broken file). It does not check the CRC of the file: the caller owns the file. */
+int bm_data_find(const uint8_t *d, size_t len, const char *name, const uint8_t **blob, uint32_t *blob_len);
 /* A value of INFO: `key` in the block of the part "[type name]", else on
  * the file's own lines (type NULL: only those). 1 if found, the value in
  * out (cut to n - 1 bytes). */
@@ -348,6 +412,49 @@ float bm_clip_key(const bm_clip_t *c, int nbones, int k, float (*q)[4], float (*
 /* 1 if these first 8 bytes are the magic of a .bm cartridge. */
 int bm_is_cart(const void *head8);
 
+/* Reads the block from a header (at least 128 bytes). An old file (bit 4 clear) gives declared = 0 and
+ * the old rules: targets = Pi for a .bm, Pi + RGB30 for a .b16 (flag bit 1); the other fields are 0.
+ * A set bit 4 with targets 0 is invalid and reads as the old rules too. */
+void bm_compat_read(const uint8_t *head, bm_compat_t *out);
+/* Writes `in` into a header (at least 128 bytes): the bytes 120..127 and flag bit 4. A `declared` of 0 clears both. */
+void bm_compat_write(uint8_t *head, const bm_compat_t *in);
+/* The compatibility block from the INFO keys of the cartridge file `data` (the keys of bm.info: targets, input,
+ * aspect, needs, min_ram, min_spec, min_width; the same syntax and rules as scripts/mkbm.py). Returns 1 and fills
+ * `out` (declared = 1) if the INFO has `targets`; 0 and a zeroed `out` if it has none of the keys (the caller keeps the
+ * block of the file); -1 and a message in `err` for a bad name or number, or a key of the block without `targets`.
+ * Reads the section table only: no CRC, no parse. */
+int bm_compat_from_info(const uint8_t *data, size_t len, bm_compat_t *out, char *err, size_t errlen);
+/* 1 if a cartridge with these targets may run on the kernel `kernel` (BM_TARGET_PI or BM_TARGET_RGB30). */
+static inline int bm_compat_runs_on(const bm_compat_t *c, unsigned kernel) { return (c->targets & kernel) != 0; }
+
+/* The compatibility policy: what a kernel does with a cartridge (the development notes; the C table
+ * src/bm/compat_table.h is made from it by scripts/mkcompat.py). Both kernels, the menu and the Market, ask here. */
+enum { BM_EDITION_BM, BM_EDITION_B16, BM_EDITION_PROJECT, BM_EDITION_ANY };     /* flag bit 0 = project, bit 1 = b16 */
+enum { BM_ACT_SHOW, BM_ACT_GREY, BM_ACT_HIDE };
+#define BM_REASON_MAX 31                /* characters of a reason: "Not here: " and the reason fit the 41 of the RGB30 line */
+typedef struct {
+    uint8_t edition;                    /* BM_EDITION_* of the header flags (the extension is not used) */
+    uint8_t declared;                   /* the header has the compatibility block */
+    uint8_t targets;                    /* BM_TARGET_* bits, with the old rules for an old file */
+    uint8_t uses_3d;                    /* the file has a MESH section */
+    uint16_t w, h;                      /* the size in the header */
+    uint32_t audio_bytes;               /* bytes of the AUDIO sections */
+    uint32_t size_bytes;                /* the whole file */
+} bm_compat_facts_t;
+/* The facts of a file from its first bytes: the header and as much of the section table as `n` holds (a
+ * table cut short counts only the sections it shows). `file_size` is the size of the whole file. n < 128: all 0.
+ * `name` (may be NULL) is the file name: as everywhere in the kernel, the extension (.bm, .b16, .bme) tells the
+ * edition; without a known extension the header flags do (an old .b16 may lack the flag bit). */
+void bm_compat_facts(const uint8_t *head, size_t n, uint32_t file_size, const char *name, bm_compat_facts_t *f);
+/* The facts of a Market entry, which has no header yet: the edition from its file name, the size, nothing declared. */
+void bm_compat_facts_named(int b16, uint32_t file_size, bm_compat_facts_t *f);
+/* What `kernel` (BM_TARGET_PI or BM_TARGET_RGB30) does with a file: BM_ACT_*. market = 1 asks for the Market list.
+ * *reason (may be NULL) is the short text of the rule that matched (at most BM_REASON_MAX characters), *rule its
+ * number from 1 in the table (0: the kernel's default row). An unknown kernel shows. */
+int bm_compat_classify(const bm_compat_facts_t *f, unsigned kernel, int market, const char **reason, int *rule);
+/* The number of rules of the table (a host test compares it with the toml). */
+int bm_compat_rule_count(void);
+
 /* A cartridge with new code, title, author and resolution, and every other
  * section of `old` copied as it is (sheet, map, cover, and the sections this
  * kernel does not know, in their order). old == NULL: a new cartridge with
@@ -374,5 +481,11 @@ typedef struct {
 uint8_t *bm_rewrite_with(const uint8_t *old, size_t oldlen, const char *lua, size_t lua_len,
                          const char *title, const char *author, int width, const bm_put_t *put, int nput,
                          size_t *outlen);
+
+/* A resource file of `kind` (BM_RES_*) from sections, in the order given: the same bytes as scripts/bmres.py.
+ * name (48 bytes) and author (32) are cut on a character; NULL for none. NULL if a section has no data, a
+ * kind is wrong or memory is short. The checks of the sections are the caller's (bm_parse_any on the result). */
+uint8_t *bm_res_build(unsigned kind, const char *name, const char *author, const bm_put_t *sec, int n,
+                      size_t *outlen);
 
 #endif

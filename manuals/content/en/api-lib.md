@@ -114,7 +114,7 @@ function _draw()
 end
 ```
 
-![The hero standing on the tiles, the camera following it](shots/api-lib-platformer.png)
+!The hero standing on the tiles, the camera following it
 
 ::: try
 Change `hero.gravity` to 0.15, then set `hero.maxfall` to 3, and jump again. The hero falls slower, and never faster than 3 pixels per frame.
@@ -183,7 +183,7 @@ function _update()
 end
 ```
 
-![The lobby with two players and the chat](shots/api-lib-lobby.png)
+!The lobby with two players and the chat
 
 ::: warn
 In a match the game must depend only on the inputs of the frames and on the seed. Read the rules of lockstep in the chapter "bmnet: the match in lockstep".
@@ -322,10 +322,51 @@ end)
 | `P:burst(x, y, n, [opt])` | `n` particles from `x, y`: `speed` (2), `angle` and `spread` (in radians; all round if missing), `life` (0.5 s), `color` or `colors`, and the options of `:add` |
 | `P:update()` / `P:draw()` | in `_update` / in `_draw` |
 | `P:count()` / `P:clear()` | how many there are / all away |
+| `lib.particles3d([max])` | the 3D sibling of `lib.particles`: a pool of at most `max` particles (1024). It wraps the 3D particle functions (`particles`, `particles_add`, `particles_step`, `particles_draw`, `particles_count`) |
+| `P3:add(x, y, z, vx, vy, vz, life, color)` | one 3D particle |
+| `P3:burst(x, y, z, n, [opt])` | `n` particles from `x, y, z`: `speed` (2), `life` (30 updates), `color` (0xFFFFFF), `up` (0) |
+| `P3:update([gravity])` / `P3:draw([radius])` | in `_update` (gravity 0.02) / in `_draw` (radius 0.1) |
+| `P3:count()` | how many 3D particles are alive |
 
 ```lua
 local fx = lib.particles(300)
 fx:burst(x, y, 20, { speed = 3, colors = { 0xFFFFFF, 0xFFD050, 0xFF6020 }, gravity = 0.1 })
+
+local p3 = lib.particles3d(500)
+p3:burst(x, y, z, 20, { speed = 2, life = 30, color = 0xFFA020 })
+p3:update()
+p3:draw()
+```
+
+# bmlib: high-throughput 3D and crowds (crowd3d)
+
+| Function | Description |
+|---|---|
+| `lib.gpu3d_fast([opt])` | activates the high-throughput GPU 3D pipeline: Vertex Shader 2, Command Queue 2, and frame-later pipelining. Pushes up to 50,000 triangles at 60 fps on the Pi Zero W |
+| `lib.crowd3d(mesh, [opt])` | creates a high-throughput 3D crowd and instance renderer with pose bucketing (skeletal animation deduplication); `opt`: `clip` ("walk"), `poses` (16), `radius` (1.3) |
+| `CR:add(x, y, z, [yaw, scale, phase, flags])` | adds an instance to the crowd and returns its `id` index |
+| `CR:set(id, [x, y, z, yaw])` | updates the instance's coordinates and rotation |
+| `CR:snap_to_map(map)` | batch snaps all `y` elevations to a `map3d` terrain, caching them to avoid map queries during drawing |
+| `CR:clear()` | removes all instances |
+| `CR:draw([time, default_flags])` | performs `visible3d` culling, groups instances by quantized pose, evaluates `animate()` once per bucket, and renders instances |
+
+```lua
+local lib = require "bmlib"
+lib.gpu3d_fast()
+
+local crowd = lib.crowd3d(model("hero0"), { clip = "walk", poses = 16 })
+for i = 1, 50 do
+  crowd:add(math.random(10, 22), 0, math.random(10, 22), math.random() * 6.28)
+end
+crowd:snap_to_map(world_map)
+
+function _draw()
+  cls(0x8CC8F0)
+  zclear()
+  camera3d(cx, cy, cz, cyaw, cpitch, 60)
+  map3d_draw(world_map)
+  crowd:draw(time())
+end
 ```
 
 # bmlib: the camera
@@ -338,6 +379,17 @@ fx:burst(x, y, 20, { speed = 3, colors = { 0xFFFFFF, 0xFFD050, 0xFF6020 }, gravi
 | `C:apply([view])` | `camera()` at the camera's place (with the shake): in `_draw` before the world, then `camera()` for the HUD. With a view `{x, y, w, h}` (`lib.split`) the drawing stays in the view (`clip`) and the camera's corner is the view's: after the views, `clip()` and `camera()` |
 | `C:map([layer, mask])` | the cells of the map that show |
 | `C:sees(x, y, [w, h])` / `C:screen(x, y, [view])` | the rectangle shows / where a point of the world is on the screen (in the view) |
+
+# bmlib: one game, many screens
+
+| Function | Description |
+|---|---|
+| `lib.view()` | a table `{x, y, w, h, scale, wide, square, tall}`. `x, y, w, h` are the safe area. `scale` is how many screen pixels one design pixel gets (`1.0` on the design size). `wide`, `square`, `tall`: the shape of the screen, one is `true` |
+| `lib.anchor(where, w, h, [mx, my])` | `x, y` of an element `w` by `h` at `"tl"` `"t"` `"tr"` `"l"` `"c"` `"r"` `"bl"` `"b"` `"br"` of the safe area, with margins `mx, my` (0) from the edges it touches |
+| `lib.safe_clip()` | `clip()` to the safe area; returns `x, y, w, h` |
+| `lib.fit(dw, dh)` | `scale, x, y` to draw a layer made for `dw` by `dh` whole, in the middle of the safe area |
+
+Call them in `_draw` or in `_screen(w, h)`, not once at load: `screen()` can change the size.
 
 # bmlib: game states
 
@@ -367,6 +419,7 @@ function _draw() S:draw() end
 
 | Function | Description |
 |---|---|
+| `lib.input([over])` | the input standard for games: it puts `confirm`, `cancel`, `pause` and the actions of the game's scheme on the keymap and returns the table. `over.scheme` picks the scheme: `"scroller"` (the default: `act1` jump = B, `act2` attack = Y, `act3` = the A/B button that is not ok, `act4` = X, shoulders L1/R1), `"topdown"` (`act1` = B, `act2` = the other A/B button, `act3` = Y, `act4` = X) or `"stick"` (`act1` R2, `act2` L2, `act3` L1, `act4` R1, `act5` to `act8` = B, A, Y, X). `lib.input_scheme` tells which one runs. The other keys of `over` (`{ act3 = "x" }`) change single actions and are listed in `lib.input_exceptions` |
 | `lib.textw(text, [scale])` | width and height in pixels with the font of `print` now (the longest line) |
 | `lib.printc(text, y, [c, scale, x, w, grid])` | in the middle of the screen (or of `x..x + w`); `grid`: on the font's columns (text that stays still, as the menus). Returns the x |
 | `lib.printr(text, x, y, [c, scale])` | ending at `x` (numbers aligned to the right) |

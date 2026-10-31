@@ -1,20 +1,4 @@
-/* Lua scripts built into the kernel image. */
-    .section .rodata
-    .balign 4
-    .globl boot_lua, boot_lua_end
-boot_lua:
-    .incbin "src/script/boot.lua"
-boot_lua_end:
-    .byte 0
-
-/* native bm demo cartridge, packed by scripts/mkbm.py (see Makefile) */
-    .section .rodata
-    .balign 4
-    .globl bm_demo_cart, bm_demo_cart_end
-bm_demo_cart:
-    .incbin "demo.bm"          /* found through -Wa,-I$(BUILD) */
-bm_demo_cart_end:
-
+/* the tools packed by scripts/mkbm.py (see Makefile); found through -Wa,-I$(BUILD) */
     .section .rodata
     .balign 4
     .globl bm_editor_cart, bm_editor_cart_end
@@ -33,20 +17,15 @@ bm_sound_cart:
 #endif
 bm_sound_cart_end:
 
-    .section .rodata
-    .balign 4
-    .globl bm_stress_cart, bm_stress_cart_end
-bm_stress_cart:
-    .incbin "stress.bm"
-bm_stress_cart_end:
-
 /* the development assistant (M30): knowledge base and network, built by
- * scripts/mkassist.py; its panel, a Lua library (require "assist") */
+ * scripts/mkassist.py (a clean kernel has none: the Assistant app carries it, src/kernel/appdata.c); its panel, a Lua library (require "assist") */
     .section .rodata
     .balign 4
     .globl bm_assist_bin, bm_assist_bin_end
 bm_assist_bin:
+#ifndef BM_CLEAN_KERNEL
     .incbin "assist.bin"
+#endif
 bm_assist_bin_end:
 
     .section .rodata
@@ -69,7 +48,9 @@ bm_lib_predict_end:
     .balign 4
     .globl bm_lib_words, bm_lib_words_end
 bm_lib_words:
+#ifndef BM_CLEAN_KERNEL
     .incbin "words.lua"
+#endif
 bm_lib_words_end:
 
 /* typing with the pad: compose and the on-screen keyboard (require "padtype") */
@@ -192,9 +173,3 @@ bm_pixel_cart:
     .incbin "pixel.bm"
 #endif
 bm_pixel_cart_end:
-    .section .rodata
-    .balign 4
-    .globl bm_texroom_cart, bm_texroom_cart_end
-bm_texroom_cart:
-    .incbin "texroom.bm"
-bm_texroom_cart_end:

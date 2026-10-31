@@ -15,7 +15,7 @@ footer: bm manuals - game API 1
 
 # How a cartridge works
 
-A `.bm` cartridge is a game for bm written in **Lua 5.4**. The kernel draws in C (640×360, 16-bit RGB565 colour, 60 frames a second); Lua only does the logic. Complete examples are in `carts/`: `pong/`, `snake/`, `shooter/` (code only) and `demo/` (with a PNG sprite sheet and a CSV map).
+A `.bm` cartridge is a game for bm written in **Lua 5.4**. The kernel draws in C (640×360, 16-bit RGB565 colour, 60 frames a second); Lua only does the logic. Complete examples are in `carts/`: `pong/`, `snake/`, `shooter/` (code only) and `hero/` (with a PNG sprite sheet and CSV maps).
 
 ## The functions your game defines
 
@@ -39,7 +39,7 @@ Put the logic and the input in `_update`, and only the drawing in `_draw`. The s
 | `--res 480x270` | 480 × 270 |
 | `--res 320x180` | 320 × 180 |
 | `--res 256x256` | 256 × 256 |
-| `--res 360x360` | 360 × 360 (the `.b16`'s screen) |
+| `--res 360x360` | 360 × 360 (the RGB30's screen) |
 
 The cartridge can change its resolution while it runs with `screen(w, h)` (see Drawing): from the next frame the new sizes hold.
 
@@ -74,7 +74,7 @@ You will make a yellow ball you move with the arrows, on a dark blue screen. It 
 
 ## Try it, step by step
 
-1. On your computer, in the bm repository, create the file `carts/hello/main.lua` with this code:
+1. On your computer, in the bm repository, create the file a file that is not in this repository with this code:
 
    ```lua
    local x, y = 300, 160
@@ -109,7 +109,7 @@ You will make a yellow ball you move with the arrows, on a dark blue screen. It 
 
 If you see an error instead of the ball, the Lua code went wrong: the game stops and the message with the line number appears on the console. Fix that line and pack again.
 
-![The first game: a yellow ball and a line of text on dark blue](shots/api-core-hello.png)
+!The first game: a yellow ball and a line of text on dark blue
 
 ::: try
 Make the ball change colour when you press A. In `_update`, add `if btnp(4) then c = rgb(math.random(255), math.random(255), math.random(255)) end`, declare `local c = 0xFFD050` at the top, and draw the ball with `circfill(x, y, 20, c)`.
@@ -135,7 +135,7 @@ python3 tools/bm_load.py /dev/ttyUSB0 --cart hello.bm
 
 ## Cover
 
-`--cover cover.png` is optional: a PNG of any size that the menu prints on the game's card, an 88×88 square. A square picture is scaled down; others stay whole, as wide as the square, over a blurred and darker copy of themselves that fills the rest. In the build a file `carts/hello/cover.png` is enough. Without a cover the menu prints the title.
+`--cover cover.png` is optional: a PNG of any size that the menu prints on the game's card, an 88×88 square. A square picture is scaled down; others stay whole, as wide as the square, over a blurred and darker copy of themselves that fills the rest. In the build a file a file that is not in this repository is enough. Without a cover the menu prints the title.
 
 # Drawing
 
@@ -149,7 +149,11 @@ Everything on the screen: shapes, text, sprites and the tile map.
 | `cls([c])` | fills the screen (black if `c` is missing). With the 3D on the GPU the ARM does not fill it: the GPU's job clears the page to that colour (free even at 1080p); if 2D comes before the 3D the ARM fills it as always |
 | `screen(w, h)` | sets the cartridge's resolution from the next frame: `true`, or `false` if it is not one of the sizes below |
 | `screen()` | returns the width and height now |
-| `screen(i)` | returns the i-th size of the list (from 1), or `nil` |
+| `screen(i)` | returns the i-th size of the list (from 1), or `nil`. On the RGB30 (a square panel) the list is 360×360, 720×720 and 720×405 (16:9, centred, with black bars) |
+| `screen_modes()` | returns the sizes `screen()` takes on this device as a table `{ {w, h}, ... }` (in the order of `screen(i)`), and the index of the current one (`nil` if the size is none of them) |
+| `function _screen(w, h)` | a hook: if you define it, the runtime calls it once before `_init` with the first size, and at the start of each frame that follows a size change. Lay the HUD out here |
+| `safe_area()` | returns `x, y, w, h, dw, dh`: the part of the screen that has the aspect of the cartridge's header size, in the middle (a 360×360 game on 640×360 gives `140, 0, 360, 360`). Lay the HUD out in it. `dw, dh` are the header size |
+| `aspect()` | returns the screen's width divided by its height, and `"wide"`, `"square"` or `"tall"` |
 | `pset(x, y, c)` | writes a pixel |
 | `pget(x, y)` | reads a pixel: `0xRRGGBB`, or `nil` off screen |
 | `line(x0, y0, x1, y1, c)` | a line |
@@ -171,7 +175,7 @@ The list is 16:9: 320×180, 384×216, 480×270, 640×360, 960×540, 1280×720, 1
 
 - `SCREEN_W` and `SCREEN_H` change when it is done; the z-buffer, the 3D camera and the light buffers follow, the font and `camera()` stay, `clip()` goes back to the whole screen.
 - If the console cannot give the size, the one before stays.
-- On the **RGB30** (a square panel) the list is the `.b16`'s two sizes instead: 360×360 (shown twice as big) and 720×720, both at whole pixels.
+- On the **RGB30** (a square panel) the list is two sizes instead: 360×360 (shown twice as big) and 720×720, both at whole pixels.
 - A square cartridge (256×256, 360×360) changes as the others: on the Pi it then fills the TV, and the GPU can draw its 3D there (in the box in the middle the ARM draws it).
 - The ARM's rasteriser pays for every pixel: on the Pi above 640×360 the GPU is needed.
 
@@ -197,13 +201,13 @@ print("start", x + 4, 200, 0xFFFFFF)
 prompt("RGB30_X", 16, 220)                 -- the RGB30's red X, on any console
 ```
 
-![Button chips drawn by prompt next to a line of text](shots/api-core-prompt.png)
+!Button chips drawn by prompt next to a line of text
 
 ## Sprites
 
 The **sprite sheet** is a picture divided into 8×8 cells: cell `n` is at column `n % (width/8)` and row `n // (width/8)`.
 
-- It comes from `--sheet sheet.png` (RGB or RGBA PNG; alpha under 128 = transparent). Without a PNG it is a transparent 256×256 sheet to draw with `sset` (32 cells per row: see `carts/shooter`).
+- It comes from `--sheet sheet.png` (RGB or RGBA PNG; alpha under 128 = transparent). Without a PNG it is a transparent 256×256 sheet to draw with `sset` (32 cells per row: see a file that is not in this repository).
 - The sheet can be up to 4096×4096 pixels.
 - A big sheet with at most 256 colours goes into the cartridge with `--sheet sheet.png --sheet8`: a palette and repeated runs (RLE) instead of 4 bytes per pixel, decoded at loading (Titan Clash: 2048×3376 pixels in 1.7 MB).
 
@@ -211,6 +215,9 @@ The **sprite sheet** is a picture divided into 8×8 cells: cell `n` is at column
 |---|---|
 | `spr(n, x, y, [w, h, flip_x, flip_y])` | draws cell `n` (w×h cells, default 1×1), mirrored too |
 | `sspr(sx, sy, sw, sh, dx, dy, [flip_x, flip_y, zoom])` | copies any rectangle of the sheet; with `zoom` (default 1) it draws it bigger (`2`, `3`…) or smaller (`0.5`), pixel by pixel: it covers `sw * zoom` × `sh * zoom` pixels |
+| `stack(sx, sy, w, h, n, x, y, [rz, scale, step])` | sprite stacking: draws `n` slices of `w`×`h` pixels that lie side by side on the sheet from `(sx, sy)`, left to right. Slice 1 is the bottom. `(x, y)` is the centre of the bottom slice. Each slice turns by `rz` radians around its centre, is `scale` times bigger and sits `step * scale` pixels above the one below (`step` 1 by default). Colour 0 is transparent |
+| `stackv(sx, sy, w, h, n, x, y, [rz, scale, step])` | the same as `stack`, but the slices lie one under the other on the sheet, top to bottom; the top one is slice 1 |
+| `zstack(name, x, y, [rz, scale])` | draws a stack zone of the zones file (the line `stack name x y w h n`, or `stackv` for slices one under the other) |
 | `sget(x, y)` | reads a pixel of the sheet (`nil` = transparent) |
 | `sset(x, y, [c])` | writes a pixel of the sheet (`nil` = transparent) |
 
@@ -228,7 +235,7 @@ The SPRITES section gives names to rectangles of the sheet, with their frames (t
 | Function | What it does |
 |---|---|
 | `zspr(name, x, y, [frame, flip_x, flip_y, zoom])` | draws a **named zone** of the sheet: `frame` from 1 to the number of frames (beyond it starts again), or `nil`: the one its fps give at `time()`, so the animation runs by itself. Returns the frame drawn. A zone that is not there is an error |
-| `zone(name)` | returns `x, y, w, h, frames, fps` of the zone (its first frame, in sheet pixels), or `nil` |
+| `zone(name)` | returns `x, y, w, h, frames, fps, slices` of the zone (its first frame, in sheet pixels; `slices` is 0 for a plain zone, 2 to 255 for a stack zone), or `nil` |
 | `zones()` | the names of the zones, in order (`{}` if there are none) |
 | `zboxes(name, [frame, kind])` | the **hitboxes and hurtboxes** of the frames of a zone (see below) |
 
@@ -361,6 +368,7 @@ Buttons, the keyboard, the mouse and the players.
 | `keymap(t)` | sets the game's **actions** on the buttons (see below) |
 | `keymap()` | returns the table |
 | `keymap(nil)` | takes the table away |
+| `controls([scheme])` | the player's remap from Settings > Controls: `controls()` reads it, `controls("scroller"\|"topdown"\|"stick")` picks the game's scheme (`lib.input` does it) |
 | `controller([p])` | returns what player `p` (1–4, the first if missing) plays with (see below) |
 | `online([on, note])` | tells the system the match is played over the **network** (see below) |
 | `players()` | how many players have a controller (at least 1) and, as the second value, which: bit `n` = player `n+1` (for example `3, 7` = players 1, 2 and 3) |
@@ -495,10 +503,10 @@ local x, y = stick(1)                     -- player 1's stick, from -1 to 1
 | `profile([on])` | the profiler of functions (see below) |
 | `devinfo(line, ...)` | up to 4 lines of the game in the dev kit's session report ("the game says:", as the run ended: its quality, its actors…), 18 characters each; `devinfo()` none. Call it again when they change |
 | `battery()` | the console's battery: its charge `0`–`100` and `true` on the charger (`local pct, plugged = battery()`); `nil` without a battery (the Pi). On the RGB30 the charge comes from the voltage (an indication: it sags under load and rises on the charger); the charger is seen within a quarter of a second |
-| `battery_low()` | `true` while the battery is low: 20% or less off the charger (until 23%). Then the system draws by itself a small red battery top right over the frame (left of the dev kit's overlay when it is at the top), in every game and tool; *Settings > Screen and sound > Low battery icon* (`battery_icon=0` in `bm/config.txt`) turns that icon off, not `battery_low()`. Information only: each console has its own battery, so in lockstep (`bmnet`) it never changes what the game simulates; use it to show something or to save |
-| `code_tokens(text)` | the **tokens** of a piece of Lua code, counted as `stat(11)` and the SDK's dev kit do (`src/bm/tokens.c`): each name, keyword, number, string and operator is one; comments, spaces, `,` `.` `:` `;` `::`, closing brackets (`)` `]` `}`), `end` and `local` do not count, nor the minus sign in front of a number (`-1` is one token). Information, not a limit: bm puts no ceiling on tokens (nor does the `.b16`) |
+| `battery_low()` | `true` while the battery is low: 20% or less off the charger (until 23%). Then the system draws by itself a small red battery top right over the frame (left of the dev kit's overlay when it is at the top), in every game and tool; *Settings > Screen > Low battery icon* (`battery_icon=0` in `bm/config.txt`) turns that icon off, not `battery_low()`. Information only: each console has its own battery, so in lockstep (`bmnet`) it never changes what the game simulates; use it to show something or to save |
+| `code_tokens(text)` | the **tokens** of a piece of Lua code, counted as `stat(11)` and the SDK's dev kit do (`src/bm/tokens.c`): each name, keyword, number, string and operator is one; comments, spaces, `,` `.` `:` `;` `::`, closing brackets (`)` `]` `}`), `end` and `local` do not count, nor the minus sign in front of a number (`-1` is one token). Information, not a limit: bm puts no ceiling on tokens |
 | `log(...)` | writes in the kernel's log (serial line and console), not on the game's screen |
-| `report(kind, text)` | a report for the people who develop bm: saved in `bm/reports` on the SD card with kernel, branch, board and date (and a first `options` line: the 3D options in force), then sent to the reports' repository if there are `github_token` and the network (`src/kernel/reports.h`); at most 8 per run, 256 KiB each; `true` if saved. `kind` is a required string, a free-text category label: it is turned into lower case with `-` between other characters and goes into the report header and the uploaded file name; with `kind == "session"` the upload replaces the previous file (Overbit uses `"overbit-bench"`). The first time a game calls it, the player is asked (the answer stays in `bm/config.txt`, `allow_...`): after a no, `false` |
+| `report(kind, text)` | a report for the people who develop bm: saved in `bm/reports` on the SD card with kernel, branch, board and date (and a first `options` line: the 3D options in force), then sent to the reports' repository if there are `github_token` and the network (`src/kernel/reports.h`); at most 8 per run, 256 KB each; `true` if saved. `kind` is a required string, a free-text category label: it is turned into lower case with `-` between other characters and goes into the report header and the uploaded file name; with `kind == "session"` the upload replaces the previous file (Overbit uses `"overbit-bench"`). The first time a game calls it, the player is asked (the answer stays in `bm/config.txt`, `allow_...`): after a no, `false` |
 | `shot([prefix])` | saves the frame being drawn as a PNG (see the Screenshots chapter) |
 | `quit()` | closes the cartridge at the end of the frame |
 | `timeslice(co, [k])` | coroutine `co` stops by itself after about `k` thousand Lua instructions in a frame (400 if missing) and `coroutine.resume` returns `true` without values: a long computation goes on in the next frames instead of stopping the cartridge at the instruction limit. `timeslice(nil)` takes it away (nano8 uses it for its cartridges) |
@@ -509,7 +517,7 @@ Random numbers: `math.random`. For different games at every start, seed the gene
 
 | `n` | Value |
 |---|---|
-| 0 | KiB used by Lua |
+| 0 | KB used by Lua |
 | 1 | ms of the last frame (`_update` + `_draw`, with the GPU's 3D) |
 | 2 | fps |
 | 3 | frame number |
@@ -521,8 +529,8 @@ Random numbers: `math.random`. For different games at every start, seed the gene
 | 9 | `1` if the GPU draws the 3D |
 | 10 | Lua instructions of the last frame (`_update` + `_draw`, in instructions, rounded to the thousand) |
 | 11 | dev kit: tokens of the cartridge's code (`code_tokens`) |
-| 12 | dev kit: the most KiB of Lua of this run |
-| 13 | dev kit: KiB of the cartridge's data in memory (sprite sheet, map, models and skeletons, sound bank, the 3D z-buffer) |
+| 12 | dev kit: the most KB of Lua of this run |
+| 13 | dev kit: KB of the cartridge's data in memory (sprite sheet, map, models and skeletons, sound bank, the 3D z-buffer) |
 | 14 | dev kit: the Lua instructions of the busiest frame of this run |
 | 15 | dev kit: how many `_update` ran before this `_draw` (1; more with `frameskip`) |
 | 16 | dev kit: ms of GPU job time (bin + render) accounted in the last frame, `0` when the ARM draws the 3D (with `stat(1)` it tells whether the GPU or the ARM sets the pace) |
@@ -541,7 +549,7 @@ Random numbers: `math.random`. For different games at every start, seed the gene
 
 ## The dev kit and the profiler
 
-The **dev kit** is a performance overlay over any game, **off by default**. Turn it on from Settings > Screen and sound > "Performance overlay" (Off, Top, Bottom: it stays saved), with F11 on the keyboard (a system key, also in the tools), with `p` from the serial line or with `devkit(mode)` from the game: once at the top right, again at the bottom right, again off. F11, `p` and `devkit()` last one run: every game starts (and resumes) as Settings says. It is one small block:
+The **dev kit** is a performance overlay over any game, **off by default**. Turn it on with `perf=top` or `perf=bottom` in `bm/config.txt` (the RGB30 has no F11: use `perf=` there), with F11 on the keyboard (a system key, also in the tools), with `p` from the serial line or with `devkit(mode)` from the game: once at the top right, again at the bottom right, again off. F11, `p` and `devkit()` last one run: every game starts (and resumes) as the saved setting says. It is one small block:
 
 ```text
 60fps 8.2ms           frames a second; ms of work in a frame (the parts below)
@@ -571,8 +579,8 @@ When a game ends the dev kit writes one file per game into the reports, `reports
 
 - In `bm/config.txt`: `session_report=0` never, `=1` always; without the line, only with a `github_token`.
 - From the code you use `stat(1)`, `stat(2)`, `stat(6)`, `stat(10)`, `stat(11)`–`stat(16)`, `devkit()` and `profile()`. The limit is 20 million instructions per call.
-- The **SDK's dev kit** (F1 twice) has the same numbers for the project: tokens, the biggest functions, the data's memory, the file against the 8 MiB of a `.b16` and the numbers of the last try (F5).
-- At the end of a run the serial line also writes the line `dev kit: Lua peak ... KiB, data ... KiB, busiest frame ...k instructions, ... frames over 16.7 ms, ... tokens`.
+- The **SDK's dev kit** (F1 twice) has the same numbers for the project: tokens, the biggest functions, the data's memory and the numbers of the last try (F5).
+- At the end of a run the serial line also writes the line `dev kit: Lua peak ... KB, data ... KB, busiest frame ...k instructions, ... frames over 16.7 ms, ... tokens`.
 
 ## Examples
 
@@ -593,8 +601,8 @@ log("frame ms", stat(1))                                         -- on the seria
 
 ## Good to know
 
-- Each cartridge has **8 save slots**, each a table of up to 32 KiB, in `/bm/save/` on the SD card.
-- Slot 1 is `XXXXXXXX.SAV` (the one of always: `save(t)` and `saved()` without a slot), the others `XXXXXXXX.S02` … `.S08`.
+- Each cartridge has **8 save slots**, each a table of up to 32 KB, in `/bm/save/` on the SD card.
+- Slot 1 is `xxxxxxxx.sav` (the one of always: `save(t)` and `saved()` without a slot), the others `xxxxxxxx.s02` … `.S08`.
 - A common use: slot 1 for settings and records (`lib.store` uses it too), the others for the games in progress.
 - A table can hold numbers, strings, booleans and other tables (no functions).
 - The game's options in the menu (X on the cover) show the bytes of all the slots, and *Delete the save data* deletes them all.
@@ -639,18 +647,18 @@ The player's files, shared by the apps: `/docs` on the SD card (bm Write keeps i
 
 | Function | What it does |
 |---|---|
-| `doc_list()` | the files in `/docs`: `{ {name = "LETTER.BMD", size = 1234}, ... }` (empty if there are none); `nil` and the reason if the player did not allow it |
+| `doc_list()` | the files in `/docs`: `{ {name = "letter.bmd", size = 1234}, ... }` (empty if there are none); `nil` and the reason if the player did not allow it |
 | `doc_read(name)` | the bytes of a document (a string), or `nil` and the reason |
-| `doc_write(name, bytes)` | writes a document, new or replaced (at most 4 MiB); `true`, or `nil` and the reason |
+| `doc_write(name, bytes)` | writes a document, new or replaced (at most 4 MB); `true`, or `nil` and the reason |
 | `doc_delete(name)` | deletes a document; `true`, or `nil` and the reason |
 
 ## Good to know
 
-- Names are 8.3 without folders (`"LETTER.BMD"`; lower case is fine, the file is written in upper case). The folder is made by the first write.
+- Names are 8.3 without folders (`"letter.bmd"`; the file is always written in lower case, and a read finds it in any case). The folder is made by the first write.
 - The first time an app uses them the console asks the player, as for the network. The answer stays in `bm/config.txt` (`allow_...=docs=yes`), and after a no every call returns `nil` and the reason.
 
 ```lua
-local ok, why = doc_write("NOTES.TXT", "shopping:\nbread\nmilk\n")
+local ok, why = doc_write("notes.txt", "shopping:\nbread\nmilk\n")
 if not ok then msg = why end
 for _, d in ipairs(doc_list() or {}) do print(d.name .. " " .. d.size) end
 ```
@@ -664,7 +672,7 @@ A game or an app saves the frame it is drawing as a PNG on the SD card, and the 
 | How | Where |
 |---|---|
 | **Print Screen** on the keyboard | `bm/shots/` on the SD card |
-| **Select + L1 + R1** together on a pad (Share + L1 + R1 on a DS4) | `bm/shots/` on the SD card |
+| **Select** held for 3 seconds on a pad (Share on a DS4) | `bm/shots/` on the SD card |
 
 A box says `Screenshot saved` and the file name for two seconds. The picture is the game's own screen as it was drawn: the dev kit's overlays, the battery icon, the pointer and that box are **not** in it.
 
@@ -672,7 +680,7 @@ A box says `Screenshot saved` and the file name for two seconds. The picture is 
 Games and apps run by bm's menu take it; the menu's own screens do not yet.
 :::
 
-[TO FILL: check Select + L1 + R1 on the PowKiddy RGB30; not tried on the console yet]
+[TO FILL: check Select held 3 s on the PowKiddy RGB30; not tried on the console yet]
 
 ## For an app
 
@@ -689,7 +697,7 @@ local path = shot("menu")    -- "bm/shots/MENU0001.png"
 
 ## Names and format
 
-- **Name**: `<PREFIX><NNNN>.PNG`, 8.3 as the card's file system wants. The prefix is the first (up to) 4 letters or digits of the game's title (`Pong` → `PONG`, `Hunter's Night` → `HUNT`; `SHOT` if there are none) or of the `prefix` the app gave.
+- **Name**: `<PREFIX><NNNN>.PNG`, 8.3 as the card's file system wants. The prefix is the first (up to) 4 letters or digits of the game's title (`Pong` → `PONG`, `Star Shooter` → `STAR`; `SHOT` if there are none) or of the `prefix` the app gave.
 - **Number**: one more than the highest of that prefix already in `bm/shots/`, from 0001 to 9999. The Pi Zero has no clock, so there is no date.
 - **Format**: PNG, 8 bits RGB, the size of the game's screen (640×360, 360×360…). Nothing is lost: the console's colours are 16 bits (RGB565) and are widened to 8 bits. There is no JPG: it spoils pixel art.
 - **Size on disk**: a flat screen takes a few KB; noise can take as much as the raw picture (about 0.7 MB at 640×360).
@@ -697,10 +705,10 @@ local path = shot("menu")    -- "bm/shots/MENU0001.png"
 ## Try it, step by step
 
 1. Start any game from the menu, for example **Pong**.
-2. Press **Print Screen** on the keyboard, or hold **Select + L1 + R1** on the pad.
+2. Press **Print Screen** on the keyboard, or hold **Select** for 3 seconds on the pad.
 3. Wait for the box that says `Screenshot saved`.
 4. Switch the console off and put the SD card in your computer.
-5. Open the folder `bm/shots/`: the picture is there, for example `PONG0001.PNG`.
+5. Open the folder `bm/shots/`: the picture is there, for example `pong0001.png`.
 
 # Network (UDP)
 
@@ -729,3 +737,43 @@ end
 ```
 
 [TO FILL: an example of two consoles finding each other with these functions; the sources only describe bmnet for it]
+
+# The web
+
+For a cartridge that shows web pages. A request runs in the background: the game keeps drawing while the page arrives. The kernel enforces the rules below. A cartridge cannot change them.
+
+- The player must allow the network, as for `udp_open`. Without a network `web_get` returns `nil, "no network"`.
+- Only `https://` addresses, at most 1024 characters. The kernel follows at most 3 redirects and refuses a redirect to `http://`.
+- The kernel waits until 1 second has passed since the last request to the same host. The state is `"wait"` meanwhile.
+- The body stops at 4 MB. `web_max_kib` in `bm/config.txt` changes this (up to 32768). A request can ask for less with `max`.
+- One request runs at a time. The results of up to 3 requests stay in memory until `web_cancel` or the end of the cartridge.
+- `web_poll` works for about 4 ms. A new TLS connection can take about 100 ms on the Pi Zero W, and the frame waits. Show a "connecting" message before the first `web_poll`.
+- After a complete answer the kernel keeps the connection for the next request to the same host (keep-alive). The calls do not change.
+- With `resume = "NAME.EXT"` a failed or cancelled request keeps the part it received in `bm/web/name.prt`. The next `web_get` for the same address with the same name asks the server for the rest (`Range`). The server must send `Accept-Ranges` and a size. The body is always the whole file: check its size or a hash before you use it.
+- `file_write` with a name that ends in `.bmm` saves a model in `/bmm/NAME.bmm`, not in `bm/web`. The kernel checks the bytes first, as it loads a model file (BMRES, kind 1, a MESH section). A file that fails is refused and nothing is written. The name is 1 to 8 of `a-z 0-9 _ -`. A model that is there is never replaced. The player gets no extra question.
+- In bmhost `web_get` returns `nil` and a reason. `image_load` and `file_write` work.
+
+| Function | What it does |
+|---|---|
+| `id = web_get(url, [opts])` | starts a GET request. `opts`: `max` (a body cap in bytes), `timeout` (milliseconds for one read, 1000 to 60000, default 15000), `resume` (a bare 8.3 name). Returns the `id`, or `nil` and the reason |
+| `state, size, length = web_poll(id)` | works the request for about 4 ms. `state` is `"wait"`, `"busy"`, `"done"` or `"error"`. Call it once a frame |
+| `web_info(id)` | a table with `state`, `status` (the HTTP status), `type`, `length`, `location`, `url`, `size`, `resumed` and `error`. A 404 ends in `"done"`: look at `status` |
+| `web_body(id)` | the body as a string, or `nil` and the reason. It copies the bytes into Lua memory: to decode a picture or write a file, give the `id` to `image_load` or `file_write` |
+| `web_cancel(id)` | stops the request and frees its result |
+| `img = image_load(bytes_or_id, sx, sy, [maxw, maxh])` | decodes a baseline JPEG, PNG or WebP into the sprite sheet with its top left corner at `(sx, sy)`. Progressive JPEG and pictures over 4 megapixels are refused. Returns `{x =, y =, w =, h =}`, or `nil` and the reason. Draw it with `sspr`. If needed, make the sheet bigger first with `cart_sheet(w, h)` |
+| `file_write(name, bytes_or_id, [async])` | writes a file in `bm/web` on the SD card. `name` is a bare 8.3 name. Never a `.bm` or `.bme` file. At most 8 MB (`file_write_max_kib`, up to 32768) and 128 files in the folder. With `async = true` the data is queued, up to 4 files wait, and the pieces (up to 32 KB) go to the card while the cartridge calls `web_poll` or `file_state` |
+| `state, info = file_state(name)` | the last queued write of that name: `"queued"`, `"writing"`, `"done"` or `"error"`. Call it once a frame while a write is queued |
+
+```lua
+if btnp(4) and not req then req = web_get("https://example.org/pic.webp") end
+if req then
+  local state = web_poll(req)
+  if state == "done" then
+    img = image_load(req, 0, 64, 160, 90)
+    web_cancel(req); req = nil
+  elseif state == "error" then
+    msg = web_info(req).error
+    web_cancel(req); req = nil
+  end
+end
+```

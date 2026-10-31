@@ -61,28 +61,32 @@ ask: millisecondi per fotogramma | numero del fotogramma | memory used | cpu tim
 ask: tempo della GPU | gpu time | is the gpu the bottleneck
 see: perf_measure, time, guide.devkit
 text:
-0 KiB usati da Lua, 1 ms dell'ultimo fotogramma, 2 fps, 3 numero del
+0 KB usati da Lua, 1 ms dell'ultimo fotogramma, 2 fps, 3 numero del
 fotogramma, 4 triangoli 3D, 5 pixel 3D, 6 ms del disegno 3D, 7 vertici 3D,
 8 ms da inizio fotogramma, 9 1 se il 3D lo fa la GPU, 10 istruzioni Lua
-dell'ultimo fotogramma. Il dev kit: 11 token del codice, 12 KiB di Lua al
-massimo, 13 KiB dei dati (sheet, mappa, modelli, suoni), 14 istruzioni del
+dell'ultimo fotogramma. Il dev kit: 11 token del codice, 12 KB di Lua al
+massimo, 13 KB dei dati (sheet, mappa, modelli, suoni), 14 istruzioni del
 fotogramma più pesante, 15 quanti _update prima di questo _draw, 16 ms di
 lavoro della GPU nell'ultimo fotogramma (0 se il 3D lo fa l'ARM): vicino a
-stat(1) vuol dire che il passo lo dà la GPU. Sono misure, diverse su ogni
-console: mai nella logica del gioco (in rete le console si separano).
+stat(1) vuol dire che il passo lo dà la GPU. 17 ms dell'audio e 18 ms di
+attesa dell'ARM per la GPU nell'ultimo fotogramma (0 se il 3D lo fa l'ARM).
+Sono misure, diverse su ogni console: mai nella logica del gioco (in rete
+le console si separano).
 text_en:
-0 KiB used by Lua, 1 ms of the last frame, 2 fps, 3 frame number, 4 3D
+0 KB used by Lua, 1 ms of the last frame, 2 fps, 3 frame number, 4 3D
 triangles, 5 3D pixels, 6 ms of 3D drawing, 7 3D vertices, 8 ms since the
 start of the frame, 9 1 if the GPU does the 3D, 10 Lua instructions of the
-last frame. The dev kit: 11 tokens of the code, 12 the most KiB of Lua,
-13 KiB of the data (sheet, map, models, sounds), 14 instructions of the
+last frame. The dev kit: 11 tokens of the code, 12 the most KB of Lua,
+13 KB of the data (sheet, map, models, sounds), 14 instructions of the
 busiest frame, 15 how many _update ran before this _draw, 16 ms of GPU
 job time in the last frame (0 when the ARM does the 3D): close to stat(1)
-means the GPU sets the pace. These are measurements, different on every
-console: never game logic (in a network match the consoles fall apart).
+means the GPU sets the pace. 17 ms of audio and 18 ms the ARM waited for
+the GPU in the last frame (0 when the ARM does the 3D). These are
+measurements, different on every console: never game logic (in a network
+match the consoles fall apart).
 code:
 print(stat(2) .. " fps  " .. stat(1) .. " ms", 8, 8, 0x80FF80)
-print(stat(0) .. " KiB", 8, 24, 0x80FF80)
+print(stat(0) .. " KB", 8, 24, 0x80FF80)
 
 == frameskip
 kind: api
@@ -155,14 +159,14 @@ text:
 battery() dà la carica (0-100) e true sul caricatore; nil senza batteria
 (il Pi). battery_low() è true al 20% o meno fuori dal caricatore. Allora il
 sistema disegna da sé una piccola batteria rossa in alto a destra, in ogni
-gioco (Settings > Screen and sound > Low battery icon la spegne). Solo
+gioco (Settings > Screen > Low battery icon la spegne). Solo
 informazione: in un gioco in lockstep non cambia mai ciò che si simula,
 ogni console ha la sua batteria. Serve per salvare in tempo.
 text_en:
 battery() gives the charge (0-100) and true on the charger; nil without a
 battery (the Pi). battery_low() is true at 20% or less off the charger.
 Then the system draws by itself a small red battery top right, in every
-game (Settings > Screen and sound > Low battery icon turns it off).
+game (Settings > Screen > Low battery icon turns it off).
 Information only: in a lockstep game it never changes what is simulated,
 each console has its own battery. Use it to save in time.
 code:
@@ -297,11 +301,11 @@ ask: memorizzare il punteggio | salvare le impostazioni | persist | savegame
 ask: salvare la partita nello slot 2 | save the game in a slot
 see: saved, saves, high_score
 text:
-Salva la tabella t (numeri, stringhe, booleani, tabelle; fino a 32 KiB)
+Salva la tabella t (numeri, stringhe, booleani, tabelle; fino a 32 KB)
 nello slot 1-8 (senza slot: l'1): true, oppure false e il motivo. Scrivere
 sulla SD richiede qualche ms: salva a fine partita, non a ogni fotogramma.
 text_en:
-Saves the table t (numbers, strings, booleans, tables; up to 32 KiB)
+Saves the table t (numbers, strings, booleans, tables; up to 32 KB)
 in slot 1-8 (without slot: 1): true, or false and the reason. Writing to
 the SD card takes a few ms: save at the end of a match, not every frame.
 code:
@@ -385,12 +389,12 @@ see: doc_read, doc_list, save
 text:
 Scrive un documento in /docs sulla SD, la cartella dei file del giocatore
 comune a tutte le app (bm Write ci tiene i suoi): nome 8.3 senza cartelle,
-al massimo 4 MiB; true, oppure nil e il motivo. La prima volta la console
+al massimo 4 MB; true, oppure nil e il motivo. La prima volta la console
 chiede al giocatore se l'app può usare i documenti.
 text_en:
 Writes a document in /docs on the SD card, the folder of the player's
 files shared by all the apps (bm Write keeps its own there): an 8.3 name
-without folders, at most 4 MiB; true, or nil and the reason. The first
+without folders, at most 4 MB; true, or nil and the reason. The first
 time the console asks the player whether the app may use the documents.
 code:
 local ok, why = doc_write("NOTES.TXT", "pane\nlatte\n")
@@ -487,7 +491,7 @@ text_en:
 { {name=, size=, dir=}, ... }: the files of the folder (the root if it is
 missing). For tools like the editor.
 code:
-for _, f in ipairs(ls("/carts")) do
+for _, f in ipairs(ls("/bm")) do
   log(f.name, f.size)
 end
 
@@ -508,7 +512,7 @@ Opens a .bm: its sprite sheet and its map take the place of those of the
 calling cartridge. Returns {title, author, res, lua, sheet_w,
 sheet_h, map_w, map_h}.
 code:
-local c = cart_load("/carts/PONG.BM")
+local c = cart_load("/bm/PONG.BM")
 log(c.title, #c.lua .. " byte di codice")
 
 == cart_new
@@ -534,14 +538,14 @@ ask: salvare una cartuccia | scrivere un file bm | save a cartridge | esportare 
 see: cart_load, cart_run
 text:
 Scrive un progetto con il codice dato e lo sprite sheet, la mappa e la
-copertina correnti. Nome 8.3, per esempio "/carts/GIOCO.BME". Un gioco (.bm)
+copertina correnti. Nome 8.3, per esempio "/bme/GIOCO.BME". Un gioco (.bm)
 non si cambia: diventa la sua copia .BME, il secondo valore.
 text_en:
 Writes a project with the code given and the current sprite sheet, map and
-cover. An 8.3 name, for example "/carts/GIOCO.BME". A game (.bm) does not
+cover. An 8.3 name, for example "/bme/GIOCO.BME". A game (.bm) does not
 change: it becomes its .BME copy, the second value.
 code:
-local ok, file = cart_save("/carts/GIOCO.BME", { title = "Gioco",
+local ok, file = cart_save("/bme/GIOCO.BME", { title = "Gioco",
   author = "io", res = "640x360", lua = code })
 
 == cart_run
@@ -648,7 +652,7 @@ mappa di chi chiama (al contrario di cart_load). Per editor con più file aperti
 text_en: {title, author, res, lua, size} of a .bm, without changing the sheet
 and map of the caller (unlike cart_load). For editors with several files open.
 code:
-local c = cart_read("/carts/PONG.BM")
+local c = cart_read("/bm/PONG.BM")
 if c then log(c.title, #c.lua) end
 
 == cart_write
@@ -668,7 +672,7 @@ sprite sheet, map, cover and every other section stay as they were. A new
 file becomes a cartridge with only the code (an 8.3 name). from: the other
 sections come from another file ("save as").
 code:
-local ok, err = cart_write("/carts/PONG.BME", { lua = code })
+local ok, err = cart_write("/bme/PONG.BME", { lua = code })
 if not ok then log("non salvato: " .. err) end
 
 == cart_build
@@ -683,15 +687,15 @@ keys: bme, progetto, project, build, copia, sola lettura, read only
 see: cart_write, cart_save
 text: Un .bm è un gioco: gli strumenti di bm lo leggono e ne prendono codice e
 asset, ma non lo cambiano. Si modifica un progetto, un .bme: salvando un gioco
-lo strumento chiede di farne la copia modificabile (NOME.BME accanto), e
+lo strumento chiede di farne la copia modificabile (NOME.BME in /bme), e
 cart_save / cart_write restituiscono anche il file scritto. cart_build fa il
-gioco del progetto in /carts (Ctrl+B nell'SDK, Build the game nel menu): la
+gioco del progetto in /bm (Ctrl+B nell'SDK, Build the game nel menu): la
 volta dopo sostituisce lo stesso file. Solo dagli strumenti della console.
 text_en: A .bm is a game: bm's tools read it and take its code and assets, but
 do not change it. What changes is a project, a .bme: saving a game, the tool
-asks to make its editable copy (NAME.BME next to it), and cart_save /
+asks to make its editable copy (NAME.BME in /bme), and cart_save /
 cart_write also return the file written. cart_build makes the project's game
-in /carts (Ctrl+B in the SDK, Build the game in the menu): the next time it
+in /bm (Ctrl+B in the SDK, Build the game in the menu): the next time it
 replaces the same file. Only from the console's tools.
 code:
 local ok, file = cart_save(path, { lua = code })

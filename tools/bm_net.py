@@ -18,7 +18,11 @@ Standard library only (Linux / macOS / WSL).
   bm_net.py IP --kernel build/rgb30/kernel8.img   the same on the RGB30 (kernel8.img)
   bm_net.py IP --config                 the console's bm/config.txt (secrets hidden)
   bm_net.py IP --config report_upload=0 game_intro=   a key set, one removed
-  bm_net.py IP --line "gpu; b3d; send"  a monitor line run (from the menu or the
+  bm_net.py IP --shot shot.png          a screenshot of the running game, saved as shot.png
+  bm_net.py IP --get bm/shots/pong0007.png out.png   a file of bm/shots on the console
+  bm_net.py IP --keys Xa                the keys X then a pressed one by one (0.2 s apart), the
+                                        console's answer shown for 3 s (what the bridge's `keys NAME` sends)
+  bm_net.py IP --line "b3d; send"       a monitor line run (from the menu or the
                                         monitor), its output shown until it is done
 
 The password is the one shown on the Pi's screen after 'W' (net_password in
@@ -27,7 +31,7 @@ keyboard, to what has them (the console says which: the menu takes them
 without echo, the monitor echoes; in the menu a line typed after ':' goes to
 the monitor); Ctrl-Q (or Ctrl-], or Enter ~ . as in ssh) quits. Plain text:
 use it on the home network only.
-Files on the SD card need 8.3 names (PONG.BM, not chaos_kitchen.bm):
+Files on the SD card need 8.3 names (pong.bm, not chaos_kitchen.bm):
 --name sets another one.
 """
 import argparse
@@ -45,11 +49,16 @@ PORT = 3333
 XFER_PORT = 3334
 ANSWERS = {b"OK": "ok", b"PW": "wrong password", b"SZ": "file too big (or no memory)",
            b"BH": "bad request", b"CE": "damaged in transit (crc)",
+           b"BO": "the bridge is off: set Settings > System > Bridge to on or fast on the console",
+           b"BF": "refused: dev and bridge are the user's (Settings > System > Bridge)",
            b"WE": "could not write on the SD card",
            b"QD": "received: the console writes it from its menu (a game that is open is "
                   "replaced when it is closed)",
            b"BY": "busy: the console is still writing a file sent before (back to its menu, "
                   "wait for it, then send again)",
+           b"PA": "path not allowed (only files of bm/shots)",
+           b"NF": "no such file",
+           b"NG": "no screenshot: no game drew a frame (start a game first)",
            b"KV": "not key=value lines: nothing changed",
            b"KA": "not a kernel for this console (the Pi Zero 2 W takes build/kernel7.img, "
                   "the RGB30 build/rgb30/kernel8.img, the other boards build/kernel.img)"}
@@ -139,7 +148,7 @@ def transfer(args, op, path, name, password):
     # the console writes it from its menu, an older one still answers OK later
     a = recv_answer(sock, 60 + len(data) // 8192)
     dt = time.time() - t0
-    print(f"\r{len(data)} bytes in {dt:.1f} s ({len(data) / 1024 / max(dt, 1e-3):.0f} KiB/s): "
+    print(f"\r{len(data)} bytes in {dt:.1f} s ({len(data) / 1024 / max(dt, 1e-3):.0f} KB/s): "
           + ANSWERS.get(a, "no answer"))
     sock.close()
     if a == b"OK" and op == b"K":
@@ -164,6 +173,148 @@ def recv_exact(sock, n, timeout):
     except (socket.timeout, ConnectionResetError):
         pass
     return data
+
+
+def refused(a):
+    """The message of a refusal; 2 if the kernel does not know T/G (too old)"""
+    if a == b"BH":
+        print("kernel too old (it does not know T/G)")
+        return 2
+    print("refused: " + ANSWERS.get(a, a or "no answer"))
+    return 1
+
+
+def fetch(args, path, password):
+    """Op G: (0, data) or (the exit code, None)"""
+    sock, a = open_request(args, b"G", path, b"", password)
+    if a != b"OK":
+        sock.close()
+        return refused(a), None
+    head = recv_exact(sock, 8, 10)
+    n, crc = struct.unpack("<II", head) if len(head) == 8 else (0, 0)
+    data = recv_exact(sock, n, 30) if len(head) == 8 else b""
+    sock.close()
+    if len(head) < 8 or len(data) != n:
+        print("incomplete answer from the console")
+        return 1, None
+    if zlib.crc32(data) & 0xFFFFFFFF != crc:
+        print("damaged in transit (crc)")
+        return 1, None
+    return 0, data
+
+
+def save(out, data):
+    try:
+        with open(out, "wb") as f:
+            f.write(data)
+    except OSError as e:
+        print(f"{out}: {e.strerror}")
+        return 1
+    print(f"{len(data)} bytes -> {out}")
+    return 0
+
+
+def get_file(args, path, out, password):
+    """--get: a file of bm/shots (or bm/bootprev.txt, bootlog.txt, lastrun.txt) on the console, written to out"""
+    rc, data = fetch(args, path, password)
+    return rc if data is None else save(out, data)
+
+
+def fetch_frame(host, password):
+    """Op F: the page on the screen now, (width, height, depth, is_rgb, pixels); RuntimeError when it fails"""
+    sock, a = open_request(argparse.Namespace(host=host), b"F", "", b"", password)
+    if a != b"OK":
+        sock.close()
+        raise RuntimeError("refused: " + ANSWERS.get(a, (a or b"no answer").decode(errors="replace")))
+    head = recv_exact(sock, 8, 10)
+    n, crc = struct.unpack("<II", head) if len(head) == 8 else (0, 0)
+    data = recv_exact(sock, n, 60) if len(head) == 8 else b""
+    sock.close()
+    if len(head) < 8 or len(data) != n or n < 8:
+        raise RuntimeError("incomplete answer from the console (a kernel from before op F answers BH)")
+    if zlib.crc32(data) & 0xFFFFFFFF != crc:
+        raise RuntimeError("damaged in transit (crc)")
+    w, h, depth, is_rgb = struct.unpack("<HHBB", data[:6])
+    if depth not in (16, 32) or len(data) != 8 + w * h * depth // 8:
+        raise RuntimeError("a frame this tool does not know (depth %d)" % depth)
+    return w, h, depth, is_rgb, data[8:]
+
+
+def frame_pixel(frame, x, y):
+    """(r, g, b) of the pixel (x, y) of a frame of fetch_frame"""
+    w, _h, depth, is_rgb, px = frame
+    if depth == 16:
+        v = px[(y * w + x) * 2] | px[(y * w + x) * 2 + 1] << 8
+        r, g, b = (v >> 11) & 31, (v >> 5) & 63, v & 31
+        return (r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2)
+    o = (y * w + x) * 4
+    return (px[o], px[o + 1], px[o + 2]) if is_rgb else (px[o + 2], px[o + 1], px[o])
+
+
+def save_ppm(frame, out):
+    """a frame as a PPM file (P6)"""
+    w, h = frame[0], frame[1]
+    with open(out, "wb") as f:
+        f.write(b"P6\n%d %d\n255\n" % (w, h))
+        for y in range(h):
+            f.write(bytes(c for x in range(w) for c in frame_pixel(frame, x, y)))
+    print(f"{w}x{h} -> {out}")
+
+
+def frame_file(args, out, password):
+    """--frame: the page on the screen now (F), written to out as a PPM"""
+    try:
+        save_ppm(fetch_frame(args.host, password), out)
+    except (RuntimeError, OSError) as e:
+        print(e)
+        return 1
+    return 0
+
+
+def view_test(args, password):
+    """--view: the stream (V) for args.view seconds, no drawing: how many frames and bytes the console sent"""
+    import bm_watch
+    w, h = (int(v) for v in (args.view_size or "120x68").split("x"))
+    t0, frames, changed, nbytes = time.time(), 0, 0, 0
+    try:
+        for _px, ch, n in bm_watch.stream_frames(args.host, password, w, h, 100):
+            frames += 1
+            changed += ch
+            nbytes += n
+            if time.time() - t0 >= args.view:
+                break
+    except (RuntimeError, OSError, ValueError) as e:
+        print(e)
+        return 1
+    dt = max(time.time() - t0, 0.001)
+    print(f"stream {w}x{h}: {frames} frames ({changed} with changes) and {nbytes} bytes in {dt:.1f} s: "
+          f"{frames / dt:.1f} frames/s, {nbytes / 1024 / dt:.1f} KB/s")
+    return 0
+
+
+def restart(args, password):
+    """--restart: the console restarts (R), with the same kernel"""
+    sock, a = open_request(args, b"R", "", b"", password)
+    sock.close()
+    if a != b"OK":
+        return refused(a)
+    return wait_reboot(args.host)
+
+
+def shot(args, out, password):
+    """--shot: a screenshot of the running game (T), then its file (G)"""
+    sock, a = open_request(args, b"T", "", b"", password)
+    if a != b"OK":
+        sock.close()
+        return refused(a)
+    head = recv_exact(sock, 4, 10)
+    name = recv_exact(sock, struct.unpack("<I", head)[0], 10) if len(head) == 4 else b""
+    sock.close()
+    if not name:
+        print("incomplete answer from the console")
+        return 1
+    time.sleep(0.35)  # wait for netxfer on device to transition from REPLIED (300ms) to IDLE
+    return get_file(args, "bm/shots/" + name.decode(errors="replace"), out, password)
 
 
 # a setting: the key letters, digits and _ (at most 23), the value one line
@@ -267,9 +418,13 @@ def logged_in(data):
     return any(m in data for m in (b"> ", b"password: ", b"bye")) or FOCUS.search(data) is not None
 
 
-def run_line(sock, line, answer):
-    """--line: ':' + the line sent; what the console prints shown until the
-    line is done (or the console goes away: reboot)"""
+KEYS_PAUSE = 0.2        # between two keys of --keys
+KEYS_READ = 3.0         # how long the answer to --keys is shown
+
+
+def keys_blocked(answer):
+    """--line and --keys need the menu or the monitor to have the keys: 2 (and
+    why) when the console says otherwise, else None"""
     m = FOCUS.search(answer)
     where = m.group(1).decode(errors="replace") if m else ""
     if where.startswith("the buttons"):
@@ -277,6 +432,63 @@ def run_line(sock, line, answer):
         return 2
     if where.startswith("the application") or where.startswith("a page"):
         print(f"\n[bm_net] the keys go to {where}: back to the menu first (Ctrl-Esc on the console)")
+        return 2
+    return None
+
+
+def run_game_exit(sock, answer):
+    """--game-exit: Ctrl-backslash (0x1C) to a game, which the runtime reads as Ctrl-Esc (back to the menu); only when
+    the console says its keys go to the application"""
+    m = FOCUS.search(answer)
+    where = m.group(1).decode(errors="replace") if m else ""
+    if not where.startswith("the application"):
+        print(f"[bm_net] the keys go to {where or 'an unknown place'}: --game-exit works in a game only")
+        return 2
+    sock.sendall(b"\x1c")
+    end = time.time() + KEYS_READ
+    while time.time() < end:
+        sock.settimeout(max(end - time.time(), 0.01))
+        try:
+            data = sock.recv(4096)
+        except (socket.timeout, OSError):
+            break
+        if not data:
+            break
+        sys.stdout.write(data.decode(errors="replace"))
+    sys.stdout.flush()
+    return 0
+
+
+def run_keys(sock, seq, answer):
+    """--keys: the keys of SEQ one at a time, then what the console prints for a few seconds"""
+    if keys_blocked(answer):
+        return 2
+    for ch in seq:
+        sock.sendall(ch.encode())
+        time.sleep(KEYS_PAUSE)
+    end = time.time() + KEYS_READ
+    while time.time() < end:
+        sock.settimeout(max(end - time.time(), 0.01))
+        try:
+            data = sock.recv(4096)
+        except socket.timeout:
+            break
+        except OSError:
+            data = b""
+        if not data:
+            print("\n[bm_net] the console closed the connection")
+            break
+        sys.stdout.write(data.decode(errors="replace"))
+        sys.stdout.flush()
+    print()
+    return 0
+
+
+def run_line(sock, line, answer):
+    """--line: ':' + the line sent; what the console prints shown until the
+    line is done (or the console goes away: reboot)"""
+    m = FOCUS.search(answer)
+    if keys_blocked(answer):
         return 2
     if not m:
         print("\n[bm_net] this kernel does not say where the keys go: the line works from its "
@@ -310,15 +522,44 @@ def main():
                     help="write the kernel (kernel.img; kernel7.img on a Pi Zero 2 W, kernel8.img on "
                          "the RGB30) and restart the console")
     ap.add_argument("--line", metavar="LINE",
-                    help="run a monitor line (commands separated by ';': gpu, b3d tests=... "
+                    help="run a monitor line (commands separated by ';': b3d tests=... "
                          "profiles=..., set key=value, send...) and show its output")
+    ap.add_argument("--in-monitor", action="store_true", help="with --keys: only when the monitor has the keys")
+    ap.add_argument("--game-exit", action="store_true", help="end the game running (the Ctrl-backslash byte, the menu is back)")
+    ap.add_argument("--keys", metavar="SEQ", help="press the keys of SEQ (letters and digits, at most 8) one by one")
     ap.add_argument("--config", nargs="*", metavar="KEY=VALUE",
                     help="the console's bm/config.txt: shown (secrets hidden), KEY=VALUE sets a key, "
                          "KEY= removes it")
+    ap.add_argument("--dev", choices=["on", "off", "1", "0"],
+                    help="no longer works: the bridge gate is set on the console (Settings > System > Bridge)")
+    ap.add_argument("--restart", action="store_true", help="restart the console (the same kernel)")
+    ap.add_argument("--shot", metavar="OUT",
+                    help="screenshot of the running game, written to OUT (a PNG)")
+    ap.add_argument("--frame", metavar="OUT",
+                    help="the page on the screen now (the menu, the monitor or a game), written to OUT (a PPM); tools/bm_watch.py repeats it")
+    ap.add_argument("--view", type=float, metavar="SECONDS",
+                    help="the stream (V) for SECONDS, not drawn: the frames and the bytes counted (tools/bm_watch.py draws it)")
+    ap.add_argument("--view-size", metavar="WxH", help="with --view: the picture asked of the console (default 120x68)")
+    ap.add_argument("--get", nargs=2, metavar=("PATH", "OUT"),
+                    help="a file of bm/shots on the console (PATH, e.g. bm/shots/pong0007.png) written to OUT")
     args = ap.parse_args()
 
+    if args.restart:
+        return restart(args, args.password or getpass.getpass("password: "))
+    if args.view is not None:
+        return view_test(args, args.password or getpass.getpass("password: "))
+    if args.frame is not None:
+        return frame_file(args, args.frame, args.password or getpass.getpass("password: "))
+    if args.shot is not None:
+        return shot(args, args.shot, args.password or getpass.getpass("password: "))
+    if args.get is not None:
+        return get_file(args, args.get[0], args.get[1], args.password or getpass.getpass("password: "))
     if args.config is not None:
         return config(args, args.password or getpass.getpass("password: "))
+
+    if args.dev is not None:
+        sys.exit("the bridge gate is the user's: set Settings > System > Bridge (off, on, fast) on the console, "
+                 "or put bm/bridge.txt with one of those words on its SD card")
 
     jobs = [(b"S", args.send), (b"P", args.play), (b"K", args.kernel)]
     jobs = [(op, f) for op, f in jobs if f]
@@ -338,6 +579,26 @@ def main():
     sys.stdout.flush()
     if b"ok - " not in answer:
         return 1
+    if args.game_exit:
+        try:
+            return run_game_exit(sock, answer)
+        finally:
+            sock.close()
+    if args.keys is not None:
+        if not re.fullmatch(r"[A-Za-z0-9]{1,8}", args.keys):
+            print("--keys: letters and digits only, at most 8")
+            return 1
+        if args.in_monitor:
+            m = FOCUS.search(answer)
+            where = m.group(1).decode(errors="replace") if m else ""
+            if not where.startswith("the monitor"):
+                print(f"[bm_net] the keys go to {where or 'an unknown place'}: these keys work in the monitor only (keys monitor first)")
+                sock.close()
+                return 2
+        try:
+            return run_keys(sock, args.keys, answer)
+        finally:
+            sock.close()
     if args.line is not None:
         try:
             return run_line(sock, args.line, answer)
@@ -386,4 +647,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except OSError as e:        # the console is off, restarting or frozen
+        print(f"[bm_net] the console does not answer ({e}): off, restarting or frozen; try again in a minute")
+        sys.exit(3)

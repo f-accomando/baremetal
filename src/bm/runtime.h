@@ -18,8 +18,8 @@ typedef struct {
     uint32_t copy_us_total;     /* frame copies to the framebuffer */
     uint32_t tris3d;            /* 3D triangles drawn in the last frame */
     int gpu3d;                  /* the GPU drew the 3D at the end */
-    uint32_t d2_ops;            /* 2D drawn after the GPU's 3D, recorded meanwhile (M35) */
-    uint32_t later;             /* frames shown a frame later (M39, gpu3d_later) */
+    uint32_t d2_ops;            /* 2D drawn after the GPU's 3D, recorded meanwhile (bm3d 4.1) */
+    uint32_t later;             /* frames shown a frame later (bm3d 6.9, gpu3d_later) */
     int ok;                     /* 0 = error (message printed), 1 = ran */
     /* the dev kit (the SDK's report of a test run: cart_arg().run) */
     uint32_t lua_peak_kb;       /* the most Lua memory seen at the end of a frame */
@@ -71,16 +71,13 @@ int  bm_run(framebuffer_t *fb, const uint8_t *data, size_t len,
 int  bm_resume(framebuffer_t *fb, uint32_t seconds, bm_stats_t *st);
 /* 1 if a cartridge is suspended (its title in `title`). */
 int  bm_suspended(char *title, size_t n);
+void bm_shot_ask(void);                         /* a screenshot of the next frame drawn (netxfer op T) */
+int  bm_shot_page(const uint16_t *px, int stride, int w, int h);   /* the 3D Bench: save the page now if the PC asked */
+void bm_shot_cancel(void);                      /* the PC stopped waiting */
+int  bm_shot_done(char *name, size_t n);        /* 0 waiting, 1 saved (name), -1 not written */
 /* Closes the suspended cartridge and frees its memory. */
 void bm_close_suspended(void);
 void bm_print_stats(const bm_stats_t *st);
-
-/* Pure C worst case: full-screen map + 256 16x16 sprites + text, at
- * 640x360 RGB565. Shows it on screen for `frames` frames; returns the
- * average drawing time in microseconds. */
-uint32_t bm_bench(framebuffer_t *fb, uint32_t frames);
-/* bm_bench drawing directly and via RAM; prints one line. */
-void bm_bench_report(framebuffer_t *fb, uint32_t frames);
 
 /* Switches the screen to w x h RGB565 double buffered and points g at the
  * back page, or at a cached RAM buffer when "via RAM" is on (console
@@ -112,6 +109,8 @@ void bm_set_arg(const char *path, const char *error);
 int  bm_take_run(char *path, size_t n);
 /* the tool a tool asked for with cart_tool(name, path) (the path: bm_take_run) */
 int  bm_take_tool(char *name, size_t n);
+/* the game a tool asked to publish with cart_publish(path): the menu opens its Publish panel */
+int  bm_take_publish(char *path, size_t n);
 const char *bm_last_error(void);
 /* cart_arg().back: the editor comes back from trying a game (1), or opens
  * the file it was given from the menu (0). */
@@ -126,7 +125,7 @@ void bm_set_arg_from(const char *tool);
  * bm Code, the Sound editor, the 3D studio): cart_save, cart_write and
  * cart_put_audio write where they are told. Off (the default), as for every
  * cartridge from the SD card or the Market, they write only .bm files in
- * /carts. */
+ * /bm. */
 void bm_set_tool(int on);
 
 /* The console's screen is square (the RGB30's panel; on by itself there):
@@ -135,13 +134,19 @@ void bm_set_tool(int on);
  * --square sets it on the PC. */
 void bm_set_square_panel(int on);
 
-/* The save file of a cartridge ("/bm/save/1A2B3C4D.SAV", CRC-32 of its
+/* The save file of a cartridge ("/bm/save/1a2b3c4d.sav", CRC-32 of its
  * title and author as in the header): its slot 1. */
 void bm_save_path(const char *title, const char *author, char *out, size_t n);
 
 /* The file of save slot 1..BM_SAVE_SLOTS from that of slot 1: the same
- * name with ".S02" ... ".S08" (save(t, slot) of the cartridges). */
+ * name with ".s02" ... ".s08" (save(t, slot) of the cartridges). */
 #define BM_SAVE_SLOTS 8
 void bm_save_slot(const char *path, int slot, char *out, size_t n);
+
+/* dark_end() fades the page with this when it is set (the Pi kernel sets it
+ * only with gpu3d_qpu=1; default NULL = g16_fade_apply, no extra work). It
+ * returns 1 if it did the fade on the GPU, 0 if the ARM did it; either way
+ * the page is the picture of g16_fade_apply. It does the ARM fallback itself. */
+extern int (*bm_fade_accel)(g16_t *g, const g16_fade_t *f);
 
 #endif

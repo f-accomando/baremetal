@@ -7,17 +7,19 @@
 #define PLAT_H
 
 #include <stdint.h>
+#include "battery_curve.h"
 
 #if defined(PLAT_RK3566)
 #define PLAT_NAME       "RGB30"
 #define PLAT_RAM_START  0x00200000u     /* below: TF-A (BL31) */
-#define PLAT_RAM_END    0x40000000u     /* 1 GiB of LPDDR4 */
+#define PLAT_RAM_END    0x40000000u     /* 1 GB of LPDDR4 */
 #define PLAT_DEV_START  0xc0000000u     /* peripherals 0xfc000000-0xffffffff */
 #define PLAT_DEV_END    0x100000000ull
 #define PLAT_GICD       0xfd400000u
 #define PLAT_GICR       0xfd460000u
-#define PLAT_FB_START   0x3c000000u     /* display and GPU memory: top 64 MiB, uncached */
+#define PLAT_FB_START   0x3c000000u     /* display and GPU memory: top 64 MB, uncached */
 #define PLAT_HEAP_END   PLAT_FB_START
+#define PLAT_CORE_MPIDR(i) ((uint64_t)(i) << 8)     /* RK3568: Aff1 = core */
 #elif defined(PLAT_VIRT)
 #define PLAT_NAME       "QEMU virt"
 #define PLAT_RAM_START  0x40000000u
@@ -28,6 +30,7 @@
 #define PLAT_GICR       0x080a0000u
 #define PLAT_FB_START   0x5e000000u
 #define PLAT_HEAP_END   0x50000000u     /* above: the SD image (sd_virt.c) */
+#define PLAT_CORE_MPIDR(i) ((uint64_t)(i))          /* QEMU virt: Aff0 = core */
 #else
 #error "PLAT_RK3566 or PLAT_VIRT"
 #endif
@@ -35,7 +38,7 @@
 #define IRQ_TIMER_PPI   30              /* EL1 physical timer (PPI 14) */
 
 #define PLAT_FB_END     PLAT_RAM_END
-/* M41: the last 4 MiB of it are the GPU's (page tables, jobs: mali.c) */
+/* The last 4 MB of it are the GPU's (page tables, jobs: mali.c) */
 #define PLAT_GPU_START  (PLAT_FB_END - (4u << 20))
 
 /* serial console: UART2 on the RGB30 (1500000 8N1, as U-Boot), the PL011 in QEMU */
@@ -77,28 +80,28 @@ void plat_sticks(int16_t axes[4]);
 /* battery voltage in mV (-1: unknown) and charger state (-1 unknown,
  * 0 not charging, 1 charging, 2 full) */
 int plat_battery(int *mv, int *charge);
+/* the fuel gauge: current in mA (negative = discharge) and the charge
+ * counter in uAh; 0, or -1 when the console cannot read them (read only,
+ * for the battery log, src/rgb30/battery.c) */
+int plat_battery_gauge(int *ma, int64_t *uah);
 /* the charger's cable: 1 in, 0 out, -1 unknown (one byte from the PMIC:
  * cheap enough to ask a few times a second, src/rgb30/battery.c) */
 int plat_power_in(void);
 
-/* the charge (0..100) of the RGB30's Li-ion cell from its voltage: a
- * table, linear in between, 0 at 3.45 V (the LED's low battery); on the
- * charger the voltage reads higher, an indication only */
-static inline int battery_percent(int mv)
+/* the charge (0..100) of the RGB30's Li-ion cell from its voltage and its
+ * current (ma: negative = discharge, 0 if unknown): the voltage at rest
+ * against a table (battery_curve.h). On the charger it reads a little high,
+ * an indication only */
+static inline int battery_percent(int mv, int ma)
 {
-    static const short v[] = { 3450, 3610, 3690, 3730, 3770, 3800, 3840, 3870, 3950, 4020, 4110, 4180 };
-    static const short pc[] = { 0, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
-    if (mv <= v[0])
-        return 0;
-    for (int i = 1; i < (int)(sizeof v / sizeof v[0]); i++)
-        if (mv < v[i])
-            return pc[i - 1] + (pc[i] - pc[i - 1]) * (mv - v[i - 1]) / (v[i] - v[i - 1]);
-    return 100;
+    return battery_curve_pct(battery_rest_mv(mv, ma));
 }
 
 /* PSCI through TF-A (SMC) on the RGB30, QEMU's PSCI (HVC) in the tests */
 /* the display off (before a restart; the RGB30's panel and backlight) */
 void plat_display_off(void);
+/* PSCI CPU_ON: the secondary core starts at entry with x0 = ctx; returns the PSCI status */
+long plat_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx);
 void plat_reset(void) __attribute__((noreturn));
 void plat_poweroff(void) __attribute__((noreturn));
 

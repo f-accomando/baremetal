@@ -3,7 +3,7 @@
  * models, zones and INFO; bm_parse still takes only cartridges; a kind
  * with a section it does not have, and a broken CRC, are refused.
  *
- *   test_res BUILD/res BUILD/carts/village.bm
+ *   test_res BUILD/res BUILD/testkit-before.bm
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,7 +48,7 @@ static int open_any(const char *dir, const char *name, bm_cart_t *c, uint8_t **d
 int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : "build/res";
-    const char *village = argc > 2 ? argv[2] : "build/carts/village.bm";
+    const char *before = argc > 2 ? argv[2] : "build/testkit-before.bm";
     bm_cart_t c;
     uint8_t *d;
     size_t len;
@@ -59,7 +59,7 @@ int main(int argc, char **argv)
         bm_model_t m;
         CHECK(bm_mesh_model(c.mesh, c.mesh_size, 0, &m) == 0 && !strcmp(m.name, "house"), "HOUSE.bmm: house first");
         bm_rig_t r;
-        CHECK(bm_anim_rig(c.anim, c.anim_size, "villager", &r) == 0, "HOUSE.bmm: the villager's skeleton");
+        CHECK(bm_anim_rig(c.anim, c.anim_size, "walker", &r) == 0, "HOUSE.bmm: the walker's skeleton");
         bm_cart_t cc;
         CHECK(bm_parse(d, len, &cc, err, sizeof err) != 0, "bm_parse refuses a resource file");
         /* a models file that says it is a sounds file: MESH is not its */
@@ -76,6 +76,14 @@ int main(int argc, char **argv)
         CHECK(!strcmp(z.name, "flag") && z.w == 8 && z.h == 8 && z.frames == 2 && z.fps == 6,
               "FLAG.bmi: flag, 8x8, 2 frames at 6 fps (%s %dx%d %d %d)", z.name, z.w, z.h, z.frames, z.fps);
         CHECK(bm_zone(&c, 1, &z) != 0, "no second zone");
+        free(d);
+    }
+    if (open_any(dir, "SHOW.bmk", &c, &d, &len) == 0) {
+        /* a kit with a picture inside: COVER (the still) is read by the parser; PREVIEW (type 16) is ignored */
+        CHECK(c.kind == BM_RES_KIT && c.cover_rgba && c.cover_w == 32 && c.cover_h == 32, "SHOW.bmk: a 32x32 cover");
+        CHECK(c.models == 1, "SHOW.bmk: its model");
+        d[12] = BM_RES_SOUND;
+        CHECK(bm_parse_any(d, len, &c, err, sizeof err) != 0, "a sounds file has no cover");
         free(d);
     }
     if (open_any(dir, "HERO.bmi", &c, &d, &len) == 0) {
@@ -106,17 +114,17 @@ int main(int argc, char **argv)
         CHECK(c.kind == BM_RES_SOUND && c.audio && !c.sheet_w, "JUMP.bms: a sound bank");
         free(d);
     }
-    if (open_any(dir, "DEMO.bmt", &c, &d, &len) == 0) {
-        CHECK(c.kind == BM_RES_MAP && c.map_w == 160 && c.map_h == 90 && c.sheet_w, "DEMO.bmt: the 160x90 map, its tiles");
+    if (open_any(dir, "SAMPLE.bmt", &c, &d, &len) == 0) {
+        CHECK(c.kind == BM_RES_MAP && c.map_w == 16 && c.map_h == 16 && c.sheet_w, "SAMPLE.bmt: the 16x16 map, its tiles");
         free(d);
     }
-    if (open_any(dir, "VILLAGE.bmc", &c, &d, &len) == 0) {
-        CHECK(c.kind == BM_RES_PALETTE && c.sheet8 && c.sheet_h == 1, "VILLAGE.bmc: a palette");
+    if (open_any(dir, "KIT.bmc", &c, &d, &len) == 0) {
+        CHECK(c.kind == BM_RES_PALETTE && c.sheet8 && c.sheet_h == 1, "KIT.bmc: a palette");
         free(d);
     }
-    if (open_any(dir, "demo_models.bm", &c, &d, &len) == 0) {
+    if (open_any(dir, "sample_models.bm", &c, &d, &len) == 0) {
         bm_cart_t cc;
-        CHECK(c.kind == BM_RES_CART && c.models == 4 && c.lua, "demo_models.bm: a cartridge with four models");
+        CHECK(c.kind == BM_RES_CART && c.models == 4 && c.lua, "sample_models.bm: a cartridge with four models");
         CHECK(bm_parse(d, len, &cc, err, sizeof err) == 0, "bm_parse takes it: %s", err);
         CHECK(bm_info_get(&c, "model", "house2", "origin", v, sizeof v) && !strcmp(v, "y"),
               "INFO: the origin of house2 (%s)", v);
@@ -129,7 +137,7 @@ int main(int argc, char **argv)
         CHECK(bm_info_get(&c, "model", "well", "author", v, 3) && !strcmp(v, "bm"), "INFO: cut to the buffer");
         free(d);
     }
-    if (open_any(village, NULL, &c, &d, &len) == 0) {
+    if (open_any(before, NULL, &c, &d, &len) == 0) {
         bm_cart_t cc;
         CHECK(c.kind == BM_RES_CART && c.models == 8, "a game with 8 models");
         CHECK(bm_parse(d, len, &cc, err, sizeof err) == 0, "bm_parse still reads it");

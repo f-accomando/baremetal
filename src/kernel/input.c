@@ -1,6 +1,7 @@
 #include "input.h"
 #include "drivers/timer.h"
 #include "drivers/uart.h"
+#include "drivers/watchdog.h"
 #include "gfx/console.h"
 #include "lib/printf.h"
 #include "usb/hid.h"
@@ -60,6 +61,7 @@ int input_key(void)
     }
     if (uart_rx_ready())
         return (unsigned char)uart_getc();
+    watchdog_progress();
     usb_poll();
     bt_poll();
     net_poll();
@@ -154,6 +156,7 @@ int input_getc_home(void)
 
 uint32_t input_buttons(int *quit)
 {
+    watchdog_progress();
     usb_poll();
     bt_poll();
     net_poll();
@@ -161,17 +164,9 @@ uint32_t input_buttons(int *quit)
     return hid_buttons();
 }
 
-uint32_t input_pad_buttons(int *quit)
-{
-    usb_poll();
-    bt_poll();
-    net_poll();
-    *quit |= hid_quit_pressed();
-    return hid_pad_buttons();
-}
-
 void input_flush(void)
 {
+    watchdog_progress();
     usb_poll();
     bt_poll();
     net_poll();
@@ -211,6 +206,7 @@ int input_ble_player(void)
 
 uint32_t input_players(uint32_t out[INPUT_PLAYERS], int text, int *quit, int *local)
 {
+    watchdog_progress();
     usb_poll();
     bt_poll();
     net_poll();

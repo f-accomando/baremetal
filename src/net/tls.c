@@ -4,6 +4,7 @@
  * the clock comes from SNTP), then plain reads and writes.
  */
 #include "tls.h"
+#include "aipair.h"
 #include "stream.h"
 
 #include "mbedtls/ctr_drbg.h"
@@ -22,6 +23,7 @@
 #include "drivers/timer.h"
 #include "fs/fat.h"
 #include "kernel/config.h"
+#include "kernel/stalls.h"
 #include "lib/printf.h"
 #include "net.h"
 
@@ -85,18 +87,30 @@ int tls_set_roots(const char *pem, size_t len)
 #else
 #define tls_load_roots_if_kernel() tls_load_roots()
 
+/* bm/ca.pem (the release's roots), then bm/ca-user.pem (the roots the user added: ai_pair's relay CA;
+ * updates rewrite ca.pem, never this file) */
 int tls_load_roots(void)
 {
     fat_entry_t e;
-    uint8_t *data;
-    size_t len;
+    uint8_t *data, *user = NULL;
+    size_t len, ul = 0;
     if (config_find_file("ca.pem", &e) || fat_load(&e, &data, &len)) {
         kprintf("\x1b[91mtls: bm/ca.pem not on the SD card (make install copies it)\x1b[0m\n");
         return -1;
     }
+    if (config_find_file(AI_USER_CA, &e) == 0 && fat_load(&e, &user, &ul) == 0 && ul) {
+        uint8_t *both = realloc(data, len + ul + 1);
+        if (both) {
+            data = both;
+            data[len++] = '\n';
+            memcpy(data + len, user, ul);
+            len += ul;
+        }
+    }
+    free(user);
     int n = tls_set_roots((const char *)data, len);
     free(data);
-    kprintf("tls: %d root certificates\n", n);
+    kprintf("tls: %d root certificates%s\n", n, ul ? " (with bm/ca-user.pem)" : "");
     return n;
 }
 #endif
@@ -208,6 +222,9 @@ tls_t *tls_open(const char *host, uint16_t port, char *err, size_t err_len)
     mbedtls_ssl_conf_ca_chain(&conf, &roots, NULL);
     mbedtls_ssl_set_bio(&t->ssl, t, bio_send, bio_recv, NULL);
     mbedtls_ssl_set_verify(&t->ssl, note_chain, t);
+#ifndef BM_HOST_TEST
+    const uint32_t hs_t0 = timer_ticks();
+#endif
     while ((r = mbedtls_ssl_handshake(&t->ssl)) != 0) {
         if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
             continue;
@@ -227,6 +244,9 @@ tls_t *tls_open(const char *host, uint16_t port, char *err, size_t err_len)
         tls_close(t);
         return NULL;
     }
+#ifndef BM_HOST_TEST
+    stall_note(&stall_tls, hs_t0, 0);
+#endif
     return t;
 }
 

@@ -513,7 +513,7 @@ int main(int argc, char **argv)
     if (getenv("BMHOST_REPORTS"))       /* the session report (BMHOST_CONFIG=session_report=1) */
         bm_print_stats(&st);
     fprintf(stderr, "bmhost: \"%s\" %ld frames, %s, a frame takes %.3f ms on this PC "
-                    "(max %.3f), %u KiB of Lua, %.1f s\n",
+                    "(max %.3f), %u KB of Lua, %.1f s\n",
             st.title, run.frame, st.ok ? "ok" : "ERROR",
             run.frame > 1 ? cpu_sum / 1000.0 / (double)(run.frame - 1) : 0.0, cpu_max / 1000.0, st.lua_kb, cpu);
     gpu3d_stats_t g;
@@ -528,11 +528,13 @@ int main(int argc, char **argv)
                         "a frame recorded meanwhile, %.2f zclear() a frame inside a job\n",
                 (double)g.queued / (double)run.frame, (double)st.d2_ops / (double)run.frame,
                 (double)g.zinjob / (double)run.frame);
-    if (st.later && run.frame > 0)      /* M39: each frame shown a frame later (gpu3d_later) */
+    if (st.later && run.frame > 0)      /* bm3d 6.9: each frame shown a frame later (gpu3d_later) */
         fprintf(stderr, "bmhost: frame later: %u frames shown a frame later, %.2f jobs a frame filled while the "
                         "GPU drew the one before\n", (unsigned)st.later, (double)g.overlapped / (double)run.frame);
-    if (g.quads2d && run.frame > 0)     /* M37: the 2D over the 3D in the GPU's job */
+    if (g.quads2d && run.frame > 0)     /* bm3d 4.8: the 2D over the 3D in the GPU's job */
         fprintf(stderr, "bmhost: 2D on the GPU: %.1f quads a frame\n", (double)g.quads2d / (double)run.frame);
+    if (g.light2d && run.frame > 0)     /* bm3d 7.17: the light of dark_end by the GPU */
+        fprintf(stderr, "bmhost: light on the GPU: %u frames\n", (unsigned)g.light2d);
     if (g.glmeshes && run.frame > 0)
         fprintf(stderr, "bmhost: vertex shader: %.0f meshes and %.0f triangles a frame\n",
                 (double)g.glmeshes / (double)run.frame, (double)g.gltris / (double)run.frame);

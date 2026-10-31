@@ -9,12 +9,15 @@
  */
 #include "audio.h"
 #include "audio_out.h"
+#include "pwm_audio.h"
 #include "iec958.h"
 #include "arch/cache.h"
 #include "drivers/mmio.h"
 #include "drivers/prop.h"
+#include "drivers/board.h"
 #include "drivers/dma.h"
 #include "drivers/timer.h"
+#include "kernel/config.h"
 #include "kernel/irq.h"
 #include "lib/printf.h"
 
@@ -199,7 +202,9 @@ static int fail(const char *why)
     return -1;
 }
 
-int audio_out_start(const char **status)
+static enum { OUT_NONE, OUT_HDMI, OUT_PWM } active_out;
+
+static int hdmi_audio_start(const char **status)
 {
     out_status = status;
     iec958_init(&iec, AUDIO_RATE);
@@ -296,12 +301,65 @@ int audio_out_start(const char **status)
     return 0;
 }
 
+int audio_out_start(const char **status)
+{
+    active_out = OUT_NONE;
+    dmb();
+
+    /* Raspberry Pi 1: supports both HDMI audio and analog PWM audio on 3.5mm jack (GPIO 40/45) */
+    if (board_is_pi1()) {
+        const char *ao = config_get("audio_out");
+        int force_pwm = ao && (strcmp(ao, "pwm") == 0 || strcmp(ao, "jack") == 0 || strcmp(ao, "analog") == 0);
+        int force_hdmi = ao && strcmp(ao, "hdmi") == 0;
+        const char *vo = config_get("video_out");
+        int is_rca = vo && (strcmp(vo, "rca") == 0 || strcmp(vo, "composite") == 0);
+
+        /* When RCA video is configured or 3.5mm jack is chosen, prioritize PWM analog audio */
+        if (force_pwm || (is_rca && !force_hdmi)) {
+            if (pwm_audio_start(status) == 0) {
+                active_out = OUT_PWM;
+                return 0;
+            }
+        }
+
+        /* Otherwise prioritize HDMI if connected and enabled */
+        if (!force_pwm && (mmio_read(HDMI_RAM_PACKET_CFG) & RAM_PACKET_ENABLE)) {
+            if (hdmi_audio_start(status) == 0) {
+                active_out = OUT_HDMI;
+                return 0;
+            }
+        }
+
+        /* Fallback: PWM analog audio on 3.5mm jack */
+        if (pwm_audio_start(status) == 0) {
+            active_out = OUT_PWM;
+            return 0;
+        }
+
+        return fail("neither HDMI nor analog audio could be started");
+    }
+
+    /* Raspberry Pi Zero / Zero W / Zero 2 W: HDMI audio only (no 3.5mm jack) */
+    if (hdmi_audio_start(status) == 0) {
+        active_out = OUT_HDMI;
+        return 0;
+    }
+
+    return -1;      /* hdmi_audio_start has set the reason in *status */
+}
+
 void audio_out_idle(void)
 {
+    if (active_out == OUT_PWM)
+        pwm_audio_idle();
 }
 
 void audio_out_print(void)
 {
+    if (active_out == OUT_PWM) {
+        pwm_audio_print();
+        return;
+    }
     dmb();
     uint32_t ctl = mmio_read(MAI_CTL);
     dmb();

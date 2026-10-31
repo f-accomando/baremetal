@@ -6,7 +6,7 @@
  */
 ENTRY(_start)
 
-STACK_SIZE = 0x100000;      /* 1 MiB: the Lua parser and VM recurse on it */
+STACK_SIZE = 0x100000;      /* 1 MB: the Lua parser and VM recurse on it */
 
 SECTIONS
 {
@@ -90,4 +90,7 @@ SECTIONS
         *(.comment)
         *(.note*)
     }
+
+    /* start.S copy_up: its loop must stay within BOOT_HEAD (0x100) bytes of _start */
+    ASSERT(copy_up_end - _start <= 0x100, "start.S copy_up loop beyond BOOT_HEAD")
 }

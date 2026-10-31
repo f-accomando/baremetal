@@ -14,6 +14,8 @@ local T = {}
 -- the mouse (require "bmui"): what the keys do, by clicking
 local U = require "bmui"
 T.U = U
+local LY = require("bmlib").layout        -- the elastic layout: the size of the screen is read, not assumed
+T.LY = LY
 -- the assistant's panel (F6, Y + X): the base of a model from a 3D recipe
 local ok_assist, assist = pcall(require, "assist")
 if not ok_assist then assist = { update = function() return false end, draw = function() end } end
@@ -30,12 +32,32 @@ local C = {
 T.C = C
 T.FOCAL = (W / 2) / math.tan(math.rad(30))      -- camera3d with fov 60
 T.FPS = 12                                       -- the timeline's frames, as in bm Animator
-T.MODES = { [0] = "linear", "smooth", "step" }
-T.LIMIT_V, T.LIMIT_T = 4096, 16384
-T.TRIS_60FPS = 1200                              -- about what the console draws at 60 fps
+T.MODES = { [0] = "linear", "smooth", "step", "ease-in", "ease-out" }
+-- the clip mode's curve (as pose_at in runtime.c): u from 0 to 1 between two keyframes -> the share of the way
+function T.ease(mode, u)
+  if mode == 2 then return 0 end
+  if mode == 1 then return u * u * (3 - 2 * u) end
+  if mode == 3 then return u * u end
+  if mode == 4 then return u * (2 - u) end
+  return u
+end
+T.LIMIT_V, T.LIMIT_T = 65535, 65535              -- u16 format limit
+T.TRIS_ARM = 1200                                 -- ARM software rasterizer limit
+T.TRIS_GPU_SCENE = 50000                          -- VideoCore IV GPU fast-path scene limit
+T.TRIS_GPU_MODEL = 8000                           -- recommended single model limit
+T.TRIS_60FPS = T.TRIS_ARM                         -- baseline 60 fps target
 -- text on rows of 16 pixels and columns of 8: the hint row, the status bar
 T.HINT_Y, T.STATUS_Y = H - 40, H - 24
 local HINT_Y, STATUS_Y = T.HINT_Y, T.STATUS_Y
+
+-- the screen changed size (screen(), lib.layout.on_resize): what was cut from W and H again
+function T.resize(w, h)
+  W, H = w, h
+  T.W, T.H = w, h
+  T.FOCAL = (w / 2) / math.tan(math.rad(30))
+  T.HINT_Y, T.STATUS_Y = h - 40, h - 24
+  HINT_Y, STATUS_Y = T.HINT_Y, T.STATUS_Y
+end
 local SEC_MESH, SEC_ANIM = 8, 9
 local TEXTURED = 0x80000000
 
@@ -123,6 +145,19 @@ function Q.slerp(a, b, u)
   return Q.norm({ a[1] * k0 + s * b[1] * k1, a[2] * k0 + s * b[2] * k1,
                   a[3] * k0 + s * b[3] * k1, a[4] * k0 + s * b[4] * k1 })
 end
+-- the shorter way from the unit vector a to the unit vector b, as a rotation
+function Q.arc(a, b)
+  local d = V.dot(a, b)
+  if d > 1 - 1e-12 then return { 0, 0, 0, 1 } end
+  if d < -1 + 1e-9 then
+    local least = abs(a[1]) <= abs(a[2]) and (abs(a[1]) <= abs(a[3]) and 1 or 3) or (abs(a[2]) <= abs(a[3]) and 2 or 3)
+    local ax = V.norm(V.cross(a, V.unit(least)))
+    return { ax[1], ax[2], ax[3], 0 }
+  end
+  local c = V.cross(a, b)
+  return Q.norm({ c[1], c[2], c[3], 1 + d })
+end
+function Q.conj(q) return { -q[1], -q[2], -q[3], q[4] } end
 -- v turned by q
 function Q.rotate(q, v)
   local u = { q[1], q[2], q[3] }
@@ -138,6 +173,1238 @@ local function name16(s)
 end
 
 local function cname(b, pos) return b:sub(pos, pos + 15):match("^[^\0]*") end
+
+----------------------------------------------------------------- G: the pure geometry of a model
+
+-- The model shape is { v = { {x, y, z}, ... }, f = { {a, b, c, colour, uv}, ... }, vb }
+-- (bm Mesh's item). Nothing here touches an editor state.
+local G = {}
+T.G = G
+
+-- the model as the program reads it: the MESH part (and the ANIM part)
+function G.model_item(name, mc, ac)
+  local nv, nf = sunpack("<I2I2", mc, 17)
+  local it = { kind = "model", name = name, v = {}, f = {}, mc = mc, mc_name = name }
+  local pos = 25
+  for i = 1, nv do
+    local x, y, z = sunpack("<fff", mc, pos)
+    it.v[i] = { x, y, z }
+    pos = pos + 12
+  end
+  for i = 1, nf do
+    local a, b, c, _, col, u0, v0, u1, v1, u2, v2 = sunpack("<I2I2I2I2I4I2I2I2I2I2I2", mc, pos)
+    local f = { a + 1, b + 1, c + 1, col & 0xFFFFFF }
+    if col & TEXTURED ~= 0 then f[4], f[5] = -1, { u0 / 8, v0 / 8, u1 / 8, v1 / 8, u2 / 8, v2 / 8 } end
+    it.f[i] = f
+    pos = pos + 24
+  end
+  if ac then
+    local nb, nc, anv = sunpack("<I2I2I2", ac, 17)
+    it.ac, it.bones, it.clips = ac, nb, nc
+    if anv == nv then
+      it.vb = {}
+      local p = 25 + nb * 44
+      for i = 1, nv do it.vb[i] = ac:byte(p + i - 1) end
+    end
+  end
+  return it
+end
+
+-- the model's part of the MESH section
+function G.encode_model(it)
+  if not it.dirty and it.mc then
+    return it.mc_name == it.name and it.mc or name16(it.name) .. it.mc:sub(17)
+  end
+  local out = { name16(it.name), spack("<I2I2I4", #it.v, #it.f, 0) }
+  for _, p in ipairs(it.v) do out[#out + 1] = spack("<fff", p[1], p[2], p[3]) end
+  for _, f in ipairs(it.f) do
+    local col, u, t = f[4], f[5], { 0, 0, 0, 0, 0, 0 }
+    if col == -1 then
+      col = TEXTURED
+      if u then for k = 1, 6 do t[k] = clamp(round(u[k] * 8), 0, 65535) end end
+    else
+      col = col & 0xFFFFFF
+    end
+    out[#out + 1] = spack("<I2I2I2I2I4I2I2I2I2I2I2", f[1] - 1, f[2] - 1, f[3] - 1, 0, col,
+                          t[1], t[2], t[3], t[4], t[5], t[6])
+  end
+  return table.concat(out)
+end
+
+-- every face looks away from the point c
+function G.orient(it, c)
+  for _, f in ipairs(it.f) do
+    local a, b, d = it.v[f[1]], it.v[f[2]], it.v[f[3]]
+    local ux, uy, uz = b[1] - a[1], b[2] - a[2], b[3] - a[3]
+    local vx, vy, vz = d[1] - a[1], d[2] - a[2], d[3] - a[3]
+    local nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+    local mx, my, mz = (a[1] + b[1] + d[1]) / 3 - c[1], (a[2] + b[2] + d[2]) / 3 - c[2], (a[3] + b[3] + d[3]) / 3 - c[3]
+    if nx * mx + ny * my + nz * mz < 0 then f[2], f[3] = f[3], f[2] end
+  end
+end
+
+function G.normal_of(it, f)
+  local a, b, c = it.v[f[1]], it.v[f[2]], it.v[f[3]]
+  local ux, uy, uz = b[1] - a[1], b[2] - a[2], b[3] - a[3]
+  local vx, vy, vz = c[1] - a[1], c[2] - a[2], c[3] - a[3]
+  return { uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx }
+end
+
+function G.unit(v)
+  local l = sqrt(v[1] * v[1] + v[2] * v[2] + v[3] * v[3])
+  if l < 1e-9 then return { 0, 1, 0 } end
+  return { v[1] / l, v[2] / l, v[3] / l }
+end
+
+function G.flip(f)
+  f[2], f[3] = f[3], f[2]
+  local u = f[5]
+  if u then u[3], u[4], u[5], u[6] = u[5], u[6], u[3], u[4] end
+end
+
+-- vertices no face uses go away (the bones follow). sv is a selection
+-- { [vertex] = order }; the function returns it with the new numbers. A second
+-- set (extra: for example the hidden vertices) is renumbered the same way and
+-- returned as the second value.
+function G.compact(it, sv, extra)
+  local used, map, nv, vb = {}, {}, {}, it.vb and {} or nil
+  for _, f in ipairs(it.f) do used[f[1]], used[f[2]], used[f[3]] = true, true, true end
+  for i, p in ipairs(it.v) do
+    if used[i] then
+      nv[#nv + 1] = p
+      map[i] = #nv
+      if vb then vb[#nv] = it.vb[i] end
+    end
+  end
+  for _, f in ipairs(it.f) do f[1], f[2], f[3] = map[f[1]], map[f[2]], map[f[3]] end
+  it.v = nv
+  if vb then it.vb = vb end
+  local out, out2 = {}, {}
+  for i, o in pairs(sv or {}) do if map[i] then out[map[i]] = o end end
+  for i, o in pairs(extra or {}) do if map[i] then out2[map[i]] = o end end
+  return out, out2
+end
+
+-- Comfort tools (APP-11). All pure: they know no editor state.
+-- G.box_pick(sx, sy, x0, y0, x1, y1, skip): the vertices whose screen place (sx[i], sy[i]) is inside the
+-- rectangle (any two opposite corners), in order; a vertex with no place (behind the camera) or in the
+-- set skip is left out.
+function G.box_pick(sx, sy, x0, y0, x1, y1, skip)
+  if x0 > x1 then x0, x1 = x1, x0 end
+  if y0 > y1 then y0, y1 = y1, y0 end
+  local out = {}
+  for i, x in pairs(sx) do
+    local y = sy[i]
+    if y and x >= x0 and x <= x1 and y >= y0 and y <= y1 and not (skip and skip[i]) then out[#out + 1] = i end
+  end
+  table.sort(out)
+  return out
+end
+
+-- The share of a move a vertex at distance d from the chosen ones takes when the radius is r: 1 at the
+-- chosen ones, a smooth fall (smoothstep) to 0 at r, 0 beyond.
+function G.falloff(d, r)
+  if r <= 0 or d >= r then return 0 end
+  local w = 1 - d / r
+  return w * w * (3 - 2 * w)
+end
+
+-- Proportional (soft) move: { [vertex] = weight } for the vertices within r of the nearest vertex of
+-- src (a list of vertex numbers), weight from G.falloff. A vertex of src, or in the set skip, is not in the
+-- result. A hash grid keeps the cost near the number of vertices.
+function G.soft_weights(it, src, r, skip)
+  local out = {}
+  if r <= 0 or #src == 0 then return out end
+  local cell, grid, v = r, {}, it.v
+  local function key(cx, cy, cz) return (cx * 73856093) ~ (cy * 19349663) ~ (cz * 83492791) end
+  local isrc = {}
+  for _, i in ipairs(src) do
+    local p = v[i]
+    isrc[i] = true
+    local k = key(math.floor(p[1] / cell), math.floor(p[2] / cell), math.floor(p[3] / cell))
+    local b = grid[k]
+    if not b then b = {}; grid[k] = b end
+    b[#b + 1] = i
+  end
+  local r2 = r * r
+  for i, p in ipairs(v) do
+    if not isrc[i] and not (skip and skip[i]) then
+      local cx, cy, cz = math.floor(p[1] / cell), math.floor(p[2] / cell), math.floor(p[3] / cell)
+      local best = r2
+      for dx = -1, 1 do for dy = -1, 1 do for dz = -1, 1 do
+        local b = grid[key(cx + dx, cy + dy, cz + dz)]
+        if b then
+          for _, j in ipairs(b) do
+            local q = v[j]
+            local ex, ey, ez = p[1] - q[1], p[2] - q[2], p[3] - q[3]
+            local d2 = ex * ex + ey * ey + ez * ez
+            if d2 < best then best = d2 end
+          end
+        end
+      end end end
+      if best < r2 then
+        local w = G.falloff(math.sqrt(best), r)
+        if w > 0 then out[i] = w end
+      end
+    end
+  end
+  return out
+end
+
+-- Smooth (APP-25, Shift+V): one pass that relaxes the vertices of sv (a list) toward the mean of their
+-- edge neighbours: p + k * (mean - p). Every new position comes from the old ones (no order effect).
+-- A vertex on an open border (an edge with one face), one with no edge, and one not in range stay.
+-- fol = { [leader] = counterpart } (live mirror): the counterpart gets the mirror image (x -> -x) of the
+-- new position of its leader. Returns the number of vertices that moved.
+function G.smooth(it, sv, k, fol)
+  local v = it.v
+  local nb, border = {}, {}
+  for key, l in pairs(G.edge_faces(it)) do
+    local a, b = G.edge_ends(key)
+    nb[a] = nb[a] or {}; nb[b] = nb[b] or {}
+    nb[a][#nb[a] + 1] = b; nb[b][#nb[b] + 1] = a
+    if #l == 1 then border[a], border[b] = true, true end
+  end
+  local new, n = {}, 0
+  for _, i in ipairs(sv) do
+    local l, p = nb[i], v[i]
+    if p and l and not border[i] and not new[i] then
+      local x, y, z = 0, 0, 0
+      for _, j in ipairs(l) do local q = v[j]; x, y, z = x + q[1], y + q[2], z + q[3] end
+      local m = #l
+      new[i] = { p[1] + k * (x / m - p[1]), p[2] + k * (y / m - p[2]), p[3] + k * (z / m - p[3]) }
+    end
+  end
+  for i, q in pairs(new) do
+    local p = v[i]
+    p[1], p[2], p[3] = q[1], q[2], q[3]
+    n = n + 1
+    local j = fol and fol[i]
+    if j and v[j] then v[j][1], v[j][2], v[j][3] = -q[1], q[2], q[3]; n = n + 1 end
+  end
+  return n
+end
+
+-- Hide and isolate: hid is a set { [vertex] = true }. A face is hidden when any corner is.
+function G.face_hidden(f, hid)
+  return hid[f[1]] or hid[f[2]] or hid[f[3]] or false
+end
+
+-- every vertex but the ones in keep goes into the set (isolate)
+function G.isolate(it, keep)
+  local hid = {}
+  for i in ipairs(it.v) do if not keep[i] then hid[i] = true end end
+  return hid
+end
+
+-- Numeric entry: the text typed into a number, or nil. "-", "" and "." are not numbers; a trailing point is
+-- fine ("2." is 2).
+function G.parse_number(s)
+  if s == nil or s == "" or s == "-" or s == "." or s == "-." then return nil end
+  return tonumber(s)
+end
+
+-- Reference pictures (front and side): where the picture of a slot is drawn. view = { yaw, pitch }; the
+-- slot "front" shows when the camera looks along the Z axis (yaw 0 or pi), "side" along the X axis
+-- (yaw +-pi/2), within the tolerance tol (radians, default 0.3) and with the pitch near 0. Returns the
+-- slot's flip: false (as stored), true (seen from the back), or nil (not looked at).
+function G.ref_flip(slot, yaw, pitch, tol)
+  tol = tol or 0.3
+  if math.abs(pitch) > tol then return nil end
+  local c, s = math.cos(yaw), math.sin(yaw)
+  if slot == "front" then
+    if c >= math.cos(tol) then return false elseif c <= -math.cos(tol) then return true end
+  else
+    if s <= -math.cos(tol) then return false elseif s >= math.cos(tol) then return true end
+  end
+  return nil
+end
+
+-- the faces with two equal corners go away; returns how many
+function G.drop_degenerate(it)
+  local out = {}
+  for _, f in ipairs(it.f) do if f[1] ~= f[2] and f[2] ~= f[3] and f[1] ~= f[3] then out[#out + 1] = f end end
+  local n = #it.f - #out
+  it.f = out
+  return n
+end
+
+function G.add_vertex(it, p, from)
+  it.v[#it.v + 1] = { p[1], p[2], p[3] }
+  if it.vb then it.vb[#it.v] = it.vb[from] or 0 end
+  return #it.v
+end
+
+-- Mirror across the plane X = 0. G.mirror_pairs(it, list, eps) takes a list
+-- of vertex numbers and returns { [vertex] = partner }: the vertex at the
+-- mirrored position (-x, y, z), within eps (0.001 by default). A vertex on
+-- the plane is its own partner. A vertex with no counterpart is not in the
+-- table. When two vertices share the place, the nearest one is the partner.
+function G.mirror_pairs(it, list, eps)
+  eps = eps or 0.001
+  local cell, grid, v = eps * 2, {}, it.v
+  local function key(cx, cy, cz) return (cx * 1000003 + cy) * 1000033 + cz end
+  for i, p in ipairs(v) do
+    local k = key(floor(p[1] / cell), floor(p[2] / cell), floor(p[3] / cell))
+    local b = grid[k]
+    if b then b[#b + 1] = i else grid[k] = { i } end
+  end
+  local out = {}
+  for _, i in ipairs(list) do
+    local p = v[i]
+    local x, y, z = -p[1], p[2], p[3]
+    local cx, cy, cz = floor(x / cell), floor(y / cell), floor(z / cell)
+    local best, bd = nil, eps * eps * 3 + 1e-12
+    for dx = -1, 1 do for dy = -1, 1 do for dz = -1, 1 do
+      local b = grid[key(cx + dx, cy + dy, cz + dz)]
+      if b then
+        for _, j in ipairs(b) do
+          local q = v[j]
+          local ex, ey, ez = q[1] - x, q[2] - y, q[3] - z
+          if math.abs(ex) <= eps and math.abs(ey) <= eps and math.abs(ez) <= eps then
+            local d = ex * ex + ey * ey + ez * ez
+            if d < bd then best, bd = j, d end
+          end
+        end
+      end
+    end end end
+    out[i] = best
+  end
+  return out
+end
+
+-- The faces that mirror the faces fs (a list of face numbers): the face whose
+-- three corners are the partners (table mp of G.mirror_pairs, which must hold
+-- every corner of fs) of the three corners. Returns { [face] = partner face };
+-- a face with no counterpart is not in the table.
+function G.mirror_faces(it, fs, mp)
+  local byk, out = {}, {}
+  local function key(a, b, c)
+    if a > b then a, b = b, a end
+    if b > c then b, c = c, b end
+    if a > b then a, b = b, a end
+    return (a * 70001 + b) * 70001 + c
+  end
+  for fi, f in ipairs(it.f) do
+    local k = key(f[1], f[2], f[3])
+    local b = byk[k]
+    if b then b[#b + 1] = fi else byk[k] = { fi } end
+  end
+  for _, fi in ipairs(fs) do
+    local f = it.f[fi]
+    local a, b, c = mp[f[1]], mp[f[2]], mp[f[3]]
+    if a and b and c then
+      local l = byk[key(a, b, c)]
+      if l then out[fi] = l[1] end
+    end
+  end
+  return out
+end
+
+-- Edges are not stored: they come from the triangles. An edge is a pair of
+-- vertices a < b; its key is a * 65536 + b.
+function G.edge_key(a, b)
+  if a > b then a, b = b, a end
+  return a * 65536 + b
+end
+
+function G.edge_ends(k) return k // 65536, k % 65536 end
+
+-- { [edge key] = { the faces that have the edge } }
+function G.edge_faces(it)
+  local out = {}
+  for fi, f in ipairs(it.f) do
+    for k = 1, 3 do
+      local key = G.edge_key(f[k], f[k % 3 + 1])
+      local l = out[key]
+      if l then l[#l + 1] = fi else out[key] = { fi } end
+    end
+  end
+  return out
+end
+
+-- The quad that the face ti makes across the edge key: ti and the face
+-- over one of its other two edges (the diagonal; it must be shared with one
+-- face only, and the two faces must look the same way: normals within 60
+-- degrees; when both edges fit, the flatter pair, then the longer edge, is the
+-- diagonal). Returns { c = {q1, q2, q3, q4} the corners in the winding of
+-- ti with the edge (q1, q2) and the opposite edge (q3, q4), t = ti, u = the
+-- other face, e2 = the key of the opposite edge } or nil.
+local function loop_quad(it, ef, ti, key)
+  local f = it.f[ti]
+  local p, q, c
+  for k = 1, 3 do
+    if G.edge_key(f[k], f[k % 3 + 1]) == key then p, q, c = f[k], f[k % 3 + 1], f[(k + 1) % 3 + 1] end
+  end
+  if not p then return nil end
+  local n1 = G.unit(G.normal_of(it, f))
+  local best
+  for side = 1, 2 do
+    local x, y = c, p
+    if side == 1 then x, y = q, c end
+    local l = ef[G.edge_key(x, y)]
+    if l and #l == 2 then
+      local u = l[1] == ti and l[2] or l[1]
+      local g = it.f[u]
+      local d
+      for k = 1, 3 do if g[k] ~= x and g[k] ~= y then d = g[k] end end
+      if d and d ~= p and d ~= q and d ~= c then
+        local n2 = G.unit(G.normal_of(it, g))
+        local dot = n1[1] * n2[1] + n1[2] * n2[2] + n1[3] * n2[3]
+        local a, b = it.v[x], it.v[y]
+        local len = (a[1] - b[1]) ^ 2 + (a[2] - b[2]) ^ 2 + (a[3] - b[3]) ^ 2
+        if dot >= 0.5 and (not best or dot > best.dot + 1e-4 or (dot > best.dot - 1e-4 and len > best.len)) then
+          best = { dot = dot, len = len, u = u,
+                   c = side == 1 and { p, q, d, c } or { p, q, c, d } }
+        end
+      end
+    end
+  end
+  if not best then return nil end
+  return { c = best.c, t = ti, u = best.u, e2 = G.edge_key(best.c[3], best.c[4]) }
+end
+
+-- Loop cut, the plan. The ring of quads (two triangles) that cross the edge
+-- (a, b): from the edge, over the quad of each face it has, to the opposite
+-- edge, and on, until the ring is closed. The walk stops at an open border
+-- (an edge with one face) and at a face that makes no quad: that face is cut
+-- in two from the new vertex to its far corner, so no gap stays. Nothing
+-- changes. Returns the plan { edges = {keys}, quads = {...}, plains = { {face,
+-- key} }, closed } or nil and a message.
+function G.loop_plan(it, a, b)
+  local ef = G.edge_faces(it)
+  local k0 = G.edge_key(a, b)
+  local l0 = ef[k0]
+  if not l0 then return nil, "this is not an edge" end
+  if #l0 > 2 then return nil, "the edge has more than 2 faces" end
+  local plan = { edges = { k0 }, quads = {}, plains = {}, closed = false }
+  local seen, used, failed = { [k0] = true }, {}, nil
+  local function walk(ti)
+    local key = k0
+    while true do
+      if used[ti] then failed = "the ring crosses itself"; return end
+      local qd = loop_quad(it, ef, ti, key)
+      if not qd then
+        used[ti] = true
+        plan.plains[#plan.plains + 1] = { ti, key }
+        return
+      end
+      if used[qd.u] then failed = "the ring crosses itself"; return end
+      used[ti], used[qd.u] = true, true
+      plan.quads[#plan.quads + 1] = qd
+      if qd.e2 == k0 then plan.closed = true; return end
+      if seen[qd.e2] then failed = "the ring crosses itself"; return end
+      seen[qd.e2] = true
+      plan.edges[#plan.edges + 1] = qd.e2
+      local l = ef[qd.e2]
+      if #l > 2 then failed = "an edge of the ring has more than 2 faces"; return end
+      if #l == 1 then return end
+      key, ti = qd.e2, l[1] == qd.u and l[2] or l[1]
+    end
+  end
+  walk(l0[1])
+  if not failed and l0[2] and not used[l0[2]] then walk(l0[2]) end
+  if failed then return nil, failed end
+  if #plan.quads == 0 then return nil, "no quad around this edge (two triangles that make a square)" end
+  return plan
+end
+
+-- Loop cut, the change: one new vertex in the middle of each edge of the
+-- plan (the bone of the lower end; the uv by the mean), the quads in 4
+-- triangles, the other faces in 2. A new triangle takes the colour and the uv
+-- of the old face that holds most of its corners. Returns { mids = the new
+-- vertices, rungs = { {m, n} one for each quad: the new edge across it } }.
+function G.loop_apply(it, plan)
+  local mid, ends = {}, {}
+  for _, k in ipairs(plan.edges) do
+    local a, b = G.edge_ends(k)
+    local p, q = it.v[a], it.v[b]
+    mid[k] = G.add_vertex(it, { (p[1] + q[1]) / 2, (p[2] + q[2]) / 2, (p[3] + q[3]) / 2 }, a)
+    ends[mid[k]] = { a, b }
+  end
+  local function has(f, v)
+    if ends[v] then return has(f, ends[v][1]) and has(f, ends[v][2]) end
+    return f[1] == v or f[2] == v or f[3] == v
+  end
+  local function uvof(f, v)
+    if not f[5] then return nil end
+    for k = 1, 3 do if f[k] == v then return { f[5][k * 2 - 1], f[5][k * 2] } end end
+  end
+  -- the uv of a corner (an old vertex or a new one) from the face f, else from g
+  local function corner_uv(v, f, g)
+    local e = ends[v]
+    if e then
+      local a, b = corner_uv(e[1], f, g), corner_uv(e[2], f, g)
+      return { (a[1] + b[1]) / 2, (a[2] + b[2]) / 2 }
+    end
+    return uvof(f, v) or uvof(g, v) or { 0, 0 }
+  end
+  local function tri(a, b, c, f, g)
+    local sf, sg = 0, 0
+    for _, v in ipairs({ a, b, c }) do
+      if has(f, v) then sf = sf + 1 end
+      if has(g, v) then sg = sg + 1 end
+    end
+    local s, o = f, g
+    if sg > sf then s, o = g, f end
+    local uv
+    if s[5] then
+      local ua, ub, uc = corner_uv(a, s, o), corner_uv(b, s, o), corner_uv(c, s, o)
+      uv = { ua[1], ua[2], ub[1], ub[2], uc[1], uc[2] }
+    end
+    return { a, b, c, s[4], uv }
+  end
+  local add = {}
+  local rungs = {}
+  for _, qd in ipairs(plan.quads) do
+    local q1, q2, q3, q4 = qd.c[1], qd.c[2], qd.c[3], qd.c[4]
+    local m, n = mid[G.edge_key(q1, q2)], mid[qd.e2]
+    local f, g = it.f[qd.t], it.f[qd.u]
+    local t = { tri(q1, m, n, f, g), tri(q1, n, q4, f, g), tri(m, q2, q3, f, g), tri(m, q3, n, f, g) }
+    it.f[qd.t], it.f[qd.u] = t[1], t[2]
+    add[#add + 1] = t[3]; add[#add + 1] = t[4]
+    rungs[#rungs + 1] = { m, n }
+  end
+  for _, pl in ipairs(plan.plains) do
+    local f = it.f[pl[1]]
+    local m = mid[pl[2]]
+    for k = 1, 3 do
+      if G.edge_key(f[k], f[k % 3 + 1]) == pl[2] then
+        local x, y, z = f[k], f[k % 3 + 1], f[(k + 1) % 3 + 1]
+        it.f[pl[1]] = tri(x, m, z, f, f)
+        add[#add + 1] = tri(m, y, z, f, f)
+        break
+      end
+    end
+  end
+  for _, f in ipairs(add) do it.f[#it.f + 1] = f end
+  local mids = {}
+  for _, k in ipairs(plan.edges) do mids[#mids + 1] = mid[k] end
+  return { mids = mids, rungs = rungs }
+end
+
+function G.loop_cut(it, a, b)
+  local plan, err = G.loop_plan(it, a, b)
+  if not plan then return nil, err end
+  return G.loop_apply(it, plan), plan
+end
+
+-- Loop cut with the live mirror (APP-16): the ring of the edge a-b, and when the edge across X = 0
+-- (its ends' partners, G.mirror_pairs) is an edge too and is not on the first ring, the ring of that edge
+-- as well. A ring that crosses X = 0 holds both edges: it is cut once. Returns { mids, rungs } of both
+-- rings together, the first plan and the number of rings cut (1 or 2); or nil and a message.
+-- A counterpart edge whose ring cannot be cut leaves the first ring cut alone (rings = 1, mirror_err).
+function G.loop_cut_mirror(it, a, b)
+  local plan, err = G.loop_plan(it, a, b)
+  if not plan then return nil, err end
+  local mp = G.mirror_pairs(it, { a, b })
+  local ma, mb = mp[a], mp[b]
+  local k0 = G.edge_key(a, b)
+  local k2
+  if ma and mb and ma ~= mb then
+    k2 = G.edge_key(ma, mb)
+    if k2 == k0 or not G.edge_faces(it)[k2] then k2 = nil end
+  end
+  if k2 then for _, k in ipairs(plan.edges) do if k == k2 then k2 = nil; break end end end
+  local res = G.loop_apply(it, plan)
+  res.rings = 1
+  if k2 then
+    local plan2, err2 = G.loop_plan(it, ma, mb)
+    if plan2 then
+      local r2 = G.loop_apply(it, plan2)
+      for _, m in ipairs(r2.mids) do res.mids[#res.mids + 1] = m end
+      for _, r in ipairs(r2.rungs) do res.rungs[#res.rungs + 1] = r end
+      res.rings = 2
+      res.quads2, res.plains2 = #plan2.quads, #plan2.plains
+    else
+      res.mirror_err = err2
+    end
+  end
+  return res, plan
+end
+
+-- Knife-lite, the plan. The two edges k1 and k2 must be two edges of one
+-- triangle (they meet at its apex p). The cut joins the middles of the two
+-- edges. The face across each edge (if the edge has one) is cut in 2 too, so
+-- no crack stays. Nothing changes. Returns the plan { t = the triangle, p,
+-- a, b = its corners (the edges are p-a and p-b), n1, n2 = the faces across
+-- the edges or nil } or nil and a message.
+function G.knife_plan(it, k1, k2)
+  if k1 == k2 then return nil, "choose two different edges" end
+  local ef = G.edge_faces(it)
+  local l1, l2 = ef[k1], ef[k2]
+  if not l1 or not l2 then return nil, "this is not an edge" end
+  if #l1 > 2 or #l2 > 2 then return nil, "an edge has more than 2 faces" end
+  local t
+  for _, x in ipairs(l1) do
+    for _, y in ipairs(l2) do if x == y and not t then t = x end end
+  end
+  if not t then return nil, "the two edges do not share a triangle" end
+  local a1, b1 = G.edge_ends(k1)
+  local a2, b2 = G.edge_ends(k2)
+  local p, a, b
+  if a1 == a2 then p, a, b = a1, b1, b2
+  elseif a1 == b2 then p, a, b = a1, b1, a2
+  elseif b1 == a2 then p, a, b = b1, a1, b2
+  elseif b1 == b2 then p, a, b = b1, a1, a2
+  else return nil, "the two edges do not share a triangle" end
+  local n1, n2
+  for _, x in ipairs(l1) do if x ~= t then n1 = x end end
+  for _, x in ipairs(l2) do if x ~= t then n2 = x end end
+  if n1 and n1 == n2 then return nil, "the faces next to the edges are the same" end
+  return { t = t, p = p, a = a, b = b, n1 = n1, n2 = n2, k1 = k1, k2 = k2 }
+end
+
+-- Knife-lite, the change: one new vertex in the middle of each of the two
+-- edges (the bone of the lower end; the uv by the mean), the triangle in 3
+-- triangles, the face across each edge in 2. The faces keep their colour,
+-- sheet flag and winding. Returns { mids = {m1, m2}, rung = {m1, m2} the new
+-- edge, faces = the number of faces added }.
+function G.knife_apply(it, plan)
+  local mid = {}
+  for _, k in ipairs({ plan.k1, plan.k2 }) do
+    local a, b = G.edge_ends(k)
+    local p, q = it.v[a], it.v[b]
+    mid[k] = G.add_vertex(it, { (p[1] + q[1]) / 2, (p[2] + q[2]) / 2, (p[3] + q[3]) / 2 }, a)
+  end
+  local ends = { [mid[plan.k1]] = { G.edge_ends(plan.k1) }, [mid[plan.k2]] = { G.edge_ends(plan.k2) } }
+  local function uvof(f, v)
+    local e = ends[v]
+    if e then
+      local x, y = uvof(f, e[1]), uvof(f, e[2])
+      return { (x[1] + y[1]) / 2, (x[2] + y[2]) / 2 }
+    end
+    for k = 1, 3 do if f[k] == v then return { f[5][k * 2 - 1], f[5][k * 2] } end end
+    return { 0, 0 }
+  end
+  local function tri(a, b, c, s)
+    local uv
+    if s[5] then
+      local ua, ub, uc = uvof(s, a), uvof(s, b), uvof(s, c)
+      uv = { ua[1], ua[2], ub[1], ub[2], uc[1], uc[2] }
+    end
+    return { a, b, c, s[4], uv }
+  end
+  local add = {}
+  -- the triangle: rotated to x = p; my on x-y, mz on x-z
+  local f = it.f[plan.t]
+  local k = 1
+  while f[k] ~= plan.p do k = k + 1 end
+  local x, y, z = f[k], f[k % 3 + 1], f[(k + 1) % 3 + 1]
+  local my = mid[G.edge_key(x, y)]
+  local mz = mid[G.edge_key(x, z)]
+  it.f[plan.t] = tri(x, my, mz, f)
+  add[#add + 1] = tri(my, y, z, f)
+  add[#add + 1] = tri(my, z, mz, f)
+  -- the face across each edge, cut in 2 from the new vertex to its far corner
+  for _, pr in ipairs({ { plan.n1, plan.k1 }, { plan.n2, plan.k2 } }) do
+    if pr[1] then
+      local g, m = it.f[pr[1]], mid[pr[2]]
+      for j = 1, 3 do
+        if G.edge_key(g[j], g[j % 3 + 1]) == pr[2] then
+          local gx, gy, gz = g[j], g[j % 3 + 1], g[(j + 1) % 3 + 1]
+          it.f[pr[1]] = tri(gx, m, gz, g)
+          add[#add + 1] = tri(m, gy, gz, g)
+          break
+        end
+      end
+    end
+  end
+  for _, nf in ipairs(add) do it.f[#it.f + 1] = nf end
+  return { mids = { mid[plan.k1], mid[plan.k2] }, rung = { mid[plan.k1], mid[plan.k2] }, faces = #add }
+end
+
+function G.knife(it, k1, k2)
+  local plan, err = G.knife_plan(it, k1, k2)
+  if not plan then return nil, err end
+  return G.knife_apply(it, plan), plan
+end
+----------------------------------------------------------------- finish tools (APP-12): bevel, box projection, humanoid base
+do
+  local function sub3(a, b) return { a[1] - b[1], a[2] - b[2], a[3] - b[3] } end
+  local function dot3(a, b) return a[1] * b[1] + a[2] * b[2] + a[3] * b[3] end
+  local function cross3(a, b)
+    return { a[2] * b[3] - a[3] * b[2], a[3] * b[1] - a[1] * b[3], a[1] * b[2] - a[2] * b[1] }
+  end
+  local function len3(a) return sqrt(dot3(a, a)) end
+
+  -- Bevel. An edge shared by two faces becomes a narrow strip: each end of the edge is split in two
+  -- vertices, one for each face, pushed w into its face and across the edge; two triangles fill the strip.
+  -- A vertex where several chosen edges meet gets one vertex for each sector between them, and a cap
+  -- face (a polygon of the sector vertices) when 3 or more edges meet. A vertex with one chosen edge keeps
+  -- its fan whole except one face that is cut in two (the "straddle"), so no gap stays. Faces keep their
+  -- colour and uv; the strip takes the colour and uv of the face that holds the edge from a to b.
+  G.BEVEL_FLAT = 0.9995         -- two faces with normals this close (dot) are flat: no bevel there
+
+  -- the direction in the plane of face f, across the edge (v, u), into the face
+  local function bevel_dir(it, f, v, u)
+    local n = G.unit(G.normal_of(it, f))
+    local d = G.unit(cross3(n, G.unit(sub3(it.v[u], it.v[v]))))
+    local third
+    for k = 1, 3 do if f[k] ~= v and f[k] ~= u then third = f[k] end end
+    if dot3(d, sub3(it.v[third], it.v[v])) < 0 then d = { -d[1], -d[2], -d[3] } end
+    return d
+  end
+
+  -- the faces around vertex v in order (each shares the edge (v, y) with the next); nil if not a closed fan
+  local function bevel_fan(it, v, fl)
+    local out, info = {}, {}
+    for _, fi in ipairs(fl) do
+      local f = it.f[fi]
+      local k = 1
+      while f[k] ~= v do k = k + 1 end
+      local x, y = f[k % 3 + 1], f[(k + 1) % 3 + 1]
+      if out[x] then return nil end
+      out[x] = fi
+      info[fi] = { x = x, y = y }
+    end
+    local cyc, seen, cur = { fl[1] }, { [fl[1]] = true }, fl[1]
+    for i = 2, #fl do
+      local nxt = out[info[cur].y]
+      if not nxt or seen[nxt] then return nil end
+      seen[nxt] = true
+      cyc[i] = nxt
+      cur = nxt
+    end
+    if out[info[cur].y] ~= fl[1] then return nil end
+    return cyc, info
+  end
+
+  local function corner_uv(f, v)
+    if not f[5] then return nil end
+    for k = 1, 3 do if f[k] == v then return { f[5][k * 2 - 1], f[5][k * 2] } end end
+  end
+
+  -- G.bevel_plan(it, keys, w): keys = a list of edge keys. Nothing changes. Returns the plan or nil and a
+  -- message. plan.w is the width used (never more than 0.45 of the height of a face over the edge),
+  -- plan.flat the number of flat edges left out, plan.edges the edges that will be bevelled.
+  function G.bevel_plan(it, keys, w)
+    if not w or w <= 0 then return nil, "the width must be more than 0" end
+    local ef = G.edge_faces(it)
+    local chosen, order, flat, hmin = {}, {}, 0, 1e30
+    for _, k in ipairs(keys) do
+      if chosen[k] == nil then
+        local l = ef[k]
+        if not l then return nil, "this is not an edge" end
+        if #l ~= 2 then return nil, "an edge on a border, or with more than 2 faces, cannot be bevelled" end
+        local f1, f2, a, b
+        for _, fi in ipairs(l) do
+          local f = it.f[fi]
+          for j = 1, 3 do
+            local x, y = f[j], f[j % 3 + 1]
+            if G.edge_key(x, y) == k then
+              if not f1 then f1, a, b = fi, x, y
+              elseif x == b and y == a then f2 = fi end
+            end
+          end
+        end
+        if not f2 then return nil, "the two faces of an edge look different ways: turn one over (i)" end
+        local n1, n2 = G.normal_of(it, it.f[f1]), G.normal_of(it, it.f[f2])
+        local l1, l2 = len3(n1), len3(n2)
+        if l1 < 1e-12 or l2 < 1e-12 then return nil, "an edge has a face with no area" end
+        if dot3(n1, n2) / (l1 * l2) > G.BEVEL_FLAT then
+          flat = flat + 1
+          chosen[k] = false
+        else
+          local el = len3(sub3(it.v[b], it.v[a]))
+          hmin = min(hmin, l1 / el, l2 / el)
+          chosen[k] = { a = a, b = b, f1 = f1, f2 = f2 }
+          order[#order + 1] = k
+        end
+      end
+    end
+    if #order == 0 then
+      return nil, flat > 0 and "the chosen edges are flat: nothing to bevel" or "choose edges first"
+    end
+    w = min(w, 0.45 * hmin)
+    -- the faces around each vertex that an edge touches
+    local vs, vlist = {}, {}
+    for _, k in ipairs(order) do
+      for _, v in ipairs({ chosen[k].a, chosen[k].b }) do
+        if not vs[v] then vs[v] = true; vlist[#vlist + 1] = v end
+      end
+    end
+    table.sort(vlist)
+    local vf = {}
+    for fi, f in ipairs(it.f) do
+      for j = 1, 3 do
+        if vs[f[j]] then
+          vf[f[j]] = vf[f[j]] or {}
+          table.insert(vf[f[j]], fi)
+        end
+      end
+    end
+    local cps, cm, caps = {}, {}, {}          -- copy specs, corner map { [face] = { [v] = copy | {R, L} } }, caps
+    local function put(fi, v, c)
+      cm[fi] = cm[fi] or {}
+      cm[fi][v] = c
+    end
+    for _, v in ipairs(vlist) do
+      local cyc, info = bevel_fan(it, v, vf[v])
+      if not cyc then
+        return nil, "vertex " .. v .. " is on a border or not a closed fan of faces: bevel stops"
+      end
+      local n, br = #cyc, {}
+      for i = 1, n do
+        local y = info[cyc[i]].y
+        if chosen[G.edge_key(v, y)] then br[#br + 1] = i end
+      end
+      local k = #br
+      local pv = it.v[v]
+      if k == 1 then
+        if n < 3 then return nil, "vertex " .. v .. " has too few faces" end
+        local chain = {}
+        for j = 1, n do chain[j] = cyc[(br[1] + j - 1) % n + 1] end
+        local u = info[cyc[br[1]]].y
+        local dir = G.unit(sub3(it.v[u], pv))
+        local m, best = 2, 1e30
+        for j = 2, n - 1 do
+          local f = it.f[chain[j]]
+          local qa, qb, qc = it.v[f[1]], it.v[f[2]], it.v[f[3]]
+          local c = G.unit(sub3({ (qa[1] + qb[1] + qc[1]) / 3, (qa[2] + qb[2] + qc[2]) / 3, (qa[3] + qb[3] + qc[3]) / 3 }, pv))
+          local d = dot3(c, dir)
+          if d < best - 1e-9 then best, m = d, j end
+        end
+        local dl, dr = bevel_dir(it, it.f[chain[1]], v, u), bevel_dir(it, it.f[chain[n]], v, u)
+        cps[#cps + 1] = { v = v, p = { pv[1] + w * dl[1], pv[2] + w * dl[2], pv[3] + w * dl[3] } }
+        local L = #cps
+        cps[#cps + 1] = { v = v, p = { pv[1] + w * dr[1], pv[2] + w * dr[2], pv[3] + w * dr[3] } }
+        local R = #cps
+        for j = 1, n do
+          if j < m then put(chain[j], v, L) elseif j > m then put(chain[j], v, R) else put(chain[j], v, { R, L }) end
+        end
+      else
+        local secs = {}
+        for s = 1, k do
+          local from, to = br[s] + 1, br[s % k + 1]
+          local faces = {}
+          local j = from
+          while true do
+            faces[#faces + 1] = cyc[(j - 1) % n + 1]
+            if (j - 1) % n + 1 == to then break end
+            j = j + 1
+          end
+          local d1 = bevel_dir(it, it.f[faces[1]], v, info[cyc[br[s]]].y)
+          local d2 = bevel_dir(it, it.f[faces[#faces]], v, info[cyc[to]].y)
+          local den = max(1 + dot3(d1, d2), 0.25)
+          cps[#cps + 1] = { v = v, p = { pv[1] + w / den * (d1[1] + d2[1]), pv[2] + w / den * (d1[2] + d2[2]),
+                                         pv[3] + w / den * (d1[3] + d2[3]) } }
+          for _, fi in ipairs(faces) do put(fi, v, #cps) end
+          secs[s] = { c = #cps, f = faces[1] }
+        end
+        if k >= 3 then
+          local cap = { v = v, c = {}, f = secs[1].f }
+          for s = 1, k do cap.c[s] = secs[s].c end
+          caps[#caps + 1] = cap
+        end
+      end
+    end
+    local strips = {}
+    for _, k in ipairs(order) do strips[#strips + 1] = chosen[k] end
+    return { w = w, flat = flat, edges = order, strips = strips, cps = cps, cm = cm, caps = caps }
+  end
+
+  -- G.bevel_apply(it, plan): makes the change. The first vertex of each split keeps its number, so no vertex
+  -- is left over. Returns { strips = {the new faces of the strips}, verts = {the new vertex numbers},
+  -- faces = the number of faces added }.
+  function G.bevel_apply(it, plan)
+    local id, newv, used = {}, {}, {}
+    for i, c in ipairs(plan.cps) do
+      if not used[c.v] then
+        used[c.v] = true
+        id[i] = c.v
+        it.v[c.v] = { c.p[1], c.p[2], c.p[3] }
+      else
+        id[i] = G.add_vertex(it, c.p, c.v)
+      end
+      newv[#newv + 1] = id[i]
+    end
+    local nf0 = #it.f
+    local old = {}
+    for fi in pairs(plan.cm) do old[fi] = it.f[fi] end
+    local function cid(fi, v)
+      local c = plan.cm[fi] and plan.cm[fi][v]
+      if type(c) == "number" then return id[c] end
+      return v
+    end
+    local add = {}
+    for fi, f in pairs(old) do
+      local poly, uvs = {}, {}
+      for j = 1, 3 do
+        local v = f[j]
+        local c = plan.cm[fi][v]
+        local uv = f[5] and { f[5][j * 2 - 1], f[5][j * 2] }
+        if type(c) == "table" then
+          poly[#poly + 1] = id[c[1]]; uvs[#poly] = uv
+          poly[#poly + 1] = id[c[2]]; uvs[#poly] = uv
+        else
+          poly[#poly + 1] = c and id[c] or v; uvs[#poly] = uv
+        end
+      end
+      local function tri(i, j, l)
+        local g = { poly[i], poly[j], poly[l], f[4] }
+        if f[5] then g[5] = { uvs[i][1], uvs[i][2], uvs[j][1], uvs[j][2], uvs[l][1], uvs[l][2] } end
+        return g
+      end
+      it.f[fi] = tri(1, 2, 3)
+      for j = 3, #poly - 1 do add[#add + 1] = tri(1, j, j + 1) end
+    end
+    -- the strips: (b1, a1, a2) and (b1, a2, b2)
+    local strips, nextra = {}, #add
+    for _, e in ipairs(plan.strips) do
+      local f1 = old[e.f1] or it.f[e.f1]
+      local a1, b1, a2, b2 = cid(e.f1, e.a), cid(e.f1, e.b), cid(e.f2, e.a), cid(e.f2, e.b)
+      local ua, ub = corner_uv(f1, e.a), corner_uv(f1, e.b)
+      local function s(p, q, r, up, uq, ur)
+        local g = { p, q, r, f1[4] }
+        if f1[5] then g[5] = { up[1], up[2], uq[1], uq[2], ur[1], ur[2] } end
+        return g
+      end
+      add[#add + 1] = s(b1, a1, a2, ub, ua, ua)
+      add[#add + 1] = s(b1, a2, b2, ub, ua, ub)
+    end
+    local nstrip = #add
+    for _, cap in ipairs(plan.caps) do
+      local f = old[cap.f] or it.f[cap.f]
+      local uv = corner_uv(f, cap.v)
+      for s = 2, #cap.c - 1 do
+        local g = { id[cap.c[1]], id[cap.c[s]], id[cap.c[s + 1]], f[4] }
+        if uv then g[5] = { uv[1], uv[2], uv[1], uv[2], uv[1], uv[2] } end
+        add[#add + 1] = g
+      end
+    end
+    for i, g in ipairs(add) do
+      it.f[#it.f + 1] = g
+      if i > nextra and i <= nstrip then strips[#strips + 1] = #it.f end
+    end
+    return { strips = strips, verts = newv, faces = #it.f - nf0 }
+  end
+
+  function G.bevel(it, keys, w)
+    local plan, err = G.bevel_plan(it, keys, w)
+    if not plan then return nil, err end
+    return G.bevel_apply(it, plan), plan
+  end
+
+  -- Box projection. G.project_box(it, fs, rect): fs = a list of face numbers (nil: every face), rect =
+  -- { x, y, cell } the place on the sprite sheet. The sheet area is 3 x 2 cells of cell pixels: the six
+  -- sides +x, -x, +y / -y, +z, -z. Each face goes to the cell of the axis its normal is nearest to, drawn
+  -- as seen from that side (+y: from above, +z: from the front, up is up), with the same scale on every
+  -- side (the largest size of the faces fits one cell, 1 pixel kept free round it). The faces become
+  -- textured (colour -1) with the uv as sheet pixels. G.project_plan changes nothing and returns the plan
+  -- { placed, scale, rect } or nil and a message; G.project_apply makes it and returns the number of faces
+  -- placed and the scale in pixels per unit; G.project_box does both.
+  local SIDE_CELL = { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 0, 1 }, { 1, 1 }, { 2, 1 } }
+  function G.project_plan(it, fs, rect, sheet_w, sheet_h)
+    local x0, y0, cell = rect[1], rect[2], rect[3]
+    if not cell or cell < 4 then return nil, "the cell must be 4 pixels or more" end
+    if sheet_w and (x0 < 0 or y0 < 0 or x0 + cell * 3 > sheet_w or y0 + cell * 2 > sheet_h) then
+      return nil, "the sheet is too small for 3 x 2 cells of " .. cell
+    end
+    if not fs then
+      fs = {}
+      for i = 1, #it.f do fs[i] = i end
+    end
+    if #fs == 0 then return nil, "no faces to project" end
+    local lo, hi = { 1e30, 1e30, 1e30 }, { -1e30, -1e30, -1e30 }
+    for _, fi in ipairs(fs) do
+      for j = 1, 3 do
+        local p = it.v[it.f[fi][j]]
+        for a = 1, 3 do lo[a], hi[a] = min(lo[a], p[a]), max(hi[a], p[a]) end
+      end
+    end
+    local ext = max(hi[1] - lo[1], hi[2] - lo[2], hi[3] - lo[3])
+    if ext < 1e-9 then return nil, "the faces have no size" end
+    local sc = (cell - 2) / ext
+    local placed = {}
+    for _, fi in ipairs(fs) do
+      local f = it.f[fi]
+      local n = G.normal_of(it, f)
+      local ax, best = 1, abs(n[1])
+      if abs(n[2]) > best + 1e-9 then ax, best = 2, abs(n[2]) end
+      if abs(n[3]) > best + 1e-9 then ax = 3 end
+      local side = (ax - 1) * 2 + (n[ax] >= 0 and 1 or 2)
+      local c = SIDE_CELL[side]
+      local ox, oy = x0 + c[1] * cell + 1, y0 + c[2] * cell + 1
+      local uv = {}
+      for j = 1, 3 do
+        local p = it.v[f[j]]
+        local u, v
+        if ax == 1 then
+          u = side == 1 and hi[3] - p[3] or p[3] - lo[3]
+          v = hi[2] - p[2]
+        elseif ax == 2 then
+          u = p[1] - lo[1]
+          v = side == 3 and p[3] - lo[3] or hi[3] - p[3]
+        else
+          u = side == 5 and p[1] - lo[1] or hi[1] - p[1]
+          v = hi[2] - p[2]
+        end
+        uv[j * 2 - 1], uv[j * 2] = ox + u * sc, oy + v * sc
+      end
+      placed[#placed + 1] = { f, uv }
+    end
+    return { placed = placed, scale = sc, rect = { x0, y0, cell } }
+  end
+
+  function G.project_apply(it, plan)
+    for _, pl in ipairs(plan.placed) do pl[1][4], pl[1][5] = -1, pl[2] end
+    return #plan.placed, plan.scale
+  end
+
+  function G.project_box(it, fs, rect, sheet_w, sheet_h)
+    local plan, err = G.project_plan(it, fs, rect, sheet_w, sheet_h)
+    if not plan then return nil, err end
+    return G.project_apply(it, plan)
+  end
+
+  -- Humanoid base. 17 boxes on 16 bones (pelvis, spine, neck, head, and on each side uarm, larm, hand, uleg,
+  -- lleg, foot; names end in .L (x > 0) or .R), 136 vertices, 204 triangles, 5 colours. The body is about
+  -- 1.9 high, stands on y = 0 and faces -z. Bone order puts a parent before its children.
+  local HB = {          -- name, parent (0 = none), head, tail
+    { "pelvis", 0, { 0, 0.875, 0 }, { 0, 1, 0 } },
+    { "spine", 1, { 0, 1, 0 }, { 0, 1.5, 0 } },
+    { "neck", 2, { 0, 1.5, 0 }, { 0, 1.625, 0 } },
+    { "head", 3, { 0, 1.625, 0 }, { 0, 1.875, 0 } },
+    { "uarm.L", 2, { 0.375, 1.5, 0 }, { 0.375, 1.25, 0 } },
+    { "larm.L", 5, { 0.375, 1.25, 0 }, { 0.375, 1, 0 } },
+    { "hand.L", 6, { 0.375, 1, 0 }, { 0.375, 0.875, 0 } },
+    { "uarm.R", 2, { -0.375, 1.5, 0 }, { -0.375, 1.25, 0 } },
+    { "larm.R", 8, { -0.375, 1.25, 0 }, { -0.375, 1, 0 } },
+    { "hand.R", 9, { -0.375, 1, 0 }, { -0.375, 0.875, 0 } },
+    { "uleg.L", 1, { 0.125, 0.875, 0 }, { 0.125, 0.5, 0 } },
+    { "lleg.L", 11, { 0.125, 0.5, 0 }, { 0.125, 0.1, 0 } },
+    { "foot.L", 12, { 0.125, 0.1, 0 }, { 0.125, 0.05, -0.15 } },
+    { "uleg.R", 1, { -0.125, 0.875, 0 }, { -0.125, 0.5, 0 } },
+    { "lleg.R", 14, { -0.125, 0.5, 0 }, { -0.125, 0.1, 0 } },
+    { "foot.R", 15, { -0.125, 0.1, 0 }, { -0.125, 0.05, -0.15 } },
+  }
+  local TROUSERS, SHIRT, SKIN, HAIR, BOOTS = 0x404450, 0x3478C4, 0xF0C090, 0x5A3A1E, 0x2A1E18
+  -- bone number (1-based), lo, hi, colour
+  local HP = {
+    { 1, { -0.2, 0.85, -0.12 }, { 0.2, 1.0, 0.12 }, TROUSERS },
+    { 2, { -0.25, 1.0, -0.14 }, { 0.25, 1.5, 0.14 }, SHIRT },
+    { 3, { -0.06, 1.5, -0.06 }, { 0.06, 1.625, 0.06 }, SKIN },
+    { 4, { -0.12, 1.625, -0.12 }, { 0.12, 1.85, 0.12 }, SKIN },
+    { 4, { -0.13, 1.8, -0.13 }, { 0.13, 1.9, 0.13 }, HAIR },
+  }
+  for s = 1, 2 do                                   -- 1 = .L (x > 0), 2 = .R
+    local sg, b0 = s == 1 and 1 or -1, s == 1 and 0 or 3
+    local function bx(lo, hi) return sg > 0 and lo or -hi, sg > 0 and hi or -lo end
+    local function add(bone, x0, y0, z0, x1, y1, z1, col)
+      local a, b = bx(x0, x1)
+      HP[#HP + 1] = { bone, { a, y0, z0 }, { b, y1, z1 }, col }
+    end
+    add(5 + b0, 0.315, 1.25, -0.06, 0.435, 1.5, 0.06, SHIRT)
+    add(6 + b0, 0.32, 1.0, -0.055, 0.43, 1.25, 0.055, SKIN)
+    add(7 + b0, 0.325, 0.86, -0.05, 0.425, 1.0, 0.05, SKIN)
+  end
+  for s = 1, 2 do
+    local sg, b0 = s == 1 and 1 or -1, s == 1 and 11 or 14
+    local function add(bone, x0, y0, z0, x1, y1, z1, col)
+      local a, b = sg > 0 and x0 or -x1, sg > 0 and x1 or -x0
+      HP[#HP + 1] = { bone, { a, y0, z0 }, { b, y1, z1 }, col }
+    end
+    add(b0, 0.045, 0.5, -0.1, 0.205, 0.875, 0.1, TROUSERS)
+    add(b0 + 1, 0.055, 0.1, -0.08, 0.195, 0.5, 0.08, TROUSERS)
+    add(b0 + 2, 0.045, 0, -0.2, 0.205, 0.1, 0.1, BOOTS)
+  end
+  G.HUMANOID_BONES = #HB
+
+  -- the ANIM part of a skeleton with no animation: bones = { {name, parent (0 = none), head, tail}, ... },
+  -- vb = the bone of each vertex (from 0)
+  function G.rig_part(name, bones, vb)
+    local nb, n = #bones, #vb
+    local out = { name16(name), spack("<I2I2I2I2", nb, 0, n, 0) }
+    for _, b in ipairs(bones) do
+      out[#out + 1] = name16(b[1]) .. spack("<i2I2ffffff", b[2] - 1, 0, b[3][1], b[3][2], b[3][3], b[4][1], b[4][2], b[4][3])
+    end
+    local s = {}
+    for i = 1, n do s[i] = string.char(vb[i]) end
+    out[#out + 1] = table.concat(s) .. string.rep("\0", (4 - n % 4) % 4)
+    return table.concat(out)
+  end
+
+  -- G.humanoid(name): a new model item with the base body and its skeleton (it.ac, it.vb, it.bones = 16)
+  function G.humanoid(name)
+    local it = { kind = "model", name = name, v = {}, f = {}, vb = {}, dirty = true }
+    for _, p in ipairs(HP) do
+      local lo, hi = p[2], p[3]
+      local mid = { (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2, (lo[3] + hi[3]) / 2 }
+      local n0 = #it.v
+      G.primitive(it, "cube", mid, 1, p[4], p[1] - 1)
+      for i = n0 + 1, #it.v do
+        local q = it.v[i]
+        q[1] = mid[1] + (q[1] - mid[1]) * (hi[1] - lo[1])
+        q[2] = mid[2] + (q[2] - mid[2]) * (hi[2] - lo[2])
+        q[3] = mid[3] + (q[3] - mid[3]) * (hi[3] - lo[3])
+      end
+    end
+    it.ac = G.rig_part(name, HB, it.vb)
+    it.bones, it.clips = #HB, 0
+    return it
+  end
+end
+
+-- Snap. G.snap_grid(p, step, axis): a copy of the point p with each axis
+-- rounded to a multiple of step (only the axis given, 1-3, when there is one).
+-- G.snap_vertex(it, p, proj, px, skip): the number of the vertex of it nearest
+-- to p on the screen (proj(q) gives x, y), within px pixels, and the distance;
+-- the vertices in the set skip are not looked at. G.snap_pos(it, p, mode, step,
+-- proj, px, skip, axis): mode 1 = grid, 2 = vertex, 3 = both (a vertex in range
+-- wins over the grid). With an axis (1-3) only that axis changes; with "n" the
+-- grid does not apply. Returns the new point and the vertex number it took (or nil).
+function G.snap_grid(p, step, axis)
+  local q = { p[1], p[2], p[3] }
+  for k = 1, 3 do
+    if axis == nil or axis == k then
+      q[k] = math.floor(math.floor(q[k] / step + 0.5) * step * 1e5 + 0.5) / 1e5
+    end
+  end
+  return q
+end
+
+function G.snap_vertex(it, p, proj, px, skip)
+  local x0, y0 = proj(p)
+  if not x0 then return nil end
+  local best, bd = nil, px * px
+  for i, v in ipairs(it.v) do
+    if not (skip and skip[i]) then
+      local x, y = proj(v)
+      if x then
+        local d = (x - x0) * (x - x0) + (y - y0) * (y - y0)
+        if d <= bd then best, bd = i, d end
+      end
+    end
+  end
+  return best, best and math.sqrt(bd)
+end
+
+function G.snap_pos(it, p, mode, step, proj, px, skip, axis)
+  if mode == nil or mode == 0 then return p, nil end
+  if mode >= 2 then
+    local i = G.snap_vertex(it, p, proj, px, skip)
+    if i then
+      local v, q = it.v[i], { p[1], p[2], p[3] }
+      for k = 1, 3 do if type(axis) ~= "number" or axis == k then q[k] = v[k] end end
+      return q, i
+    end
+  end
+  if mode % 2 == 1 and axis ~= "n" then return G.snap_grid(p, step, type(axis) == "number" and axis or nil), nil end
+  return p, nil
+end
+
+-- A primitive ("cube", "plane", "sphere" or "cylinder") of the width size, in
+-- the colour col, with its middle at centre, added to the model it as a new
+-- part. The faces look out. The new vertices take the bone given (or 0) when
+-- the model has bones. Returns the list of the new vertex numbers.
+function G.primitive(it, shape, centre, size, col, bone)
+  size = size or 1
+  local v, f = {}, {}
+  if shape == "cube" then
+    for _, p in ipairs({ { -0.5, -0.5, -0.5 }, { 0.5, -0.5, -0.5 }, { 0.5, 0.5, -0.5 }, { -0.5, 0.5, -0.5 },
+                         { -0.5, -0.5, 0.5 }, { 0.5, -0.5, 0.5 }, { 0.5, 0.5, 0.5 }, { -0.5, 0.5, 0.5 } }) do v[#v + 1] = p end
+    for _, t in ipairs({ { 1, 4, 3 }, { 1, 3, 2 }, { 5, 6, 7 }, { 5, 7, 8 }, { 1, 2, 6 }, { 1, 6, 5 },
+                         { 4, 8, 7 }, { 4, 7, 3 }, { 1, 5, 8 }, { 1, 8, 4 }, { 2, 3, 7 }, { 2, 7, 6 } }) do
+      f[#f + 1] = { t[1], t[2], t[3], col }
+    end
+  elseif shape == "plane" then
+    v = { { -0.5, 0, -0.5 }, { 0.5, 0, -0.5 }, { 0.5, 0, 0.5 }, { -0.5, 0, 0.5 } }
+    f = { { 1, 4, 3, col }, { 1, 3, 2, col } }
+  elseif shape == "cylinder" then
+    local segs = 8
+    for s = 0, segs - 1 do
+      local b = s / segs * 2 * pi
+      v[#v + 1] = { 0.5 * cos(b), 0.5, 0.5 * sin(b) }
+    end
+    for s = 0, segs - 1 do
+      local b = s / segs * 2 * pi
+      v[#v + 1] = { 0.5 * cos(b), -0.5, 0.5 * sin(b) }
+    end
+    v[#v + 1] = { 0, 0.5, 0 }
+    v[#v + 1] = { 0, -0.5, 0 }
+    local top, bot = 2 * segs + 1, 2 * segs + 2
+    for s = 0, segs - 1 do
+      local n = (s + 1) % segs
+      f[#f + 1] = { top, s + 1, n + 1, col }
+      f[#f + 1] = { bot, segs + n + 1, segs + s + 1, col }
+      -- the diagonal of a side quad leans one way on one half and the other way on the other half, so the
+      -- triangles are mirror images across X = 0 (the quad s and the quad 3 - s mod 8 swap)
+      if s % 4 < 2 then
+        f[#f + 1] = { s + 1, segs + s + 1, segs + n + 1, col }
+        f[#f + 1] = { s + 1, segs + n + 1, n + 1, col }
+      else
+        f[#f + 1] = { s + 1, segs + s + 1, n + 1, col }
+        f[#f + 1] = { n + 1, segs + s + 1, segs + n + 1, col }
+      end
+    end
+  else
+    local rings, segs = 6, 12
+    v[1] = { 0, 0.5, 0 }
+    for r = 1, rings - 1 do
+      local a = r / rings * pi
+      for s = 0, segs - 1 do
+        local b = s / segs * 2 * pi
+        v[#v + 1] = { 0.5 * sin(a) * cos(b), 0.5 * cos(a), 0.5 * sin(a) * sin(b) }
+      end
+    end
+    v[#v + 1] = { 0, -0.5, 0 }
+    local last = #v
+    local function at(r, s) return 2 + (r - 1) * segs + s % segs end
+    for s = 0, segs - 1 do
+      f[#f + 1] = { 1, at(1, s), at(1, s + 1), col }
+      f[#f + 1] = { last, at(rings - 1, s + 1), at(rings - 1, s), col }
+      for r = 1, rings - 2 do
+        -- the diagonal leans one way for s % 6 < 3 and the other way after, so the triangles are mirror
+        -- images across X = 0 (the quad s and the quad 5 - s mod 12 swap)
+        if s % 6 < 3 then
+          f[#f + 1] = { at(r, s), at(r + 1, s), at(r + 1, s + 1), col }
+          f[#f + 1] = { at(r, s), at(r + 1, s + 1), at(r, s + 1), col }
+        else
+          f[#f + 1] = { at(r, s), at(r + 1, s), at(r, s + 1), col }
+          f[#f + 1] = { at(r + 1, s), at(r + 1, s + 1), at(r, s + 1), col }
+        end
+      end
+    end
+  end
+  if shape ~= "plane" then G.orient({ v = v, f = f }, { 0, 0, 0 }) end
+  centre = centre or { 0, 0, 0 }
+  local base, out = #it.v, {}
+  for i, p in ipairs(v) do
+    it.v[base + i] = { centre[1] + p[1] * size, centre[2] + p[2] * size, centre[3] + p[3] * size }
+    if it.vb then it.vb[base + i] = bone or 0 end
+    out[i] = base + i
+  end
+  for _, t in ipairs(f) do it.f[#it.f + 1] = { t[1] + base, t[2] + base, t[3] + base, t[4] } end
+  return out
+end
+
+-- A part with the live mirror (APP-16). Like G.primitive, and when the middle is off the plane X = 0
+-- (more than 0.001 away) the part is added twice: the second is the mirror image of the first (the
+-- vertices at -x, the corners of each triangle turned over, so the faces still look out). The second
+-- part takes the bone mirror_bone (the same bone when nil). A part in the middle of the plane is added
+-- once. Returns the list of all new vertex numbers and the list of the vertices of the mirror part
+-- (empty when there is none).
+function G.primitive_mirror(it, shape, centre, size, col, bone, mirror_bone)
+  local nf0 = #it.f
+  local out = G.primitive(it, shape, centre, size, col, bone)
+  local twin = {}
+  centre = centre or { 0, 0, 0 }
+  if math.abs(centre[1]) <= 0.001 then return out, twin end
+  local base, nv = out[1] - 1, #out
+  for i = 1, nv do
+    local p = it.v[out[i]]
+    local n = G.add_vertex(it, { -p[1], p[2], p[3] }, out[i])
+    if it.vb then it.vb[n] = mirror_bone or bone or 0 end
+    twin[i] = n
+  end
+  for fi = nf0 + 1, #it.f do
+    local f = it.f[fi]
+    it.f[#it.f + 1] = { twin[f[1] - base], twin[f[3] - base], twin[f[2] - base], f[4] }
+  end
+  for _, n in ipairs(twin) do out[#out + 1] = n end
+  return out, twin
+end
 
 local QUAD, TRI = { { 1, 2, 3 }, { 1, 3, 4 } }, { { 1, 2, 3 } }
 T.QUAD, T.TRI = QUAD, TRI
@@ -184,11 +1451,31 @@ function T.encode_mesh(m)
     end
   end
   if #tris == 0 then return true end
-  if #verts > T.LIMIT_V then return false, #verts .. " vertices, at most " .. T.LIMIT_V end
-  if #tris > T.LIMIT_T then return false, #tris .. " triangles, at most " .. T.LIMIT_T end
-  m.mc = name16(m.name) .. spack("<I2I2I4", #verts, #tris, 0) .. table.concat(verts) .. table.concat(tris)
+  if #verts > T.LIMIT_V then return false, #verts .. " vertices: format limit " .. T.LIMIT_V end
+  if #tris > T.LIMIT_T then return false, #tris .. " triangles: format limit " .. T.LIMIT_T end
+  m.mc = name16(m.name) .. spack("<I2I2I4", #verts, #tris, (m.mflags or 0) & ~1) .. table.concat(verts) .. table.concat(tris)
   m.vb, m.nv, m.nt = table.concat(vb), #verts, #tris
   return true
+end
+
+-- The map class of a model, in the u32 flags of its MESH header (bit 0 is "lit"): what the model is for in a
+-- map (a bm SDK 3D map, a kit): 0 not said, 2 solid (it blocks, as a wall), 4 floor (it can be walked on),
+-- 8 decor (no collision). T.MODEL_CLASSES lists them in the order the key cycles them.
+T.MODEL_CLASSES = { { 0, "not said" }, { 2, "solid" }, { 4, "floor" }, { 8, "decor" } }
+function T.model_class(m)
+  local f = (m.mflags or 0) & 14
+  for _, c in ipairs(T.MODEL_CLASSES) do if c[1] == f then return c[2] end end
+  return "not said"
+end
+function T.model_class_next(m)
+  local f = (m.mflags or 0) & 14
+  for i, c in ipairs(T.MODEL_CLASSES) do
+    if c[1] == f then
+      m.mflags = T.MODEL_CLASSES[i % #T.MODEL_CLASSES + 1][1]
+      return
+    end
+  end
+  m.mflags = 0
 end
 
 -- the model's rig in the ANIM section: m.ac (after encode_mesh)
@@ -253,6 +1540,413 @@ function T.split_anim(bin)
   return out
 end
 
+----------------------------------------------------------------- model files: /bmm and /glb (APP-9)
+
+-- What bm Studio, bm Animator and bm Mesh share to bring a model in. A .glb in /glb is read only
+-- (glb3d); a .bmm in /bmm is a model file (res_read, res_write). The item is the one of bm Mesh
+-- (T.G.model_item: v, f, and vb, bones, clips when the model has a skeleton), plus
+--   item.sheet = { type = 2 | 5, data = the sheet section }   when the model has its own sheet
+--   item.inset                                                 the texture margin (sheet pixels), 0.25
+--   item.file = { name =, author = }                           the name shown and the author of the file
+T.BMM_DIR, T.GLB_DIR = "/bmm", "/glb"
+
+-- the name of a .bmm: 1 to 8 of a-z 0-9 _ - (what res_write takes)
+local function bmm_stem(name)
+  local s = tostring(name or ""):lower():gsub("%.bmm$", ""):gsub("%.glb$", "")
+  if s:match("^[a-z0-9_%-]+$") and #s <= 8 then return s end
+end
+
+-- the model's name in an editor: 15 characters of letters, digits and _
+local function item_name(s)
+  s = tostring(s):lower():gsub("[^%w_]", ""):sub(1, 15)
+  return s ~= "" and s or "model"
+end
+
+-- the models on the card: { { name = "knight", kind = "bmm" | "glb", glb = true if a .glb of that name
+-- is there }, ... } sorted by name. kind "bmm": the converted model (preferred, it may be edited);
+-- kind "glb": only the .glb, to be converted. Names in lower case.
+function T.model_files()
+  local by, out = {}, {}
+  for _, d in ipairs({ { T.BMM_DIR, "bmm" }, { T.GLB_DIR, "glb" } }) do
+    for _, f in ipairs(ls(d[1])) do
+      local stem, ext = f.name:lower():match("^(.+)%.(%w+)$")
+      if not f.dir and ext == d[2] then
+        local e = by[stem]
+        if not e then
+          e = { name = stem, kind = d[2] }
+          by[stem] = e
+          out[#out + 1] = e
+        end
+        if d[2] == "glb" then e.glb = true end
+        if d[2] == "bmm" then e.kind = "bmm" end
+      end
+    end
+  end
+  table.sort(out, function(a, b) return a.name < b.name end)
+  return out
+end
+
+local function model_entry(name)
+  name = tostring(name or ""):lower():gsub("%.bmm$", ""):gsub("%.glb$", "")
+  for _, e in ipairs(T.model_files()) do
+    if e.name == name then return e end
+  end
+end
+
+-- a model from a file: the item, or nil and a message. name: as model_files() lists it.
+--   opts.from   "bmm" | "glb": that file (default: the .bmm if there is one, else the .glb)
+--   opts.model  of a .bmm with several models: the name or the number (default: the first)
+--   opts.name   the name of the item (default: the file's)
+-- for a .glb (glb3d): opts.height (2), opts.faces (0: all), opts.sheet (256), opts.texture (true: the
+-- texture of the .glb on the item's sheet; default: flat colours, no sheet)
+function T.import_model(name, opts)
+  opts = opts or {}
+  local e = model_entry(name)
+  if not e then return nil, "no model " .. tostring(name) .. " in /bmm or /glb" end
+  local from = opts.from or e.kind
+  if from == "glb" then
+    if not e.glb then return nil, "no " .. e.name .. ".glb in /glb" end
+    local nm = item_name(opts.name or e.name)
+    local m, err = glb3d(T.GLB_DIR .. "/" .. e.name .. ".glb",
+                         { name = nm, height = opts.height or 2, faces = opts.faces or 0, sheet = opts.sheet or 256 })
+    if not m then return nil, err end
+    local sheet
+    if opts.texture and m.textured and m.texture then
+      local side = opts.sheet or 256
+      if #m.texture == side * side * 4 then
+        sheet = { type = 2, data = spack("<I2I2", side, side) .. m.texture }
+      end
+    end
+    local item = G.model_item(nm, sheet and m.record or m.flat or m.record)
+    item.sheet = sheet
+    item.inset = 0.25
+    item.file = { name = nm, author = "" }
+    item.from = "glb"
+    return item
+  end
+  if from ~= "bmm" or e.kind ~= "bmm" then return nil, "no " .. e.name .. ".bmm in /bmm" end
+  local r, err = res_read(T.BMM_DIR .. "/" .. e.name .. ".bmm")
+  if not r then return nil, err end
+  if r.kind ~= 1 or not r.sections[SEC_MESH] then return nil, e.name .. ".bmm is not a model file" end
+  local parts, inset = T.split_mesh(r.sections[SEC_MESH])
+  local part
+  if type(opts.model) == "number" then
+    part = parts[opts.model]
+  elseif opts.model then
+    for _, p in ipairs(parts) do if p[1] == opts.model then part = p end end
+  else
+    part = parts[1]
+  end
+  if not part then return nil, e.name .. ".bmm has no model " .. tostring(opts.model or 1) end
+  local rigs = r.sections[9] and T.split_anim(r.sections[9]) or {}
+  local item = G.model_item(part[1], part[2], rigs[part[1]])
+  if opts.name then item.name = item_name(opts.name) end
+  if r.sections[2] then item.sheet = { type = 2, data = r.sections[2] }
+  elseif r.sections[5] then item.sheet = { type = 5, data = r.sections[5] } end
+  item.inset = inset
+  item.file = { name = r.name, author = r.author }
+  item.from = "bmm"
+  return item
+end
+
+----------------------------------------------------------------- bones in bm Mesh (APP-14)
+
+-- A model with a skeleton (it.ac, and it.vb when the skeleton fits the vertices; a skeleton with no
+-- vertices yet gets it.vb at the first give, all on bone 0) gives each vertex to one bone. These functions read the bone names and heads from the ANIM part and change it.vb.
+-- Bone numbers start at 0 (as in the file); lists of names start at 1 (name of bone b = names[b + 1]).
+
+-- { { name, hx }, ... } for the bones of the skeleton (hx is the x of the head), or nil
+function G.rig_bones(it)
+  local ac = it.ac
+  if not ac then return nil end
+  local nb = sunpack("<I2", ac, 17)
+  local out, pos = {}, 25
+  for i = 1, nb do
+    out[i] = { name = cname(ac, pos), hx = (sunpack("<f", ac, pos + 20)), parent = sunpack("<i2", ac, pos + 16) + 1 }
+    pos = pos + 44
+  end
+  return out
+end
+
+-- The parts of a skeleton (one part for each bone), as the list of the Parts panel: { { bone, depth, count }, ... }
+-- in tree order (a parent, then its children), count = the vertices of the bone. rig comes from G.rig_bones
+-- (parent: 1-based, 0 = none). A bone whose parent comes later still shows (as a root).
+function G.part_list(it, rig)
+  local kids, roots, n = {}, {}, {}
+  for i = 1, #(it.vb or {}) do local b = it.vb[i]; n[b] = (n[b] or 0) + 1 end
+  if not it.vb then n[0] = #it.v end
+  for i, r in ipairs(rig) do
+    local p = r.parent
+    if p and p >= 1 and p < i then kids[p] = kids[p] or {}; kids[p][#kids[p] + 1] = i
+    else roots[#roots + 1] = i end
+  end
+  local out = {}
+  local function walk(i, d)
+    out[#out + 1] = { bone = i - 1, depth = d, count = n[i - 1] or 0 }
+    for _, c in ipairs(kids[i] or {}) do walk(c, d + 1) end
+  end
+  for _, i in ipairs(roots) do walk(i, 0) end
+  return out
+end
+
+-- the vertices of bone b (from 0) as a set { [vertex] = true }; with kids also the vertices of the bones below it
+function G.part_set(it, rig, b, kids)
+  local want = { [b] = true }
+  if kids then
+    for i, r in ipairs(rig) do                 -- a parent comes before its children
+      if r.parent and r.parent >= 1 and want[r.parent - 1] then want[i - 1] = true end
+    end
+  end
+  local set = {}
+  for i = 1, #it.v do
+    if want[it.vb and it.vb[i] or 0] then set[i] = true end
+  end
+  return set
+end
+
+-- the name of the other side: arm_l -> arm_r, hand.R -> hand.L, Left -> Right, l_arm -> r_arm; nil
+-- when the name has no side
+local SIDE = { l = "r", r = "l", L = "R", R = "L" }
+function G.side_name(n)
+  local p, c = n:match("^(.*[%._%- ])([LlRr])$")
+  if p then return p .. SIDE[c] end
+  p, c = n:match("^([LlRr])([%._%- ].*)$")
+  if p then return SIDE[p] .. c end
+  p = n:match("^(.-)[Ll]eft$")
+  if p then return p .. (n:sub(-4) == "Left" and "Right" or "right") end
+  p = n:match("^(.-)[Rr]ight$")
+  if p then return p .. (n:sub(-5) == "Right" and "Left" or "left") end
+  return nil
+end
+
+-- the bone that mirrors bone b across X = 0: the bone with the other side's name, else b itself
+function G.mirror_bone(rig, b)
+  local r = rig[b + 1]
+  local other = r and G.side_name(r.name)
+  if other then
+    for i, o in ipairs(rig) do if o.name == other then return i - 1 end end
+  end
+  return b
+end
+
+-- "none" (no skeleton), "skinned" (a bone for each vertex: it.vb), "unskinned" (the skeleton has no vertices
+-- yet: every vertex is on bone 0 until it is given another) or "mismatch" (it has vertices that are not these)
+function G.skin_state(it)
+  if not it.ac then return "none" end
+  if it.vb then return "skinned" end
+  return sunpack("<I2", it.ac, 21) == 0 and "unskinned" or "mismatch"
+end
+
+-- the vertices of an unskinned skeleton go to bone 0 (it.vb is made); true when there is it.vb after
+function G.ensure_bones(it)
+  if it.vb then return true end
+  if G.skin_state(it) ~= "unskinned" then return false end
+  it.vb = {}
+  for i = 1, #it.v do it.vb[i] = 0 end
+  return true
+end
+
+-- the bone of the vertices in list: bone, count (how many different bones; bone is the first one)
+function G.bone_summary(it, list)
+  if not it.vb then return nil end
+  local seen, n, first = {}, 0, nil
+  for _, i in ipairs(list) do
+    local b = it.vb[i]
+    if b and not seen[b] then
+      seen[b] = true
+      n = n + 1
+      first = first or b
+    end
+  end
+  if n == 0 then return nil end
+  return first, n
+end
+
+-- Gives the vertices in list to bone b; returns the number of vertices changed, or nil and a message.
+-- With mirror on, the counterpart across X = 0 (G.mirror_pairs) takes the mirror bone (G.mirror_bone:
+-- the bone with the other side's name, else the same bone). A counterpart that is chosen too takes the
+-- mirror bone only when it is on the other side of the bone's head; a vertex on X = 0 takes b.
+-- Changes it.vb and nothing else.
+function G.set_bone(it, list, b, mirror)
+  if not it.ac then return nil, "no skeleton: bm Animator makes the bones" end
+  if not G.ensure_bones(it) then return nil, "the skeleton does not fit the vertices: skin it in bm Animator" end
+  local rig = G.rig_bones(it)
+  if b < 0 or b >= #rig then return nil, "no bone " .. b end
+  local chosen = {}
+  for _, i in ipairs(list) do chosen[i] = true end
+  local mb = mirror and G.mirror_bone(rig, b) or b
+  local mp = mirror and G.mirror_pairs(it, list) or {}
+  local hx = rig[b + 1].hx
+  local out = {}
+  local function put(i, nb)
+    out[i] = true
+    it.vb[i] = nb
+  end
+  for _, i in ipairs(list) do
+    local j = mp[i]
+    local nb = b
+    if j and j ~= i and chosen[j] and mb ~= b and it.v[i][1] * hx < 0 then nb = mb end
+    put(i, nb)
+  end
+  if mirror then
+    for _, i in ipairs(list) do
+      local j = mp[i]
+      if j and j ~= i and not chosen[j] then put(j, mb) end
+    end
+  end
+  local n = 0
+  for _ in pairs(out) do n = n + 1 end
+  return n
+end
+
+----------------------------------------------------------------- the ghost reference (APP-10 step 7)
+
+-- A ghost is a model shown as a faint wire behind the model that is edited. It is a layer of its own:
+-- never chosen, never saved, never counted. It keeps only what the wire needs: the vertices, a cached
+-- list of unique edges, a scale and a height offset.
+--   g = { name, from = "bmm" | "glb", nv, nf (the model's), shown (faces in the wire), stride,
+--         v = { {x, y, z}, ... }, ea = {}, eb = {} (edge ends), used = { vertex numbers }, scale = 1, dy = 0, on = true }
+-- G.GHOST_FACES: the default budget of faces in the wire; a model with more faces keeps every stride-th face
+-- (a .glb is reduced by glb3d to the budget instead). G.GHOST_DETAIL: the budgets the editor offers (the
+-- last, 65535, is the format limit: all). G.GHOST_EDGES_FRAME: the most edges one frame draws; a longer list
+-- is drawn 1 edge in `every`, and the window moves by one edge each frame (g.every, g.phase). The cost on
+-- the Pi Zero W is not measured: see the development notes
+G.GHOST_FACES = 20000
+G.GHOST_DETAIL = { 2000, 5000, 20000, 65535 }
+G.GHOST_EDGES_FRAME = 4000
+G.GHOST_SCALE_MIN, G.GHOST_SCALE_MAX, G.GHOST_DY_MAX = 0.1, 10, 20
+
+-- the ghost of an item { v, f } (budget: faces in the wire, default G.GHOST_FACES)
+function G.ghost_make(item, budget)
+  budget = budget or G.GHOST_FACES
+  local nf = #item.f
+  local stride = nf > budget and (-(-nf // budget)) or 1
+  local ea, eb, seen, used, usedset = {}, {}, {}, {}, {}
+  local shown = 0
+  for fi = 1, nf, stride do
+    local f = item.f[fi]
+    shown = shown + 1
+    for k = 1, 3 do
+      local a, b = f[k], f[k % 3 + 1]
+      if a > b then a, b = b, a end
+      local key = a * 65536 + b
+      if not seen[key] then
+        seen[key] = true
+        ea[#ea + 1], eb[#eb + 1] = a, b
+        if not usedset[a] then usedset[a] = true; used[#used + 1] = a end
+        if not usedset[b] then usedset[b] = true; used[#used + 1] = b end
+      end
+    end
+  end
+  local v = {}
+  for _, i in ipairs(used) do v[i] = item.v[i] end       -- the other vertices are let go
+  local every = (#ea + G.GHOST_EDGES_FRAME - 1) // G.GHOST_EDGES_FRAME
+  if every < 1 then every = 1 end
+  return { name = item.name, from = item.from, nv = #item.v, nf = nf, shown = shown, stride = stride,
+           every = every, phase = 0,
+           v = v, ea = ea, eb = eb, used = used, scale = 1, dy = 0, on = true }
+end
+
+-- where vertex i of the ghost is
+function G.ghost_pos(g, i)
+  local p = g.v[i]
+  return p[1] * g.scale, p[2] * g.scale + g.dy, p[3] * g.scale
+end
+
+-- a nudge of the scale (factor) or of the height (step): kept in the range
+function G.ghost_scale(g, factor)
+  g.scale = clamp(g.scale * factor, G.GHOST_SCALE_MIN, G.GHOST_SCALE_MAX)
+  return g.scale
+end
+function G.ghost_lift(g, step)
+  g.dy = clamp(g.dy + step, -G.GHOST_DY_MAX, G.GHOST_DY_MAX)
+  if math.abs(g.dy) < 1e-9 then g.dy = 0 end
+  return g.dy
+end
+
+-- the line the editor tells after a load
+function G.ghost_text(g)
+  local s = string.format("ghost %s.%s: %d vertices, %d triangles", g.name, g.from, g.nv, g.nf)
+  if g.stride > 1 then
+    s = s .. string.format("; the wire keeps %d triangles (1 in %d: the budget)", g.shown, g.stride)
+  end
+  if g.every > 1 then
+    s = s .. string.format("; each frame draws 1 edge in %d (the line budget)", g.every)
+  end
+  return s
+end
+
+-- a ghost from /bmm or /glb: the ghost, or nil and a message. Reads only: a .glb is read by glb3d (reduced
+-- to G.GHOST_FACES triangles) and NOT written to /bmm; no texture; nothing is changed on the card.
+function T.ghost_load(name, budget)
+  budget = budget or G.GHOST_FACES
+  local item, err = T.import_model(name, { faces = budget, texture = false })
+  if not item then return nil, err end
+  local g = G.ghost_make(item, budget)
+  g.name = model_entry(name).name                -- the file's name (the model in it may have another)
+  return g
+end
+
+-- an item into /bmm/NAME.bmm (NAME: 1 to 8 of a-z 0-9 _ -): true and the path, or nil and a message.
+-- The skeleton (ANIM) and the sheet go with the model when it has them (not when its vertices
+-- changed since the skeleton was made). A file that is there is not changed unless opts.replace.
+--   opts.title  the name shown in the file (default: the file's own, else the item's)
+--   opts.author, opts.inset (sheet pixels), opts.replace
+function T.write_bmm(item, name, opts)
+  opts = opts or {}
+  local stem = bmm_stem(name)
+  if not stem then return nil, tostring(name) .. ": a model file name is 1 to 8 of a-z 0-9 _ -" end
+  local nv, nf = #item.v, #item.f
+  if nv == 0 or nf == 0 then return nil, "the model is empty" end
+  if nv > T.LIMIT_V or nf > T.LIMIT_T then
+    return nil, nv .. " vertices and " .. nf .. " triangles: the format holds " .. T.LIMIT_V .. " of each"
+  end
+  local inset = opts.inset or item.inset or 0.25
+  local mesh = spack("<I2I2I4", 1, clamp(round(inset * 256), 0, 65535), 0) .. G.encode_model(item)
+  local sections = { [SEC_MESH] = mesh }
+  if item.ac then
+    local _, _, anv = sunpack("<I2I2I2", item.ac, 17)
+    if anv == nv then
+      sections[SEC_ANIM] = spack("<I2I2I4", 1, 0, 0) .. name16(item.name) .. item.ac:sub(17)
+    end
+  end
+  if item.sheet then sections[item.sheet.type] = item.sheet.data end
+  local file = item.file or {}
+  local path = T.BMM_DIR .. "/" .. stem .. ".bmm"
+  local ok, err = res_write(path, 1, { sections = sections, name = opts.title or file.name or item.name,
+                                       author = opts.author or file.author or "", replace = opts.replace })
+  if not ok then return nil, err end
+  return true, path
+end
+
+-- /glb/NAME.glb to /bmm/TO.bmm: the .glb is read (glb3d), never changed; opts as import_model and
+-- write_bmm, and opts.to (the .bmm name; default: NAME, 8 characters at most). A .bmm that is there
+-- stays unless opts.replace. Returns true, the path and the item, or nil and a message.
+function T.import_glb_to_bmm(name, opts)
+  opts = opts or {}
+  local e = model_entry(name)
+  if not e or not e.glb then return nil, "no " .. tostring(name) .. ".glb in /glb" end
+  local to = bmm_stem(opts.to or e.name)
+  if not to then
+    return nil, e.name .. ".glb: a .bmm name is 1 to 8 of a-z 0-9 _ - (give opts.to)"
+  end
+  if not opts.replace then
+    for _, f in ipairs(T.model_files()) do
+      if f.name == to and f.kind == "bmm" then
+        return nil, T.BMM_DIR .. "/" .. to .. ".bmm: is there already (replace = true changes it)"
+      end
+    end
+  end
+  local o = {}
+  for k, v in pairs(opts) do o[k] = v end
+  o.from = "glb"
+  local item, err = T.import_model(e.name, o)
+  if not item then return nil, err end
+  local ok, path = T.write_bmm(item, to, o)
+  if not ok then return nil, path end
+  return true, path, item
+end
+
 function T.decode_rig(ac)
   local nb, nc, nv = sunpack("<I2I2I2", ac, 17)
   local pos = 25
@@ -283,6 +1977,212 @@ function T.decode_rig(ac)
     clips[c] = clip
   end
   return { bones = bones, clips = clips }, vb, nv
+end
+
+-- Animations from another model (APP-27). T.retarget(src_rig, dst_rig): the clips of src_rig (as
+-- decode_rig gives them) for the bones of dst_rig. A bone matches by its name, else by its name in lower case
+-- with . _ - taken out. The rotation q of a matched bone is copied; its translation t is scaled by the ratio
+-- of the heights of the two rigs (the y span of heads and tails); a bone with no match gets the rest pose.
+-- Returns the new clips (the times, length, loop and mode kept) and { matched = bones of dst_rig that
+-- have a match, missing = their names, clips = #clips }. Nothing in the two rigs changes.
+function T.rig_height(rig)
+  local lo, hi
+  for _, b in ipairs(rig.bones) do
+    for _, p in ipairs({ b.head, b.tail }) do
+      if not lo or p[2] < lo then lo = p[2] end
+      if not hi or p[2] > hi then hi = p[2] end
+    end
+  end
+  return lo and hi - lo or 0
+end
+
+function T.retarget(src, dst)
+  local exact, loose = {}, {}
+  for i, b in ipairs(src.bones) do
+    if not exact[b.name] then exact[b.name] = i end
+    local n = b.name:lower():gsub("[%._%-]", "")
+    if not loose[n] then loose[n] = i end
+  end
+  local map, missing, matched = {}, {}, 0
+  for i, b in ipairs(dst.bones) do
+    local j = exact[b.name] or loose[(b.name:lower():gsub("[%._%-]", ""))]
+    map[i] = j or false
+    if j then matched = matched + 1 else missing[#missing + 1] = b.name end
+  end
+  local hs, hd = T.rig_height(src), T.rig_height(dst)
+  local ratio = (hs > 1e-6 and hd > 1e-6) and hd / hs or 1
+  local clips = {}
+  for c, clip in ipairs(src.clips) do
+    local o = { name = clip.name, mode = clip.mode, loop = clip.loop, length = clip.length, keys = {} }
+    for k, key in ipairs(clip.keys) do
+      local pose = {}
+      for i = 1, #dst.bones do
+        local p = map[i] and key.pose[map[i]]
+        if p then
+          pose[i] = { q = { p.q[1], p.q[2], p.q[3], p.q[4] }, t = { p.t[1] * ratio, p.t[2] * ratio, p.t[3] * ratio } }
+        else
+          pose[i] = { q = { 0, 0, 0, 1 }, t = { 0, 0, 0 } }
+        end
+      end
+      o.keys[k] = { t = key.t, pose = pose }
+    end
+    clips[c] = o
+  end
+  return clips, { matched = matched, missing = missing, clips = #clips }
+end
+
+-- Animator side (bones of a loaded rig: r.bones[i] = { parent (1-based, 0 none), head, tail }, faces f.p / f.b).
+-- T.part_bones(r, b, tree): { [bone] = true } for bone b (1-based), with the bones below it when tree is set.
+function T.part_bones(r, b, tree)
+  local set = { [b] = true }
+  if tree then
+    for i, o in ipairs(r.bones) do if o.parent >= 1 and set[o.parent] then set[i] = true end end
+  end
+  return set
+end
+
+-- T.turn_part(m, r, b, axis, rad): turns the bone b and the bones below it round the head of b, and the corners
+-- of the faces that follow them (m.faces[].p, f.b). The head of b, the poses and the animations stay; every
+-- animation turns the part from its new rest place. Returns the number of corners turned.
+function T.turn_part(m, r, b, axis, rad)
+  local set = T.part_bones(r, b, true)
+  local pivot, q = V.copy(r.bones[b].head), Q.axis(V.norm(axis), rad)
+  local function turn(p) return V.add(pivot, Q.rotate(q, V.sub(p, pivot))) end
+  for i in pairs(set) do
+    local o = r.bones[i]
+    if i ~= b then o.head = turn(o.head) end
+    o.tail = turn(o.tail)
+  end
+  local n = 0
+  for _, f in ipairs(m.faces) do
+    if f.b then
+      for k = 1, #f.p do
+        if set[f.b[k]] then f.p[k] = turn(f.p[k]); n = n + 1 end
+      end
+    end
+  end
+  return n
+end
+
+-- Two-bone IK (APP-29), for the editors only: the runtime, the clip format and the kernel do not change; the
+-- result is ordinary rotation keys. T.ik2(root, len1, len2, target, pole [, rest1, rest2]) puts a chain of two
+-- segments (upper from root, lower after it) on a target. Returns { mid, tip, d1, d2, q1, q2, reached }: the
+-- joint and the end, the unit directions of the two segments, and the rotations that turn rest1 / rest2
+-- (unit vectors, default +y) onto d1 / d2 by the shortest way. The lengths never change: a target out of
+-- reach (too far, or nearer than |len1 - len2|) gives a straight (or fully folded) chain that points at it
+-- and reached = false. The joint leans toward `pole` (a direction; the part of it across the root-target line).
+function T.ik2(root, len1, len2, target, pole, rest1, rest2)
+  local to = V.sub(target, root)
+  local d = sqrt(V.dot(to, to))
+  pole = pole or { 0, 0, 1 }
+  local axis
+  if d > 1e-9 then axis = V.scale(to, 1 / d) else axis = V.norm(pole) end
+  if V.dot(axis, axis) < 0.5 then axis = { 0, 1, 0 } end
+  local reach, dmin = len1 + len2, abs(len1 - len2)
+  local reached = d <= reach + 1e-9 and d >= dmin - 1e-9
+  local dd = d
+  if dd > reach then dd = reach end
+  if dd < dmin then dd = dmin end
+  if dd < 1e-6 * max(reach, 1e-9) then dd = 1e-6 * max(reach, 1e-9) end
+  -- the bend: the pole across the axis
+  local bend = V.sub(pole, V.scale(axis, V.dot(pole, axis)))
+  if V.dot(bend, bend) < 1e-10 then
+    local least = abs(axis[1]) <= abs(axis[2]) and (abs(axis[1]) <= abs(axis[3]) and 1 or 3) or (abs(axis[2]) <= abs(axis[3]) and 2 or 3)
+    bend = V.cross(axis, V.unit(least))
+  end
+  bend = V.norm(bend)
+  local a = (len1 * len1 - len2 * len2 + dd * dd) / (2 * dd)
+  local h = sqrt(max(0, len1 * len1 - a * a))
+  local mid = V.add(V.add(root, V.scale(axis, a)), V.scale(bend, h))
+  local tip = V.add(root, V.scale(axis, dd))
+  local d1, d2 = V.norm(V.sub(mid, root)), V.norm(V.sub(tip, mid))
+  if V.dot(d1, d1) < 0.5 then d1 = axis end
+  if V.dot(d2, d2) < 0.5 then d2 = axis end
+  return { mid = mid, tip = tip, d1 = d1, d2 = d2, reached = reached,
+           q1 = Q.arc(rest1 or { 0, 1, 0 }, d1), q2 = Q.arc(rest2 or { 0, 1, 0 }, d2) }
+end
+
+-- The pose of a rig in the model's space, as the kernel skins it (M = M_parent * T(head + t) * R(q) * T(-head)):
+-- { rot[i] = the bone's rotation in the world, head[i], tail[i] = where they are }. `pose` is { {q =, t =}, ... }.
+function T.fk(rig, pose)
+  local rot, tr, head, tail = {}, {}, {}, {}
+  local ident = { q = { 0, 0, 0, 1 }, t = { 0, 0, 0 } }
+  for i, b in ipairs(rig.bones) do
+    local p = pose[i] or ident
+    local q = Q.norm(p.q)
+    local h = b.head
+    local lt = V.sub(V.add(h, p.t), Q.rotate(q, h))
+    local par = b.parent
+    if par and par > 0 and par < i then
+      rot[i] = Q.mul(rot[par], q)
+      tr[i] = V.add(Q.rotate(rot[par], lt), tr[par])
+    else
+      rot[i], tr[i] = q, lt
+    end
+    head[i] = V.add(Q.rotate(rot[i], h), tr[i])
+    tail[i] = V.add(Q.rotate(rot[i], b.tail), tr[i])
+  end
+  return { rot = rot, head = head, tail = tail }
+end
+
+-- The direction the joint of the chain g (upper) > p (lower) > b (end) leans to in the rest pose, in the space
+-- of the parent of g: its offset from the line head(g) - head(b). A straight rest limb leans as the pose
+-- `pose` does, else as the end bone points across the limb (toes), else toward +z.
+function T.ik_pole(rig, g, p, b, pose)
+  local function lean(hg, hp, hb)
+    local ax = V.sub(hb, hg)
+    local l2 = V.dot(ax, ax)
+    if l2 < 1e-12 then return nil end
+    local off = V.sub(hp, hg)
+    off = V.sub(off, V.scale(ax, V.dot(off, ax) / l2))
+    if V.dot(off, off) < 1e-8 then return nil end
+    return V.norm(off)
+  end
+  local B = rig.bones
+  local rest = lean(B[g].head, B[p].head, B[b].head)
+  if rest then return rest end
+  if pose then
+    local fk = T.fk(rig, pose)
+    local w = lean(fk.head[g], fk.head[p], fk.head[b])
+    if w then
+      local pg = B[g].parent
+      if pg and pg > 0 then w = Q.rotate(Q.conj(fk.rot[pg]), w) end
+      return w
+    end
+  end
+  -- a limb straight at rest and in the pose: the knee leans where the end bone points across the limb (the
+  -- toes of a foot), else toward +z (an elbow of a model that faces -z)
+  local ax = V.sub(B[b].head, B[g].head)
+  local l2 = V.dot(ax, ax)
+  if l2 > 1e-12 then
+    local d = V.sub(B[b].tail, B[b].head)
+    d = V.sub(d, V.scale(ax, V.dot(d, ax) / l2))
+    if V.dot(d, d) > 0.0025 then return V.norm(d) end
+  end
+  return { 0, 0, 1 }
+end
+
+-- Puts the end bone b of the chain g > p > b (each the parent of the next) with its head on `target` (the
+-- model's space) by turning g and p in `pose`; b keeps its rotation in the world. `pole` is as T.ik_pole gives
+-- it. Returns a new pose (the old one stays) and { reached, eff = where the head of b is now }.
+function T.ik_chain(rig, pose, g, p, b, target, pole)
+  local fk0 = T.fk(rig, pose)
+  local root, mid, tip = fk0.head[g], fk0.head[p], fk0.head[b]
+  local len1, len2 = sqrt(V.dist2(mid, root)), sqrt(V.dist2(tip, mid))
+  local out = {}
+  for i, bp in ipairs(pose) do out[i] = { q = V.copy(bp.q), t = V.copy(bp.t) }; out[i].q[4] = bp.q[4] end
+  if len1 < 1e-6 or len2 < 1e-6 then return out, { reached = false, eff = V.copy(tip) } end
+  local pg = rig.bones[g].parent
+  local par = (pg and pg > 0) and fk0.rot[pg] or { 0, 0, 0, 1 }
+  local res = T.ik2(root, len1, len2, target, Q.rotate(par, pole or { 0, 0, 1 }))
+  local rg = Q.mul(Q.arc(V.norm(V.sub(mid, root)), res.d1), fk0.rot[g])
+  out[g].q = Q.norm(Q.mul(Q.conj(par), rg))
+  local fk1 = T.fk(rig, out)
+  local rp = Q.mul(Q.arc(V.norm(V.sub(fk1.head[b], fk1.head[p])), res.d2), fk1.rot[p])
+  out[p].q = Q.norm(Q.mul(Q.conj(fk1.rot[g]), rp))
+  local fk2 = T.fk(rig, out)
+  out[b].q = Q.norm(Q.mul(Q.conj(fk2.rot[p]), fk0.rot[b]))
+  return out, { reached = res.reached, eff = T.fk(rig, out).head[b] }
 end
 
 -- back from triangles: the two halves of each tile become a tile again
@@ -543,39 +2443,46 @@ function T.is_game(path)
   return p:match("%.bm$") ~= nil or p:match("%.b16$") ~= nil
 end
 
--- "/carts/my 3d.bme" -> "/carts/MY3D.BME" (8.3)
+-- "/bme/my 3d.bme" -> "/bme/my3d.bme" (8.3); no folder: /bme; an old project keeps its folder
 function T.short_path(path)
   local dir, base = path:match("^(.*)/([^/]+)$")
-  dir = dir or "/carts"
+  dir = dir or U.PROJECTS
   if dir == "" then dir = "/" end
-  local stem = (base or path):gsub("%.[^.]*$", ""):upper():gsub("[^%w_]", "")
-  if stem == "" then stem = "GAME" end
-  return (dir == "/" and "" or dir) .. "/" .. stem:sub(1, 8) .. ".BME"
+  local stem = (base or path):gsub("%.[^.]*$", ""):lower():gsub("[^%w_]", "")
+  if stem == "" then stem = "game" end
+  return (dir == "/" and "" or dir) .. "/" .. stem:sub(1, 8) .. ".bme"
 end
 
 function T.list_files()
-  local out = {}
-  for _, dir in ipairs({ "/carts", "/" }) do
-    for _, f in ipairs(ls(dir)) do
-      local n = f.name:lower()
-      if not f.dir and (n:match("%.bm$") or n:match("%.bme$")) then
-        out[#out + 1] = (dir == "/" and "" or dir) .. "/" .. f.name
-      end
-    end
-  end
+  local out = U.project_files({ bm = true, bme = true, bmm = true }, { T.BMM_DIR })   -- and the model files of /bmm
   table.sort(out)
   return out
 end
 
+-- a model file (.bmm) is opened as a project of its models: Save writes the .bmm again (res_write),
+-- Save as makes a .bme project of them
+function T.is_bmm(path) return path ~= nil and path:lower():match("%.bmm$") ~= nil end
+
 local reset_pages
 
 function T.load_project(path)
-  local p, e = cart_load(path)
-  if not p then say("cannot open " .. path .. ": " .. tostring(e), C.ERR); return false end
-  S.proj = { title = p.title, author = p.author, res = p.res, path = path,
-             sheet_w = p.sheet_w, sheet_h = p.sheet_h, palette = p.palette }
-  local parts, ins = T.split_mesh(cart_data(SEC_MESH))
-  local rigs = T.split_anim(cart_data(SEC_ANIM))
+  local parts, ins, rigs
+  if T.is_bmm(path) then
+    local r, e = res_read(path)
+    if not r then say("cannot open " .. path .. ": " .. tostring(e), C.ERR); return false end
+    if r.kind ~= 1 or not r.sections[SEC_MESH] then say(path .. " is not a model file", C.ERR); return false end
+    S.proj = { title = r.name or path:match("([^/]+)%.%w+$"), author = r.author or "", res = "640x360", path = path,
+               bmm = true }
+    parts, ins = T.split_mesh(r.sections[SEC_MESH])
+    rigs = r.sections[SEC_ANIM] and T.split_anim(r.sections[SEC_ANIM]) or {}
+  else
+    local p, e = cart_load(path)
+    if not p then say("cannot open " .. path .. ": " .. tostring(e), C.ERR); return false end
+    S.proj = { title = p.title, author = p.author, res = p.res, path = path,
+               sheet_w = p.sheet_w, sheet_h = p.sheet_h, palette = p.palette }
+    parts, ins = T.split_mesh(cart_data(SEC_MESH))
+    rigs = T.split_anim(cart_data(SEC_ANIM))
+  end
   S.inset = ins
   S.models = {}
   for _, part in ipairs(parts) do
@@ -583,6 +2490,7 @@ function T.load_project(path)
     local faces, r = T.decode_model(mc, rigs[name])
     local m = { name = name, faces = faces, rig = r, mc = mc, ac = r and rigs[name] or nil, dirty = false }
     m.nv, m.nt = sunpack("<I2I2", mc, 17)
+    m.mflags = sunpack("<I4", mc, 21) & ~1             -- the model's map class (T.MODEL_CLASSES); bit 0 is "lit"
     if r then
       local vb = {}
       for i = 1, m.nv do vb[i] = string.char(rigs[name]:byte(25 + #r.bones * 44 + i - 1)) end
@@ -597,7 +2505,8 @@ function T.load_project(path)
   if not ok then say("broken models: " .. tostring(err), C.ERR) end
   T.select_model(1)
   reset_pages()
-  say("opened " .. path .. "  (" .. #parts .. " models" .. (T.is_game(path) and "; a game: saving makes its copy" or "") .. ")", C.ACC)
+  say("opened " .. path .. "  (" .. #parts .. " models" .. (T.is_game(path) and "; a game: saving makes its copy" or "")
+      .. (S.proj.bmm and "; a model file: Save writes it, Save as makes a .bme" or "") .. ")", C.ACC)
   return true
 end
 
@@ -618,7 +2527,17 @@ end
 function T.save_to(path, from)
   local ok, e = T.sync()
   if not ok then say("cannot save: " .. tostring(e), C.ERR); return false end
-  local new = not S.proj.path
+  if T.is_bmm(path) then                -- a model file: the models and their skeletons, nothing else
+    local mesh = cart_data(SEC_MESH)
+    if not mesh then say("cannot save: no model with faces", C.ERR); return false end
+    ok, e = res_write(path, 1, { sections = { [SEC_MESH] = mesh, [SEC_ANIM] = cart_data(SEC_ANIM) },
+                                 name = S.proj.title, author = S.proj.author or "", replace = true })
+    if not ok then say("save failed: " .. tostring(e), C.ERR); return false end
+    S.dirty = false
+    say("saved " .. path, C.ACC)
+    return true
+  end
+  local new = not S.proj.path or S.proj.bmm   -- a .bmm saved as a project: a new cartridge with the viewer
   local t = { sections = { [SEC_MESH] = cart_data(SEC_MESH) or false, [SEC_ANIM] = cart_data(SEC_ANIM) or false },
               title = S.proj.title, author = S.proj.author }
   if new then
@@ -630,9 +2549,9 @@ function T.save_to(path, from)
   ok, e = cart_write(path, t)
   if not ok then say("save failed: " .. tostring(e), C.ERR); return false end
   if type(e) == "string" then path = e end      -- the editable copy of a game, or a new project
-  S.proj.path = path
+  S.proj.path, S.proj.bmm = path, nil
   S.dirty, S.sheet_dirty = false, false
-  say("saved " .. path, C.ACC)
+  say(U.saved_text(path), C.ACC)
   return true
 end
 
@@ -640,9 +2559,9 @@ local ask
 
 function T.save_as(after)
   local p = S.proj.path
-  ask("file name (8.3, in /carts)", p and T.short_path(p):match("([^/]+)$") or "MY3D.BME", function(t)
+  ask("file name (8.3, in /bme)", p and T.short_path(p):match("([^/]+)$") or "my3d.bme", function(t)
     if t == "" then return end
-    if T.save_to(T.short_path("/carts/" .. t), p) and after then after() end
+    if T.save_to(U.project_path(t), p) and after then after() end
   end)
 end
 
@@ -657,6 +2576,7 @@ end
 -- tries the game: saved first, then cart_run; the program comes back to
 -- the same page (saved())
 function T.run_project()
+  if S.proj.bmm then say("a model file has no game: Save as makes a .bme project to try", C.ERR); return end
   local function go_run()
     save({ page = S.last_page, model = S.cur })
     cart_run(S.proj.path)
@@ -789,6 +2709,205 @@ function T.view_axes(yaw)
     ra, rs = 1, fs
   end
   return fa, fs, ra, rs
+end
+
+-- Block shapes of bm Studio (APP-12). T.BLOCK_KINDS names them: 1 cube, 2 ramp, 3 corner, 4 rounded.
+-- T.block_shape(kind, c, fa, fs, ra, rs): the faces ({ p = corners }, 3 or 4 each, looking out) of a
+-- block in the cell c ({x, y, z} the lowest corner). The ramp rises towards "far": axis fa (1 or 3), sign
+-- fs; "right" is axis ra, sign rs (T.view_axes). Ramp: a slope from the near floor edge to the far top
+-- edge, a far wall, 2 triangular sides. Corner: a pyramid on the cell floor whose top is the far right top
+-- corner (5 faces; the sloped sides meet a ramp's slope). Rounded: an octagon prism (the 4 vertical edges
+-- cut 0.3 deep), 14 faces. The cube is not here: bm Studio builds it with block_faces.
+T.BLOCK_KINDS = { "cube", "ramp", "corner", "rounded", "cylinder", "cone", "sphere", "dome", "tube", "arch" }
+function T.block_shape(kind, c, fa, fs, ra, rs)
+  local function at(lr, lf, h)
+    local p = {}
+    p[ra] = c[ra] + (rs > 0 and lr or 1 - lr)
+    p[fa] = c[fa] + (fs > 0 and lf or 1 - lf)
+    p[2] = c[2] + h
+    return p
+  end
+  local faces = {}
+  if kind == 2 then
+    local nbl, nbr, fbl, fbr = at(0, 0, 0), at(1, 0, 0), at(0, 1, 0), at(1, 1, 0)
+    local ftl, ftr = at(0, 1, 1), at(1, 1, 1)
+    faces = { { p = { nbl, nbr, fbr, fbl } }, { p = { fbl, fbr, ftr, ftl } }, { p = { nbl, nbr, ftr, ftl } },
+              { p = { nbl, fbl, ftl } }, { p = { nbr, fbr, ftr } } }
+  elseif kind == 3 then
+    local nbl, nbr, fbl, fbr, ftr = at(0, 0, 0), at(1, 0, 0), at(0, 1, 0), at(1, 1, 0), at(1, 1, 1)
+    faces = { { p = { nbl, nbr, fbr, fbl } }, { p = { fbl, fbr, ftr } }, { p = { nbr, fbr, ftr } },
+              { p = { nbl, nbr, ftr } }, { p = { nbl, ftr, fbl } } }
+  elseif kind == 4 then
+    local o = { { 0.3, 0 }, { 0.7, 0 }, { 1, 0.3 }, { 1, 0.7 }, { 0.7, 1 }, { 0.3, 1 }, { 0, 0.7 }, { 0, 0.3 } }
+    local lo, hi = {}, {}
+    for i, q in ipairs(o) do lo[i], hi[i] = at(q[1], q[2], 0), at(q[1], q[2], 1) end
+    for i = 1, 8 do
+      local j = i % 8 + 1
+      faces[#faces + 1] = { p = { lo[i], lo[j], hi[j], hi[i] } }
+    end
+    for _, r in ipairs({ lo, hi }) do
+      faces[#faces + 1] = { p = { r[1], r[2], r[3], r[4] } }
+      faces[#faces + 1] = { p = { r[1], r[4], r[5], r[6] } }
+      faces[#faces + 1] = { p = { r[1], r[6], r[7], r[8] } }
+    end
+  else
+    return nil
+  end
+  -- every face looks away from the middle of the corners (all three shapes are convex)
+  local mid, seen, nm = { 0, 0, 0 }, {}, 0
+  for _, f in ipairs(faces) do
+    for _, q in ipairs(f.p) do
+      local key = q[1] .. "," .. q[2] .. "," .. q[3]
+      if not seen[key] then
+        seen[key] = true
+        nm = nm + 1
+        mid[1], mid[2], mid[3] = mid[1] + q[1], mid[2] + q[2], mid[3] + q[3]
+      end
+    end
+  end
+  mid[1], mid[2], mid[3] = mid[1] / nm, mid[2] / nm, mid[3] / nm
+  for _, f in ipairs(faces) do
+    local n, m = T.face_normal(f), T.face_center(f)
+    if n[1] * (m[1] - mid[1]) + n[2] * (m[2] - mid[2]) + n[3] * (m[3] - mid[3]) < 0 then
+      local r = {}
+      for i = #f.p, 1, -1 do r[#r + 1] = f.p[i] end
+      f.p = r
+    end
+    for i, q in ipairs(f.p) do f.p[i] = { q[1], q[2], q[3] } end    -- no corner shared between faces
+  end
+  return faces
+end
+
+-- Soft shapes of bm Studio. T.solid_shape(kind, c, w, h, d, n) gives the faces ({ p = corners }, 3 or 4
+-- corners, the faces look out) of kind (5 cylinder, 6 cone, 7 sphere, 8 dome, 9 tube, 10 arch, the
+-- numbers of T.BLOCK_KINDS) in the box that starts at the cell c and is w, h, d cells (x, y, z). n is the
+-- number of sides, 4 to 16. A tube has a hole of 0.6 of its radius. An arch spans x, is d deep, and
+-- stands on its two feet. Every face is turned away from a point behind it (the hint), so the
+-- shapes that are not convex are right too. Returns nil for another kind.
+function T.solid_shape(kind, c, w, h, d, n)
+  if kind < 5 or kind > 10 then return nil end
+  n = max(4, min(16, floor(n or 8)))
+  w, h, d = max(0.25, w or 1), max(0.25, h or 1), max(0.25, d or 1)
+  local cx, cz = c[1] + w / 2, c[3] + d / 2
+  local rx, rz, y0, y1 = w / 2, d / 2, c[2], c[2] + h
+  local faces = {}
+  local function add(hint, ...)
+    local f = { p = { ... } }
+    local nn, m = T.face_normal(f), T.face_center(f)
+    if nn[1] * (m[1] - hint[1]) + nn[2] * (m[2] - hint[2]) + nn[3] * (m[3] - hint[3]) < 0 then
+      local r = {}
+      for i = #f.p, 1, -1 do r[#r + 1] = f.p[i] end
+      f.p = r
+    end
+    faces[#faces + 1] = f
+  end
+  local function ring(y, k, f)
+    local out = {}
+    for i = 0, n - 1 do
+      local a = i / n * 2 * pi
+      out[i + 1] = { cx + rx * k * cos(a), y, cz + rz * k * sin(a) }
+    end
+    return out
+  end
+  local mid = { cx, (y0 + y1) / 2, cz }
+  local function wrap(i) return i % n + 1 end
+  if kind == 5 or kind == 6 then
+    local lo, hi = ring(y0, 1), ring(y1, 1)
+    local bc, tc = { cx, y0, cz }, { cx, y1, cz }
+    for i = 1, n do
+      local j = wrap(i)
+      if kind == 5 then
+        add(mid, lo[i], lo[j], hi[j], hi[i])
+        add(mid, tc, hi[i], hi[j])
+      else
+        add(mid, lo[i], lo[j], tc)
+      end
+      add(mid, bc, lo[i], lo[j])
+    end
+  elseif kind == 7 or kind == 8 then
+    local rings = max(2, n // 2)
+    if kind == 8 then rings = max(2, n // 4) end
+    -- latitude 0 = the top pole; the sphere ends at the bottom pole, the dome at the equator (the base)
+    local last = rings                                 -- steps of pi (sphere) or pi/2 (dome)
+    local span = (kind == 7) and pi or pi / 2
+    local cy = (kind == 7) and (y0 + y1) / 2 or y0
+    local ry = (kind == 7) and h / 2 or h
+    local rows = {}
+    for r = 0, last do
+      local a = r / last * span
+      local row = {}
+      if r == 0 then
+        row[1] = { cx, cy + ry, cz }
+      elseif r == last and kind == 7 then
+        row[1] = { cx, cy - ry, cz }
+      else
+        for i = 0, n - 1 do
+          local b = i / n * 2 * pi
+          row[i + 1] = { cx + rx * sin(a) * cos(b), cy + ry * cos(a), cz + rz * sin(a) * sin(b) }
+        end
+      end
+      rows[r] = row
+    end
+    local hint = { cx, cy, cz }
+    for r = 0, last - 1 do
+      local A, B = rows[r], rows[r + 1]
+      for i = 1, n do
+        local j = wrap(i)
+        if #A == 1 then add(hint, A[1], B[i], B[j])
+        elseif #B == 1 then add(hint, A[i], A[j], B[1])
+        else add(hint, A[i], A[j], B[j], B[i]) end
+      end
+    end
+    if kind == 8 then
+      local base, bc = rows[last], { cx, cy, cz }
+      for i = 1, n do add({ cx, cy + 1, cz }, bc, base[i], base[wrap(i)]) end
+    end
+  elseif kind == 9 then
+    local k = 0.6
+    local lo, hi, ilo, ihi = ring(y0, 1), ring(y1, 1), ring(y0, k), ring(y1, k)
+    for i = 1, n do
+      local j = wrap(i)
+      add({ cx, (y0 + y1) / 2, cz }, lo[i], lo[j], hi[j], hi[i])
+      -- the hint of the inner wall lies out in the wall, so the face looks into the hole
+      local out = { cx + rx * (1 + k) / 2 * cos((i - 0.5) / n * 2 * pi), (y0 + y1) / 2, cz + rz * (1 + k) / 2 * sin((i - 0.5) / n * 2 * pi) }
+      add(out, ilo[i], ilo[j], ihi[j], ihi[i])
+      -- the bottom ring looks down, the top ring looks up: the hint is on the other side
+      add({ cx, y0 + 1, cz }, lo[i], lo[j], ilo[j], ilo[i])
+      add({ cx, y1 - 1, cz }, hi[i], hi[j], ihi[j], ihi[i])
+    end
+  else
+    -- arch: a half ring in the x-y plane (y is the height), extruded along z
+    local k = 0.6
+    local function arc(kk)
+      local out = {}
+      for i = 0, n do
+        local a = i / n * pi
+        out[i + 1] = { cx + rx * kk * cos(a), y0 + h * kk * sin(a) }
+      end
+      return out
+    end
+    local ou, inn = arc(1), arc(k)
+    local zf, zb = c[3], c[3] + d
+    local function P(q, z) return { q[1], q[2], z } end
+    local hint = { cx, y0, cz }
+    for i = 1, n do
+      add(hint, P(ou[i], zf), P(ou[i + 1], zf), P(ou[i + 1], zb), P(ou[i], zb))
+      -- the inner face looks into the opening: the hint is out in the wall
+      local a = (i - 0.5) / n * pi
+      local wall = { cx + rx * (1 + k) / 2 * cos(a), y0 + h * (1 + k) / 2 * sin(a), cz }
+      add(wall, P(inn[i], zf), P(inn[i + 1], zf), P(inn[i + 1], zb), P(inn[i], zb))
+      add({ cx, y0 + h / 2, zf + 1 }, P(inn[i], zf), P(inn[i + 1], zf), P(ou[i + 1], zf), P(ou[i], zf))
+      add({ cx, y0 + h / 2, zb - 1 }, P(inn[i], zb), P(inn[i + 1], zb), P(ou[i + 1], zb), P(ou[i], zb))
+    end
+    -- the feet: the end of the half ring on each side, looking down
+    for _, e in ipairs({ { ou[1], inn[1] }, { ou[n + 1], inn[n + 1] } }) do
+      add({ cx, y0 + 1, cz }, P(e[1], zf), P(e[2], zf), P(e[2], zb), P(e[1], zb))
+    end
+  end
+  for _, f in ipairs(faces) do
+    for i, q in ipairs(f.p) do f.p[i] = { q[1], q[2], q[3] } end
+  end
+  return faces
 end
 
 -- the camera from the keyboard and the pad, the same on every page: Alt +
@@ -1000,17 +3119,9 @@ T.snap = snap
 -- { { keys... }, label }, as many as fit
 function T.hint(list, y)
   y = y or HINT_Y
-  local x = 0
-  for _, h in ipairs(list) do
-    local kx = x
-    for _, k in ipairs(h[1]) do kx = kx + prompt(k) + 1 end
-    if snap(kx + 2) + #h[2] * 8 > W then break end
-    local x0 = x
-    for _, k in ipairs(h[1]) do x = prompt(k, x, y) + 1 end
-    x = print(h[2], snap(x + 2), y, C.DIM)
-    U.key_zone(x0, y, x - x0, 16, h[1])          -- a click: the key
-    x = x + 12
-  end
+  local items = {}
+  for i, h in ipairs(list) do items[i] = { keys = h[1], label = h[2] } end
+  U.hint_row(items, { y = y, w = W, snap = snap, dim = C.DIM })
 end
 
 -- a key as a chip, or the pad's button when a pad was used last and the
@@ -1055,11 +3166,13 @@ end
 function T.counts(m, x, y, narrow)
   local nt, nv = m and m.nt or 0, m and m.nv or 0
   local x0 = x
+  local gpu = gpu3d ~= nil and (gpu3d()) == true
+  local limit = gpu and T.TRIS_GPU_MODEL or T.TRIS_ARM
   x = print((m and #m.faces or 0) .. " faces", x, y, C.TEXT) + 8
-  x = print(nt .. " tri", x, y, nt > T.TRIS_60FPS and C.ACC or C.TEXT) + 8
+  x = print(nt .. " tri", x, y, nt > limit and C.ACC or C.TEXT) + 8
   if narrow then x, y = x0, y + 16 end
-  print(nv .. " vertices", x, y, nv > T.LIMIT_V and C.ERR or C.TEXT)
-  if nt > T.TRIS_60FPS then return "heavy for 60 fps (" .. T.TRIS_60FPS .. " triangles a scene)" end
+  print(nv .. " of " .. T.LIMIT_V .. " vertices", x, y, nv > T.LIMIT_V and C.ERR or C.TEXT)
+  if nt > limit then return "heavy for " .. (gpu and "GPU single model" or "ARM 60 fps") .. " (" .. limit .. " triangles)" end
 end
 
 ----------------------------------------------------------------- a model from a picture
@@ -1094,6 +3207,219 @@ local function sheet_untouched()
     end
   end
   return true
+end
+
+----------------------------------------------------------------- import and export of models (APP-9)
+
+-- What the three editors share to bring a model in from /bmm and /glb and to write one to /bmm.
+-- The flows know no screen: ui = { choose = f(title, rows, sel), ask = f(label, text, done),
+-- say = f(text, is_error) } is the editor's own dialogs. bm Studio and bm Animator give T.ui,
+-- bm Mesh gives its own.
+do
+  local function bmm_names()
+    local t = {}
+    for _, e in ipairs(T.model_files()) do if e.kind == "bmm" then t[e.name] = true end end
+    return t
+  end
+
+  -- a free .bmm name made from a name: lower case, 8 characters at most
+  local function free_stem(name, taken)
+    local s = tostring(name):lower():gsub("%.%w+$", ""):gsub("[^a-z0-9_%-]", ""):sub(1, 8)
+    if s == "" then s = "model" end
+    if not taken[s] then return s end
+    for k = 2, 99 do
+      local t = tostring(k)
+      local n = s:sub(1, 8 - #t) .. t
+      if not taken[n] then return n end
+    end
+    return s
+  end
+
+  local function counts(item) return #item.v .. " vertices, " .. #item.f .. " triangles" end
+
+  -- how the list shows an entry of T.model_files()
+  function T.entry_label(e)
+    if e.kind == "glb" then return e.name .. "   .glb: converted to /bmm" end
+    return e.name .. "   .bmm" .. (e.glb and " (and .glb)" or "")
+  end
+
+  -- one entry: a .bmm is read; a .glb is converted to /bmm/NAME.bmm (a new name is asked when its own
+  -- is over 8 characters or is taken); done(item, text) gets the item
+  function T.import_entry(ui, e, done)
+    if e.kind == "bmm" then
+      local item, err = T.import_model(e.name)
+      if not item then ui.say(tostring(err), true); return false end
+      done(item, e.name .. ".bmm: " .. counts(item))
+      return true
+    end
+    local function convert(to)
+      local ok, path, item = T.import_glb_to_bmm(e.name, { to = to })
+      if not ok then ui.say(tostring(path), true); return false end
+      done(item, e.name .. ".glb to " .. path .. ": " .. counts(item))
+      return true
+    end
+    local to = bmm_stem(e.name)
+    if to and not bmm_names()[to] then return convert(to) end
+    local function name_it(text, why)
+      ui.say(why, true)
+      ui.ask("new name in /bmm (1-8 of a-z 0-9 _ -)", text, function(t)
+        local s = bmm_stem(t)
+        if not s then return name_it(t, "'" .. t .. "': a name is 1 to 8 of a-z 0-9 _ -") end
+        if bmm_names()[s] then return name_it(t, "/bmm/" .. s .. ".bmm is there already") end
+        convert(s)
+      end)
+    end
+    name_it(free_stem(e.name, bmm_names()),
+            to and ("/bmm/" .. to .. ".bmm is there already: give the .glb another name")
+                or (e.name .. ".glb: the .bmm name is 1 to 8 of a-z 0-9 _ -: give it a name"))
+    return true
+  end
+
+  -- the list of /bmm and /glb to choose from; false (and a message) if there is none
+  function T.import_flow(ui, done)
+    local list = T.model_files()
+    if #list == 0 then ui.say("no model in /bmm or /glb on the SD card", true); return false end
+    local rows = {}
+    for i, e in ipairs(list) do
+      rows[i] = { T.entry_label(e), function() T.import_entry(ui, e, done) end }
+    end
+    ui.choose("import a model (/bmm, /glb)", rows, 1)
+    return true
+  end
+
+  -- an item to /bmm/NAME.bmm: asks the name; a file that is there is replaced only when chosen
+  function T.export_item(ui, item)
+    if not item or #item.v == 0 or #item.f == 0 then ui.say("the model is empty: nothing to export", true); return false end
+    local function write(stem, replace)
+      local ok, path = T.write_bmm(item, stem, { replace = replace })
+      if not ok then ui.say(tostring(path), true); return false end
+      ui.say("exported to " .. path .. ": " .. counts(item), false)
+      return true
+    end
+    local function name_it(text)
+      ui.ask("export to /bmm: name (1-8 of a-z 0-9 _ -)", text, function(t)
+        local s = bmm_stem(t)
+        if not s then ui.say("'" .. t .. "': a name is 1 to 8 of a-z 0-9 _ -", true); return name_it(t) end
+        if bmm_names()[s] then
+          ui.choose("/bmm/" .. s .. ".bmm is there already", {
+            { "Replace it", function() write(s, true) end },
+            { "Another name...", function() name_it(s) end },
+          }, 2)
+        else
+          write(s, false)
+        end
+      end)
+    end
+    name_it(free_stem(item.name, {}))
+    return true
+  end
+
+  -- the sheet of the project as a sheet section (type 2: width, height, RGBA), nil if it has none
+  -- maxh: only the first rows (bm Mesh keeps its reference pictures below the project's sheet)
+  function T.sheet_section(maxh)
+    if not cart_sheet or not sget then return nil end
+    local ok, w, h = pcall(cart_sheet)
+    if not ok or not w or not h or w < 1 or h < 1 then return nil end
+    if maxh and maxh < h then h = maxh end
+    local rows = {}
+    for y = 0, h - 1 do
+      local px = {}
+      for x = 0, w - 1 do
+        local c = sget(x, y)
+        px[#px + 1] = c and spack("BBBB", (c >> 16) & 255, (c >> 8) & 255, c & 255, 255) or "\0\0\0\0"
+      end
+      rows[#rows + 1] = table.concat(px)
+    end
+    return spack("<I2I2", w, h) .. table.concat(rows)
+  end
+
+  -- the pixels of a sheet section on the project's sheet
+  local function sheet_put(data)
+    local w, h = sunpack("<I2I2", data)
+    local cw, ch = cart_sheet()
+    if w > cw or h > ch then cart_sheet(math.max(w, cw), math.max(h, ch)) end
+    for y = 0, h - 1 do
+      local base = 4 + y * w * 4
+      for x = 0, w - 1 do
+        local r, g, b, a = data:byte(base + x * 4 + 1, base + x * 4 + 4)
+        sset(x, y, a >= 128 and (r << 16 | g << 8 | b) or nil)
+      end
+    end
+    S.sheet_dirty = true
+  end
+
+  -- bm Studio and bm Animator: the item as a model of the project (the current one if it is empty).
+  -- The sheet of a .bmm goes on the project's sheet when that is untouched; else its tiles turn
+  -- flat grey.
+  function T.take_item(item, note)
+    local faces, rig = T.decode_model(item.mc, item.ac)
+    local textured = false
+    for _, f in ipairs(faces) do if f.uv then textured = true end end
+    local sheet_text = ""
+    if textured then
+      if item.sheet and item.sheet.type == 2 and sheet_untouched() then
+        sheet_put(item.sheet.data)
+        sheet_text = ", its texture on the sheet"
+      else
+        for _, f in ipairs(faces) do if f.uv then f.uv, f.c = nil, 0x808080 end end
+        sheet_text = ", textured faces flat grey (the sheet is in use)"
+      end
+    end
+    local cur = M()
+    local reuse = cur ~= nil and #cur.faces == 0 and not (cur.rig and #cur.rig.bones > 0)
+    local i
+    if reuse then
+      i = S.cur
+      cur.name = T.unique_name(item.name, S.cur)
+    else
+      i = T.new_model(item.name)
+    end
+    local m = S.models[i]
+    m.faces, m.rig, m.dirty = faces, rig, true
+    S.undo, S.redo = {}, {}
+    local ok, e = T.sync()
+    if not ok then
+      if reuse then m.faces, m.rig = {}, nil else table.remove(S.models, i) end
+      T.sync()
+      say("cannot take the model: " .. tostring(e), C.ERR, 400)
+      return false
+    end
+    S.dirty = true
+    T.select_model(i)
+    T.refresh()
+    T.go(A.order[1])
+    local pg = A.pages[A.order[1]]
+    if pg.reset then pg.reset() end
+    local nb = rig and #rig.bones or 0
+    say(note .. sheet_text .. (nb > 0 and (", " .. nb .. " bones") or "") .. ": model " .. m.name, C.ACC, 400)
+    return true
+  end
+
+  T.ui = {
+    choose = function(title, rows, sel) T.choose(title, rows, sel) end,
+    ask = function(label, text, done) T.ask(label, text, done) end,
+    say = function(s, err) say(s, err and C.ERR or C.ACC, 400) end,
+  }
+
+  function T.import_dialog() return T.import_flow(T.ui, T.take_item) end
+
+  -- the current model to /bmm (its skeleton and, if it has textured faces, the sheet go with it)
+  function T.export_dialog()
+    local m = M()
+    if not m or #m.faces == 0 then say("the model is empty: nothing to export", C.ERR, 300); return false end
+    local ok, e = T.sync()
+    if not ok or not m.mc then say("cannot export: " .. tostring(e or "no faces"), C.ERR, 300); return false end
+    local item = G.model_item(m.name, m.mc, m.ac)
+    item.inset = S.inset
+    for _, f in ipairs(m.faces) do
+      if f.uv then
+        local data = T.sheet_section()
+        if data then item.sheet = { type = 2, data = data } end
+        break
+      end
+    end
+    return T.export_item(T.ui, item)
+  end
 end
 
 -- the model into the project: a new model named after the picture
@@ -1281,8 +3607,7 @@ T.needs_confirm = needs_confirm
 local function input_key(k)
   if k == "\n" then local d, t = input.done, input.text; input = nil; d(t)
   elseif k == "esc" then input = nil
-  elseif k == "\b" then input.text = input.text:sub(1, -2)
-  elseif #k == 1 and k:byte() >= 32 and #input.text < 40 then input.text = input.text .. k end
+  else U.line_key(input, k, 40) end
 end
 
 local function choose_key(k)
@@ -1305,7 +3630,8 @@ local function draw_input()
   rectfill(80, 144, 480, 64, C.PANEL)
   rect(80, 144, 480, 64, C.ACC)
   print(input.label, 96, 160, C.DIM)
-  print(input.text .. ((S.frame // 20) % 2 == 0 and "_" or ""), 96, 176, C.TEXT)
+  U.zone(88, 176, 464, 16, "field")              -- a click puts the caret
+  U.line_draw(input, 96, 176, C.TEXT, (S.frame // 20) % 2 == 0)
   T.chip_hint("esc", nil, "cancel", T.chip_hint("enter", nil, "ok", 336, 144), 144)
 end
 
@@ -1346,6 +3672,8 @@ function T.keyhelp()
   local function add(t) for _, e in ipairs(t or {}) do list[#list + 1] = e end end
   for _, id in ipairs(A.order) do list[#list + 1] = { A.pages[id].fkey, A.pages[id].label } end
   list[#list + 1] = { "[ / ]", "the model before / after" }
+  list[#list + 1] = { "ctrl i", "import a model: the list of /bmm and /glb" }
+  list[#list + 1] = { "ctrl e", "export the model to /bmm" }
   add(A.help)
   local pg = A.pages[S.page]
   if pg and pg.help then
@@ -1356,7 +3684,7 @@ function T.keyhelp()
     add({ { "up / down", "choose" }, { "enter", "select" } })
   end
   list[#list + 1] = "pad"
-  add({ { "Y LEFTRIGHT", "page" }, { "Y B", "menu" }, { "Y UPDOWN", "model" }, { "Y A", "undo" },
+  add({ { "Y LEFTRIGHT", "page" }, { "Y B", "menu (Import, Export)" }, { "Y UPDOWN", "model" }, { "Y A", "undo" },
         { "Y X", "assistant" } })
   add(A.help_pad)
   if pg then add(pg.help_pad) end
@@ -1416,7 +3744,10 @@ local function build_menu()
   items[#items + 1] = { "Save as...   (Ctrl+Shift+S)", function() T.save_as() end }
   items[#items + 1] = { "Try the game (F5)", function() T.run_project() end }
   if A.menu then A.menu(items) end
+  items[#items + 1] = { "Import a model...   (Ctrl+I)", function() if T.import_dialog() then go(S.last_page or A.order[1]) end end }
+  items[#items + 1] = { "Export to /bmm...   (Ctrl+E)", function() if T.export_dialog() then go(S.last_page or A.order[1]) end end }
   if A.picture then items[#items + 1] = { "Model from picture...", function() if T.picture_chooser() then go(S.last_page or A.order[1]) end end } end
+  items[#items + 1] = { LY.label(), LY.switch }
   -- opened by the bm SDK on this file: the way back to it (saved first)
   if S.from_sdk then items[#items + 1] = { "Back to bm SDK", function() T.open_in("sdk", "bm SDK") end } end
   items[#items + 1] = { "Exit " .. A.name, function() if not needs_confirm("exit") then quit() end end }
@@ -1483,6 +3814,8 @@ local function global_key(k)
   elseif k == "^n" and not busy and A.new_project then
     if not needs_confirm("new") then A.new_project() end
     return true
+  elseif k == "^i" and not busy then T.import_dialog(); return true
+  elseif k == "^e" and not busy then T.export_dialog(); return true
   elseif k == "f5" or k == "^r" then T.run_project(); return true
   elseif k == "f6" and not busy then T.assistant(); return true
   elseif k == "^z" then T.do_undo(S.undo, S.redo, "undo"); refresh(); return true
@@ -1553,7 +3886,8 @@ function T.mouse_frame()
   if U.keys() then return end
   if input then
     local z = U.click(0)
-    if z and z.kind == "shade" then U.press("esc") end
+    if z and z.kind == "shade" then U.press("esc")
+    elseif z and z.kind == "field" then U.line_click(input, 96, 8) end
     return
   end
   if choosing then
@@ -1593,6 +3927,8 @@ function T.mouse_frame()
     list[#list + 1] = { "Redo", "^y" }
     list[#list + 1] = { "Save", "^s" }
     list[#list + 1] = { "Try the game", "f5" }
+    list[#list + 1] = { "Import a model", "^i" }
+    list[#list + 1] = { "Export to /bmm", "^e" }
     list[#list + 1] = { "Assistant", "f6" }
     list[#list + 1] = { "Menu", "esc" }
     U.menu(list)
@@ -1607,6 +3943,12 @@ function T.run(app)
     A.pages[pg.id] = pg
     A.order[#A.order + 1] = pg.id
   end
+  -- the screen's size: 1280x720 where the GPU draws (the suite's Screen row), the frame and the app follow it
+  LY.on_resize(function(w, h)
+    T.resize(w, h)
+    if A.resize then A.resize(w, h) end
+  end)
+  LY.auto()
 
   function _init()
     keyp()                                 -- typing on: the keyboard types
@@ -1645,6 +3987,7 @@ function T.run(app)
   end
 
   function _update()
+    LY.poll()
     S.frame = S.frame + 1
     if S.msg_t > 0 then S.msg_t = S.msg_t - 1 end
     if confirm_t > 0 then confirm_t = confirm_t - 1 end
@@ -1700,13 +4043,14 @@ function T.run(app)
   end
 
   function _draw()
+    LY.poll()
     U.begin()
     local pg = A.pages[S.page]
     if pg then pg.draw() else draw_menu() end
 
     -- tab bar: each page with its key
     rectfill(0, 0, W, 16, C.BAR)
-    local x = 4
+    local x = U.bar_title(A.name, C.ACC)             -- the name first, at the left
     local tabs = {}
     for _, id in ipairs(A.order) do tabs[#tabs + 1] = { id, A.pages[id].fkey, A.pages[id].label } end
     tabs[#tabs + 1] = { "menu", "esc", "menu" }
@@ -1719,10 +4063,7 @@ function T.run(app)
       print(t[3], lx, 0, t[1] == S.page and 0xFFFFFF or C.DIM)
       x = x + w + 20
     end
-    local name = (S.proj.path or "untitled") .. (S.dirty and "*" or "")
-    local nx = W - #name * 8 - 8
-    if snap(x + 4) + #A.name * 8 + 16 <= nx then print(A.name, snap(x + 4), 0, C.ACC) end   -- when it fits
-    print(name, nx, 0, S.dirty and C.ACC or C.DIM)
+    U.bar_file(S.proj.path or "untitled", S.dirty, x, W, C.ACC, C.DIM)
 
     -- status bar
     rectfill(0, STATUS_Y, W, H - STATUS_Y, C.BAR)
@@ -1731,15 +4072,306 @@ function T.run(app)
     elseif S.page == "menu" then status = "up/down choose, Enter select"
     elseif pg and pg.status then status = pg.status()
     else status = M() and ("model " .. S.cur .. "/" .. #S.models .. ": " .. M().name) or "" end
-    print(status:sub(1, 79), 0, STATUS_Y, (S.msg_t > 0 and S.msg_c) or C.TEXT)
+    print(status:sub(1, W // 8 - 1), 0, STATUS_Y, (S.msg_t > 0 and S.msg_c) or C.TEXT)
     if #status <= 62 then                  -- room on the right: F12 held for the keys
-      T.chip_hint("f12", nil, "held: keys", 528, STATUS_Y)
+      T.chip_hint("f12", nil, "held: keys", W - 112, STATUS_Y)
     end
     if choosing then draw_choose() end
     if input then draw_input() end
     assist.draw()                                -- the assistant's panel on top, if open
     U.menu_draw()                                -- the context menu over everything
   end
+end
+
+----------------------------------------------------------------- Tiled maps (R11)
+
+-- A small JSON reader (for Tiled's .tmj/.json files): objects, arrays,
+-- strings, numbers, true, false, null (null becomes nil). Returns the value,
+-- or nil and the reason.
+function T.json_decode(s)
+  local pos = 1
+  local esc = { b = "\b", f = "\f", n = "\n", r = "\r", t = "\t", ['"'] = '"', ["\\"] = "\\", ["/"] = "/" }
+  local function skip() pos = s:find("[^ \t\r\n]", pos) or #s + 1 end
+  local function fail(msg) error({ msg = msg .. " at byte " .. pos }, 0) end
+  local value
+  local function str()
+    local out, i = {}, pos + 1
+    while true do
+      local j = s:find('["\\]', i)
+      if not j then pos = i; fail("string not closed") end
+      out[#out + 1] = s:sub(i, j - 1)
+      if s:sub(j, j) == '"' then pos = j + 1; return table.concat(out) end
+      local c = s:sub(j + 1, j + 1)
+      if c == "u" then
+        local cp = tonumber(s:sub(j + 2, j + 5), 16)
+        if not cp then pos = j; fail("bad \\u escape") end
+        out[#out + 1] = cp < 128 and string.char(cp) or "?"
+        i = j + 6
+      elseif esc[c] then out[#out + 1] = esc[c]; i = j + 2
+      else pos = j; fail("bad escape") end
+    end
+  end
+  function value()
+    skip()
+    local c = s:sub(pos, pos)
+    if c == "{" then
+      local t = {}
+      pos = pos + 1; skip()
+      if s:sub(pos, pos) == "}" then pos = pos + 1; return t end
+      while true do
+        skip()
+        if s:sub(pos, pos) ~= '"' then fail("a key was expected") end
+        local k = str()
+        skip()
+        if s:sub(pos, pos) ~= ":" then fail("':' was expected") end
+        pos = pos + 1
+        t[k] = value()
+        skip()
+        local d = s:sub(pos, pos)
+        pos = pos + 1
+        if d == "}" then return t end
+        if d ~= "," then pos = pos - 1; fail("',' or '}' was expected") end
+      end
+    elseif c == "[" then
+      local t, n = {}, 0
+      pos = pos + 1; skip()
+      if s:sub(pos, pos) == "]" then pos = pos + 1; return t end
+      while true do
+        n = n + 1
+        t[n] = value()
+        skip()
+        local d = s:sub(pos, pos)
+        pos = pos + 1
+        if d == "]" then return t end
+        if d ~= "," then pos = pos - 1; fail("',' or ']' was expected") end
+      end
+    elseif c == '"' then return str()
+    elseif s:sub(pos, pos + 3) == "true" then pos = pos + 4; return true
+    elseif s:sub(pos, pos + 4) == "false" then pos = pos + 5; return false
+    elseif s:sub(pos, pos + 3) == "null" then pos = pos + 4; return nil
+    else
+      local num = s:match("^-?%d+%.?%d*[eE]?[+-]?%d*", pos)
+      if not num or num == "" then fail("a value was expected") end
+      pos = pos + #num
+      local n = tonumber(num)
+      if not n then fail("bad number") end
+      return math.type(n) == "float" and n == math.floor(n) and math.tointeger(n) or n
+    end
+  end
+  local ok, v = pcall(value)
+  if not ok then return nil, type(v) == "table" and v.msg or tostring(v) end
+  skip()
+  if pos <= #s then return nil, "extra text after the JSON value" end
+  return v
+end
+
+-- Terrain brush (autotile). A terrain set is 16 tiles: a 4 x 4 block of the
+-- sheet that starts at `base`. `step`: 1 cell (8x8 mode) or 2 cells (16x16
+-- mode). `cpr`: cells per row of the sheet. The mask of a cell adds N=1,
+-- E=2, S=4 and W=8 for each neighbour that is in the set.
+function T.autotile_tile(base, mask, step, cpr)
+  return base + (mask % 4) * step + (mask // 4) * step * cpr
+end
+
+local function autotile_in(t, base, step, cpr)
+  local d = t - base
+  if d < 0 then return false end
+  local row, col = d // (step * cpr), d % (step * cpr)
+  return row <= 3 and col % step == 0 and col // step <= 3 and d == col + row * step * cpr
+end
+
+-- get(x, y): the tile id of a cell (0 for none). w, h: the map size.
+function T.autotile_mask(get, x, y, base, step, cpr, w, h)
+  local function inset(cx, cy)
+    if cx < 0 or cy < 0 or (w and cx >= w) or (h and cy >= h) then return false end
+    return autotile_in(get(cx, cy), base, step, cpr)
+  end
+  local m = 0
+  if inset(x, y - step) then m = m + 1 end
+  if inset(x + step, y) then m = m + 2 end
+  if inset(x, y + step) then m = m + 4 end
+  if inset(x - step, y) then m = m + 8 end
+  return m
+end
+
+-- Paints (or erases) the cell x, y with the set and re-tiles the cell and its
+-- 4 neighbours. put(x, y, tile) writes a tile (0 clears).
+function T.autotile_paint(get, put, x, y, base, step, cpr, erase, w, h)
+  put(x, y, erase and 0 or base)
+  local at = { { x, y }, { x, y - step }, { x + step, y }, { x, y + step }, { x - step, y } }
+  for _, c in ipairs(at) do
+    local cx, cy = c[1], c[2]
+    if cx >= 0 and cy >= 0 and (not w or cx < w) and (not h or cy < h)
+       and autotile_in(get(cx, cy), base, step, cpr) then
+      put(cx, cy, T.autotile_tile(base, T.autotile_mask(get, cx, cy, base, step, cpr, w, h), step, cpr))
+    end
+  end
+end
+
+-- The flags of a tile come from the custom properties of a Tiled tile: a
+-- boolean property called solid, platform, ladder, water or hurt (flags 0 to
+-- 4), or flag0 to flag7.
+local TILED_FLAGS = { solid = 0, platform = 1, ladder = 2, water = 3, hurt = 4, damage = 4 }
+for i = 0, 7 do TILED_FLAGS["flag" .. i] = i end
+
+-- Reads a Tiled map (the text of a .tmj/.json file: orthogonal, CSV tile
+-- layers) into bm cells. `cols`: the columns of the sheet in 8x8 cells
+-- (sheet_w // 8). Tiles of 8x8 or 16x16 pixels: a 16x16 Tiled tile becomes
+-- a tile of 2 x 2 cells (n, n+1 and the two under them), as the 16x16 brush
+-- (z) puts it. A Tiled tile at column c, row r of its tileset is the sheet
+-- tile at the same column and row. Tiled gid 0 is empty. Returns
+--   { w, h (in cells), tile = 8|16, layers = { {name=, cells={w*h}} },
+--     flags = { [cell] = byte }, ignored = { "name (kind)", ... } }
+-- or nil and the reason.
+function T.tiled_import(text, cols)
+  local m, err = T.json_decode(text)
+  if not m then return nil, "not a JSON file: " .. tostring(err) end
+  if type(m) ~= "table" or type(m.layers) ~= "table" then return nil, "not a Tiled map (no layers)" end
+  if m.orientation and m.orientation ~= "orthogonal" then return nil, "only orthogonal maps (" .. tostring(m.orientation) .. ")" end
+  if m.infinite then return nil, "infinite maps are not supported (give the map a fixed size in Tiled)" end
+  local tw, th = m.tilewidth, m.tileheight
+  if tw ~= th or (tw ~= 8 and tw ~= 16) then
+    return nil, "tiles of 8x8 or 16x16 pixels only (" .. tostring(tw) .. "x" .. tostring(th) .. ")"
+  end
+  local k = tw // 8
+  local mw, mh = m.width, m.height
+  if math.type(mw) ~= "integer" or math.type(mh) ~= "integer" or mw < 1 or mh < 1 then return nil, "no map size" end
+  if mw * k > 256 or mh * k > 256 then return nil, "the map is " .. mw * k .. "x" .. mh * k .. " cells: 256x256 at most" end
+  cols = cols or 32
+  local sets = {}
+  for _, ts in ipairs(m.tilesets or {}) do
+    if type(ts.firstgid) == "number" then sets[#sets + 1] = ts end
+  end
+  table.sort(sets, function(a, b) return a.firstgid < b.firstgid end)
+  -- the sheet cells of a tileset's tile (its local id)
+  local function cells_of(ts, id)
+    local tc = ts.columns
+    if math.type(tc) ~= "integer" or tc < 1 then tc = cols // k end
+    local n = (id // tc) * k * cols + (id % tc) * k
+    if k == 1 then return { n } end
+    return { n, n + 1, n + cols, n + cols + 1 }
+  end
+  local flags = {}
+  for _, ts in ipairs(sets) do
+    for _, tl in ipairs(ts.tiles or {}) do
+      local bits, props = 0, tl.properties
+      if type(props) == "table" then
+        if props[1] == nil then               -- (old style: { name = value })
+          for name, v in pairs(props) do
+            if v == true and TILED_FLAGS[name] then bits = bits | 1 << TILED_FLAGS[name] end
+          end
+        end
+        for _, p in ipairs(props) do
+          if p.value == true and TILED_FLAGS[p.name] then bits = bits | 1 << TILED_FLAGS[p.name] end
+        end
+      end
+      if bits ~= 0 and math.type(tl.id) == "integer" then
+        for _, c in ipairs(cells_of(ts, tl.id)) do flags[c] = (flags[c] or 0) | bits end
+      end
+    end
+  end
+  local out = { w = mw * k, h = mh * k, tile = tw, layers = {}, flags = flags, ignored = {} }
+  local taken = {}
+  local function layer_name(n)
+    n = tostring(n):gsub("[^%w_%-%. ]", "_"):sub(1, 16)
+    if n == "" then n = "layer" end
+    local base, i = n, 1
+    while taken[n] do i = i + 1; n = base:sub(1, 16 - #tostring(i)) .. i end
+    taken[n] = true
+    return n
+  end
+  local walk
+  function walk(list, prefix)
+    for _, ly in ipairs(list) do
+      local nm = tostring(ly.name or "layer")
+      if ly.type == "group" and type(ly.layers) == "table" then
+        local ok, why = walk(ly.layers, prefix .. nm .. "_")
+        if not ok then return nil, why end
+      elseif ly.type ~= "tilelayer" then
+        out.ignored[#out.ignored + 1] = nm .. " (" .. tostring(ly.type) .. ")"
+      else
+        if ly.chunks then return nil, "layer " .. nm .. ": infinite layers are not supported" end
+        if type(ly.data) ~= "table" then
+          return nil, "layer " .. nm .. ": use CSV encoding (Tiled: Map properties, Tile Layer Format: CSV)"
+        end
+        if #ly.data ~= mw * mh then return nil, "layer " .. nm .. ": " .. #ly.data .. " tiles, the map has " .. mw * mh end
+        local cells = {}
+        for i = 1, out.w * out.h do cells[i] = 0 end
+        for i, g in ipairs(ly.data) do
+          if math.type(g) ~= "integer" then return nil, "layer " .. nm .. ": a tile is not a number" end
+          g = g & 0x0FFFFFFF                   -- (the flip bits of Tiled are dropped)
+          if g > 0 then
+            local ts
+            for _, s2 in ipairs(sets) do if s2.firstgid <= g then ts = s2 end end
+            if not ts then return nil, "layer " .. nm .. ": tile " .. g .. " has no tileset" end
+            local cs = cells_of(ts, g - ts.firstgid)
+            for _, c in ipairs(cs) do
+              if c > 4095 then return nil, "layer " .. nm .. ": tile " .. g .. " is outside the sheet (cell " .. c .. ")" end
+            end
+            local x, y = (i - 1) % mw, (i - 1) // mw
+            for j, c in ipairs(cs) do
+              cells[(y * k + (j - 1) // k) * out.w + x * k + (j - 1) % k + 1] = c
+            end
+          end
+        end
+        out.layers[#out.layers + 1] = { name = layer_name(prefix .. nm), cells = cells }
+      end
+    end
+    return true
+  end
+  local ok, why = walk(m.layers, "")
+  if not ok then return nil, why end
+  if #out.layers == 0 then return nil, "the map has no tile layer" end
+  return out
+end
+
+-- Puts a map read by tiled_import in the project's map. mode "add": the
+-- layers go after the ones there (8 in all at most) and the map grows to fit;
+-- "replace": the map has only the imported layers, at their size. The tiles'
+-- flags are added to the sheet's. Returns the map's width, height and number
+-- of layers, or nil and the reason (nothing is changed then).
+function T.tiled_apply(res, mode)
+  local names = mlayers()
+  local list = {}
+  if mode ~= "replace" then
+    if #names + #res.layers > 8 then
+      return nil, "needs " .. #res.layers .. " free layers, the map has " .. 8 - #names
+    end
+    list = table.move(names, 1, #names, 1, {})
+  elseif #res.layers > 8 then
+    return nil, "the file has " .. #res.layers .. " tile layers, 8 at most"
+  end
+  local have, added = {}, {}
+  for _, n in ipairs(list) do have[n] = true end
+  for _, ly in ipairs(res.layers) do
+    local n, i = ly.name, 1
+    while have[n] do i = i + 1; n = ly.name:sub(1, 16 - #tostring(i)) .. i end
+    have[n] = true
+    list[#list + 1] = n
+    added[#added + 1] = { n, ly }
+  end
+  local w0, h0 = msize()
+  mlayers(list)
+  local w, h = w0, h0
+  if mode == "replace" then
+    w, h = res.w, res.h
+    for _, a in ipairs(added) do           -- (a layer that kept its name starts empty)
+      for y = 0, h0 - 1 do for x = 0, w0 - 1 do mset(x, y, 0, a[1]) end end
+    end
+  else
+    w, h = math.max(w0, res.w), math.max(h0, res.h)
+  end
+  if w ~= w0 or h ~= h0 then msize(w, h) end
+  for _, a in ipairs(added) do
+    for y = 0, res.h - 1 do
+      for x = 0, res.w - 1 do
+        local c = a[2].cells[y * res.w + x + 1]
+        if c ~= 0 then mset(x, y, c, a[1]) end
+      end
+    end
+  end
+  for c, bits in pairs(res.flags) do fset(c, fget(c) | bits) end
+  return w, h, #list
 end
 
 return T

@@ -5,6 +5,7 @@
 
 #include "bm/bm.h"
 #include "bm/gfx16.h"
+#include "bm/project.h"
 #include "bm/r3d.h"
 #include "lib/crc32.h"
 
@@ -18,6 +19,7 @@ static const font_t font = { 8, 16, glyphs };
 #define H 48
 static uint16_t fb[H * W];
 
+static float nanf_(void) { volatile float z = 0.0f; return z / z; }
 static uint16_t at(int x, int y) { return fb[y * W + x]; }
 
 static void test_primitives(void)
@@ -115,6 +117,205 @@ static void test_sprites(void)
     g16_sheet_free(&s);
 }
 
+
+/* Reference for the map() equivalence test: the routine as it was before
+ * the tile path was made fast (one div/mod per tile, blit with memcpy rows).
+ * Kept only here. */
+static void ref_blit(g16_t *g, const g16_sheet_t *s, int sx, int sy, int sw, int sh,
+                     int dx, int dy, int flip_x, int flip_y, int opaque)
+{
+    int x0 = dx, y0 = dy, x1 = dx + sw, y1 = dy + sh;
+    if (x0 < g->cx0) x0 = g->cx0;
+    if (y0 < g->cy0) y0 = g->cy0;
+    if (x1 > g->cx1) x1 = g->cx1;
+    if (y1 > g->cy1) y1 = g->cy1;
+    if (x0 >= x1 || y0 >= y1)
+        return;
+    const int n = x1 - x0;
+    for (int y = y0; y < y1; y++) {
+        int ly = y - dy;
+        int srow = sy + (flip_y ? sh - 1 - ly : ly);
+        uint16_t *dst = g->px + (uint32_t)y * g->stride + x0;
+        const uint32_t sbase = (uint32_t)srow * s->w;
+        if (!flip_x) {
+            const uint16_t *src = s->px + sbase + sx + (x0 - dx);
+            if (opaque) {
+                memcpy(dst, src, (size_t)n * 2);
+            } else {
+                const uint8_t *a = s->alpha + sbase + sx + (x0 - dx);
+                for (int i = 0; i < n; i++)
+                    if (a[i]) dst[i] = src[i];
+            }
+        } else {
+            int scol = sx + sw - 1 - (x0 - dx);
+            const uint16_t *src = s->px + sbase;
+            const uint8_t *a = s->alpha + sbase;
+            for (int i = 0; i < n; i++, scol--)
+                if (opaque || a[scol]) dst[i] = src[scol];
+        }
+    }
+}
+
+static void ref_map_mask(g16_t *g, const g16_sheet_t *s, const g16_map_t *m,
+                         int mx, int my, int x, int y, int mw, int mh, const uint8_t *flags, uint8_t mask)
+{
+    if (!s->px || !m->cells) return;
+    if (!flags) mask = 0;
+    const int per_row = s->w / G16_CELL, ncells = per_row * (s->h / G16_CELL);
+    x -= g->cam_x;
+    y -= g->cam_y;
+    for (int cy = 0; cy < mh; cy++) {
+        int row = my + cy, py = y + cy * G16_CELL;
+        if (row < 0 || row >= m->h || py >= g->cy1 || py + G16_CELL <= g->cy0) continue;
+        for (int cx = 0; cx < mw; cx++) {
+            int col = mx + cx, px = x + cx * G16_CELL;
+            if (col < 0 || col >= m->w || px >= g->cx1 || px + G16_CELL <= g->cx0) continue;
+            int n = m->cells[row * m->w + col];
+            if (n == 0 || n >= ncells || (mask && !(flags[n] & mask))) continue;
+            ref_blit(g, s, n % per_row * G16_CELL, n / per_row * G16_CELL, G16_CELL, G16_CELL,
+                     px, py, 0, 0, s->cell_opaque[n]);
+        }
+    }
+}
+
+static uint32_t rng_state = 12345;
+static uint32_t rnd(void)
+{
+    rng_state = rng_state * 1664525u + 1013904223u;
+    return rng_state >> 8;
+}
+
+/* g16_map_mask must draw the same bytes as the reference, for random sheets
+ * (any width, opaque and transparent cells), tilemaps, flags, cameras, clip
+ * rectangles, offsets (off-screen too) and target alignment. */
+static void test_map_equiv(void)
+{
+    enum { TW = 61, TH = 53, CASES = 600 };
+    static uint16_t ba[TH * TW + 4], bb[TH * TW + 4];
+    int bad = 0, drawn = 0;
+    for (int it = 0; it < CASES; it++) {
+        g16_sheet_t s;
+        int sw = (1 + (int)(rnd() % 11)) * 8, sh = (1 + (int)(rnd() % 5)) * 8;
+        if (g16_sheet_alloc(&s, sw, sh) != 0) { CHECK(0, "sheet alloc"); return; }
+        int per_row = sw / 8, nc = per_row * (sh / 8);
+        for (int c = 0; c < nc; c++) {
+            int mode = (int)(rnd() % 3);          /* 0 opaque, 1 random alpha, 2 all clear */
+            for (int y = 0; y < 8; y++)
+                for (int x = 0; x < 8; x++)
+                    g16_sheet_set(&s, c % per_row * 8 + x, c / per_row * 8 + y,
+                                  (uint16_t)rnd(), mode == 0 ? 1 : mode == 1 ? (int)(rnd() & 1) : 0);
+            g16_sheet_update_cell(&s, c % per_row, c / per_row);
+        }
+        int mw = 1 + (int)(rnd() % 12), mh = 1 + (int)(rnd() % 10);
+        uint16_t cells[12 * 10];
+        for (int i = 0; i < mw * mh; i++) cells[i] = (uint16_t)(rnd() % (nc + 3));   /* 0 and out of range too */
+        g16_map_t map = { mw, mh, cells };
+        uint8_t flags[64];
+        for (int i = 0; i < 64; i++) flags[i] = (uint8_t)rnd();
+        uint8_t mask = (uint8_t)(rnd() % 4 ? 1 << (rnd() % 8) : 0);
+        int use_flags = (int)(rnd() % 2);
+
+        int off = (int)(rnd() & 1), stride = TW - (int)(rnd() % 3);   /* odd start / odd stride: unaligned rows */
+        for (int i = 0; i < TH * TW + 4; i++) ba[i] = bb[i] = (uint16_t)(i * 7 + 1);
+        g16_t ga, gb;
+        g16_target(&ga, ba + off, (uint32_t)stride, stride - off > 0 ? stride - off : stride, TH, &font);
+        g16_target(&gb, bb + off, (uint32_t)stride, ga.w, TH, &font);
+        if (rnd() % 2) {
+            int cx = (int)(rnd() % 20), cy = (int)(rnd() % 20), cw = 1 + (int)(rnd() % 50), ch = 1 + (int)(rnd() % 40);
+            g16_clip(&ga, cx, cy, cw, ch);
+            g16_clip(&gb, cx, cy, cw, ch);
+        }
+        int camx = (int)(rnd() % 30) - 10, camy = (int)(rnd() % 30) - 10;
+        g16_camera(&ga, camx, camy);
+        g16_camera(&gb, camx, camy);
+        int mx = (int)(rnd() % 7) - 3, my = (int)(rnd() % 7) - 3;
+        int x = (int)(rnd() % 90) - 25, y = (int)(rnd() % 80) - 25;
+        const uint8_t *fl = use_flags ? flags : NULL;
+
+        ref_map_mask(&ga, &s, &map, mx, my, x, y, mw, mh, fl, mask);
+        g16_map_mask(&gb, &s, &map, mx, my, x, y, mw, mh, fl, mask);
+        if (memcmp(ba, bb, sizeof ba) != 0) {
+            bad++;
+            printf("map case %d differs (sheet %dx%d, off %d, stride %d)\n", it, sw, sh, off, stride);
+        }
+        for (int i = 0; i < TH * TW; i++)
+            if (bb[i] != (uint16_t)(i * 7 + 1)) { drawn++; break; }
+        /* the packed cells (a cache of the sheet): drawn again from the cache, then after a cell changed */
+        for (int again = 0; again < 2; again++) {
+            if (again) {
+                int c = (int)(rnd() % (unsigned)nc);
+                for (int yy = 0; yy < 8; yy++)
+                    for (int xx = 0; xx < 8; xx++)
+                        g16_sheet_set(&s, c % per_row * 8 + xx, c / per_row * 8 + yy, (uint16_t)rnd(), 1);
+                g16_sheet_update_cell(&s, c % per_row, c / per_row);
+            }
+            for (int i = 0; i < TH * TW + 4; i++) ba[i] = bb[i] = (uint16_t)(i * 7 + 1);
+            ref_map_mask(&ga, &s, &map, mx, my, x, y, mw, mh, fl, mask);
+            g16_map_mask(&gb, &s, &map, mx, my, x, y, mw, mh, fl, mask);
+            if (memcmp(ba, bb, sizeof ba) != 0) {
+                bad++;
+                printf("map case %d differs on the %s draw\n", it, again ? "after a change" : "second");
+            }
+        }
+        g16_sheet_free(&s);
+    }
+    CHECK(bad == 0, "map() matches the reference on %d random cases (%d differ)", CASES, bad);
+    CHECK(drawn > CASES / 4, "map equivalence cases draw something (%d of %d)", drawn, CASES);
+
+    /* the reciprocal used for n / per_row is exact for every cell index */
+    int rbad = 0;
+    for (uint32_t d = 2; d < 400; d++) {   /* per_row 1 wraps to 0: the code divides there */
+        uint32_t r = 0xFFFFFFFFu / d + 1u;
+        for (uint32_t n = 0; n < 65536; n++)
+            if ((uint32_t)(((uint64_t)n * r) >> 32) != n / d) rbad++;
+    }
+    CHECK(rbad == 0, "n / per_row by reciprocal is exact (%d wrong)", rbad);
+}
+
+/* sspr() with transparency (alpha read four pixels at a time) draws what a pixel by pixel copy draws, for any rectangle, offset and clip */
+static void test_sspr_equiv(void)
+{
+    enum { TW = 70, TH = 50, CASES = 400 };
+    static uint16_t ba[TH * TW], bb[TH * TW];
+    int bad = 0;
+    g16_sheet_t s;
+    if (g16_sheet_alloc(&s, 96, 64) != 0) { CHECK(0, "sheet alloc"); return; }
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 96; x++) {
+            int run = (x / 7 + y / 5) % 3;                      /* clear runs, solid runs and mixed ones */
+            g16_sheet_set(&s, x, y, (uint16_t)(x + y * 96 + 1), run == 0 ? 0 : run == 1 ? 1 : (int)(rnd() & 1));
+        }
+    for (int it = 0; it < CASES; it++) {
+        int sx = (int)(rnd() % 80), sy = (int)(rnd() % 50), sw = 1 + (int)(rnd() % 40), sh = 1 + (int)(rnd() % 30);
+        int dx = (int)(rnd() % 90) - 20, dy = (int)(rnd() % 70) - 15;
+        for (int i = 0; i < TH * TW; i++) ba[i] = bb[i] = (uint16_t)(i * 5 + 3);
+        g16_t ga, gb;
+        g16_target(&ga, ba, TW, TW, TH, &font);
+        g16_target(&gb, bb, TW, TW, TH, &font);
+        if (rnd() % 2) {
+            int cx = (int)(rnd() % 20), cy = (int)(rnd() % 20), cw = 1 + (int)(rnd() % 50), ch = 1 + (int)(rnd() % 30);
+            g16_clip(&gb, cx, cy, cw, ch);
+            g16_clip(&ga, cx, cy, cw, ch);
+        }
+        g16_sspr(&gb, &s, sx, sy, sw, sh, dx, dy, 0, 0);
+        int w = sx + sw > 96 ? 96 - sx : sw, h = sy + sh > 64 ? 64 - sy : sh;   /* the reference: pixel by pixel */
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                int px = dx + x, py = dy + y;
+                if (px < ga.cx0 || py < ga.cy0 || px >= ga.cx1 || py >= ga.cy1)
+                    continue;
+                if (s.alpha[(sy + y) * 96 + sx + x])
+                    ba[py * TW + px] = s.px[(sy + y) * 96 + sx + x];
+            }
+        if (memcmp(ba, bb, sizeof ba) != 0) {
+            bad++;
+            printf("sspr case %d differs (%d,%d %dx%d at %d,%d)\n", it, sx, sy, sw, sh, dx, dy);
+        }
+    }
+    g16_sheet_free(&s);
+    CHECK(bad == 0, "sspr() with alpha matches a pixel by pixel copy on %d random cases (%d differ)", CASES, bad);
+}
+
 static void test_text(void)
 {
     g16_t g;
@@ -206,6 +407,144 @@ static void test_fade(void)
     }
     CHECK(lv1 > 0 && lv0 > 0, "dithered edge: %d at level 1, %d at 0", lv1, lv0);
     g16_fade_free(&f);
+
+    /* step 2: the lamps work on a level for each 2x2 pixels; the map stays near the full-size one (odd sizes too) */
+    static const int lamps[][4] = { { 20, 30, 24, 3 }, { 45, 40, 18, 2 }, { 60, -4, 20, 3 }, { -6, 62, 14, 2 } };
+    const int sizes[][2] = { { 64, 64 }, { 65, 63 } };
+    for (int s = 0; s < 2; s++) {
+        const int w = sizes[s][0], h = sizes[s][1];
+        g16_fade_t m;
+        CHECK(g16_fade_init(&m, w, h) == 0, "fade init %dx%d", w, h);
+        uint8_t *full = malloc((size_t)w * h);
+        g16_fade_set_step(&m, 1);
+        g16_fade_clear(&m, 1);
+        for (int i = 0; i < 4; i++)
+            g16_fade_glow(&m, lamps[i][0], lamps[i][1], lamps[i][2], lamps[i][3], 256);
+        memcpy(full, m.lv, (size_t)w * h);
+        CHECK(g16_fade_set_step(&m, 2) == 0, "step 2");
+        g16_fade_clear(&m, 1);
+        for (int i = 0; i < 4; i++)
+            g16_fade_glow(&m, lamps[i][0], lamps[i][1], lamps[i][2], lamps[i][3], 256);
+        g16_fade_flush(&m);
+        int worst = 0;
+        long sum = 0;
+        for (int i = 0; i < w * h; i++) {
+            const int d = abs((int)m.lv[i] - (int)full[i]);
+            worst = d > worst ? d : worst;
+            sum += d;
+        }
+        if (s == 0) {                   /* the apply reads lv2: the same picture as from the flushed full-size map */
+            static uint16_t pa[64 * 64], pb[64 * 64];
+            const uint16_t gr = g16_rgb(128, 128, 128);
+            const uint16_t t4[4] = { 0, g16_rgb(16, 16, 48), gr, g16_rgb(248, 216, 160) };
+            g16_t ga, gb;
+            g16_target(&ga, pa, 64, 64, 64, &font);
+            g16_target(&gb, pb, 64, 64, 64, &font);
+            g16_fade_reset(&m, 4);
+            g16_fade_colour(&m, gr, t4);
+            g16_fade_done(&m);
+            g16_cls(&ga, gr);
+            g16_cls(&gb, gr);
+            g16_fade_apply(&ga, &m);
+            g16_fade_t full_map = m;
+            full_map.step = 1;
+            g16_fade_apply(&gb, &full_map);
+            CHECK(memcmp(pa, pb, sizeof pa) == 0, "the apply of step 2 equals the apply of its flushed map");
+        }
+        CHECK(worst <= 2, "step 2 is at most 2 levels from step 1 (%dx%d: %d)", w, h, worst);
+        CHECK(sum * 10 < (long)w * h, "step 2 differs on few pixels (%dx%d: %ld of %d)", w, h, sum, w * h);
+        g16_fade_set_step(&m, 1);
+        g16_fade_clear(&m, 1);
+        for (int i = 0; i < 4; i++)
+            g16_fade_glow(&m, lamps[i][0], lamps[i][1], lamps[i][2], lamps[i][3], 256);
+        CHECK(memcmp(full, m.lv, (size_t)w * h) == 0, "back to step 1: the same map as before (%dx%d)", w, h);
+        free(full);
+        g16_fade_free(&m);
+    }
+}
+
+/* a backend that draws flat colours only (colour_only, M41): flat meshes reach it, textures and effects go to the ARM */
+static int co_tris, co_hooks;
+static char co_why[160];
+
+static void co_tri(void *ctx, const g16_t *g, const r3d_corner_t v[3], int kind, const g16_sheet_t *tex, int depth)
+{
+    (void)ctx; (void)g; (void)v; (void)kind; (void)tex; (void)depth;
+    co_tris++;
+}
+
+static void co_nop(void *ctx, const g16_t *g)
+{
+    (void)ctx; (void)g;
+}
+
+static void co_hook(void *ctx, const char *why)
+{
+    (void)ctx;
+    co_hooks++;
+    snprintf(co_why, sizeof co_why, "%s", why);
+}
+
+static void test_colour_only(void)
+{
+    static uint16_t px[360 * 640];
+    g16_t g;
+    r3d_t r;
+    r3d_mesh_t cube, quad;
+    g16_sheet_t tex;
+    r3d_backend_t be = { .tri = co_tri, .zclear = co_nop, .colour_only = 1 };
+    g16_target(&g, px, 640, 640, 360, &font);
+    CHECK(r3d_init(&r, &g) == 0 && r3d_mesh_cube(&cube, 0x00FF00) == 0, "colour_only: setup");
+    CHECK(g16_sheet_alloc(&tex, 16, 16) == 0 && r3d_mesh_alloc(&quad, 4, 2) == 0 && r3d_mesh_alloc_uv(&quad) == 0,
+          "colour_only: texture and quad");
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++)
+            g16_sheet_set(&tex, x, y, g16_rgb(255, 0, 0), 1);
+    quad.verts[0] = (v3_t){ -1, -1, 0 }; quad.verts[1] = (v3_t){ 1, -1, 0 };
+    quad.verts[2] = (v3_t){ 1, 1, 0 };   quad.verts[3] = (v3_t){ -1, 1, 0 };
+    static const uint16_t f[6] = { 0, 2, 1, 0, 3, 2 };
+    memcpy(quad.faces, f, sizeof f);
+    static const float uv[12] = { 0, 16, 16, 0, 16, 16,   0, 16, 0, 0, 16, 0 };
+    memcpy(quad.uv, uv, sizeof uv);
+    quad.colors[0] = quad.colors[1] = R3D_TEXTURED;
+    quad.tex = &tex;
+    r3d_mesh_normals(&quad);
+
+    /* (a) a flat-coloured mesh: the backend gets the triangles, the ARM is not asked */
+    r.backend = &be;
+    r.arm_hook = co_hook;
+    co_tris = co_hooks = 0;
+    r3d_zclear(&r);
+    r3d_camera(&r, 0, 0, -3, 0, 0, 60);
+    r3d_light(&r, 0, 0, -1, 1);
+    r3d_draw(&r, &cube, (v3_t){ 0, 0, 0 }, 0.3f, 0.2f, 0, 1);
+    CHECK(co_tris > 0 && co_hooks == 0 && r.backend == &be, "colour_only: flat mesh stays on the backend (%d tris, %d hooks)",
+          co_tris, co_hooks);
+
+    /* (b) a textured mesh: the ARM takes over once, with the reason */
+    co_tris = co_hooks = 0;
+    r3d_draw(&r, &quad, (v3_t){ 0, 0, 0 }, 0, 0, 0, 1);
+    CHECK(co_hooks == 1 && strstr(co_why, "textures") && r.backend == NULL,
+          "colour_only: textured mesh hands over (%d hooks, \"%s\", backend %p)", co_hooks, co_why, (const void *)r.backend);
+
+    /* (c) the same scene on a backend without the flag: the textured triangles reach it, no hook */
+    be.colour_only = 0;
+    r.backend = &be;
+    co_tris = co_hooks = 0;
+    r3d_draw(&r, &quad, (v3_t){ 0, 0, 0 }, 0, 0, 0, 1);
+    CHECK(co_tris > 0 && co_hooks == 0 && r.backend == &be, "colour_only off: textured triangles reach the backend (%d, %d)",
+          co_tris, co_hooks);
+
+    /* (d) an effect (a point) on a colour_only backend: the ARM takes over */
+    be.colour_only = 1;
+    r.backend = &be;
+    co_tris = co_hooks = 0;
+    r3d_point(&r, (v3_t){ 0, 0, 0 }, 0.5f, 0xFFFFFF, 0);
+    CHECK(co_hooks == 1 && r.backend == NULL, "colour_only: an effect hands over (%d hooks)", co_hooks);
+
+    r3d_mesh_free(&quad);
+    r3d_mesh_free(&cube);
+    g16_sheet_free(&tex);
 }
 
 static void test_3d(void)
@@ -358,6 +697,87 @@ static void test_3d(void)
     r3d_free(&r);
 }
 
+static void test_pfx(void)
+{
+    /* (a) r3d_pfx_new(100) gives cap == 112; r3d_pfx_new(5000) == NULL */
+    r3d_pfx_t *p100 = r3d_pfx_new(100);
+    CHECK(p100 != NULL && p100->cap == 112, "pfx_new(100) cap 112 (%d)", p100 ? p100->cap : 0);
+    r3d_pfx_free(p100);
+    CHECK(r3d_pfx_new(5000) == NULL, "pfx_new(5000) returns NULL");
+    CHECK(r3d_pfx_new(0) == NULL, "pfx_new(0) returns NULL");
+
+    /* (b) add 3 particles, step twice with g = 0.5f and compare every float with closed form */
+    r3d_pfx_t *p = r3d_pfx_new(16);
+    CHECK(p != NULL && p->cap == 16, "pfx_new(16)");
+    v3_t pos0[3] = { { 1.0f, 10.0f, 2.0f }, { -3.0f, 5.0f, 0.0f }, { 0.5f, 20.0f, -4.0f } };
+    v3_t vel0[3] = { { 0.1f, 2.0f, 0.5f }, { -0.2f, -1.0f, 0.0f }, { 1.0f, 0.0f, -0.5f } };
+    float life0[3] = { 10.0f, 5.0f, 1.5f };
+    uint32_t col0[3] = { 0xFF0000, 0x00FF00, 0x0000FF };
+    for (int i = 0; i < 3; i++) {
+        int idx = r3d_pfx_add(p, pos0[i], vel0[i], life0[i], col0[i]);
+        CHECK(idx == i, "pfx_add index %d", idx);
+    }
+    CHECK(r3d_pfx_live(p) == 3, "3 live particles");
+
+    float g = 0.5f;
+    r3d_pfx_step(p, g);
+    r3d_pfx_step(p, g);
+
+    int cap = p->cap;
+    for (int i = 0; i < 3; i++) {
+        float expected_vy = vel0[i].y - 2 * g;
+        float expected_x = pos0[i].x + 2 * vel0[i].x;
+        float expected_y = pos0[i].y + (vel0[i].y - g) + (vel0[i].y - 2 * g);
+        float expected_z = pos0[i].z + 2 * vel0[i].z;
+        float expected_vx = vel0[i].x;
+        float expected_vz = vel0[i].z;
+        float expected_life = life0[i] - 2.0f;
+
+        CHECK(p->a[0 * cap + i] == expected_x, "particle %d x (%f vs %f)", i, p->a[0 * cap + i], expected_x);
+        CHECK(p->a[1 * cap + i] == expected_y, "particle %d y (%f vs %f)", i, p->a[1 * cap + i], expected_y);
+        CHECK(p->a[2 * cap + i] == expected_z, "particle %d z (%f vs %f)", i, p->a[2 * cap + i], expected_z);
+        CHECK(p->a[3 * cap + i] == expected_vx, "particle %d vx (%f vs %f)", i, p->a[3 * cap + i], expected_vx);
+        CHECK(p->a[4 * cap + i] == expected_vy, "particle %d vy (%f vs %f)", i, p->a[4 * cap + i], expected_vy);
+        CHECK(p->a[5 * cap + i] == expected_vz, "particle %d vz (%f vs %f)", i, p->a[5 * cap + i], expected_vz);
+        CHECK(p->a[6 * cap + i] == expected_life, "particle %d life (%f vs %f)", i, p->a[6 * cap + i], expected_life);
+    }
+
+    /* (c) with life = 1.5f, after two steps r3d_pfx_live() == 0 and r3d_pfx_draw returns 0 */
+    r3d_pfx_t *p_dead = r3d_pfx_new(16);
+    r3d_pfx_add(p_dead, (v3_t){ 0, 0, 0 }, (v3_t){ 0, 0, 0 }, 1.5f, 0xFFFFFF);
+    CHECK(r3d_pfx_live(p_dead) == 1, "1 live before steps");
+    r3d_pfx_step(p_dead, g);
+    CHECK(r3d_pfx_live(p_dead) == 1, "still live after 1 step (life 0.5)");
+    r3d_pfx_step(p_dead, g);
+    CHECK(r3d_pfx_live(p_dead) == 0, "0 live after 2 steps (life -0.5)");
+
+    static uint16_t fb[360 * 640];
+    g16_t gtarget;
+    r3d_t rtarget;
+    g16_target(&gtarget, fb, 640, 640, 360, &font);
+    CHECK(r3d_init(&rtarget, &gtarget) == 0, "r3d init for draw");
+    r3d_camera(&rtarget, 0, 0, -5, 0, 0, 60);
+    uint32_t px_dead = r3d_pfx_draw(&rtarget, p_dead, 1.0f);
+    CHECK(px_dead == 0, "dead particles draw 0 pixels (%u)", px_dead);
+
+    /* (e) a particle in front of a camera set as test_3d draws more than 0 pixels */
+    r3d_pfx_t *p_live = r3d_pfx_new(16);
+    r3d_pfx_add(p_live, (v3_t){ 0, 0, 0 }, (v3_t){ 0, 0, 0 }, 10.0f, 0xFF0000);
+    g16_cls(&gtarget, 0);
+    r3d_zclear(&rtarget);
+    uint32_t drawn = r3d_pfx_draw(&rtarget, p_live, 0.5f);
+    CHECK(drawn > 0, "live particle draws pixels (%u)", drawn);
+    r3d_pfx_free(p_live);
+
+    /* (f) a dead entry is not stepped: its position stays */
+    float dead_x = p_dead->a[0];
+    r3d_pfx_step(p_dead, 1.0f);
+    CHECK(p_dead->a[0] == dead_x && p_dead->a[6 * p_dead->cap] == -0.5f, "dead entry untouched by the step");
+    r3d_free(&rtarget);
+    r3d_pfx_free(p_dead);
+    r3d_pfx_free(p);
+}
+
 static uint8_t *read_file(const char *p, size_t *n)
 {
     FILE *f = fopen(p, "rb");
@@ -381,12 +801,12 @@ static void test_format(const char *path)
     if (!d) return;
     bm_cart_t c;
     char err[64] = "";
-    CHECK(bm_parse(d, n, &c, err, sizeof err) == 0, "parse demo: %s", err);
-    CHECK(strcmp(c.title, "bm native demo") == 0, "title '%s'", c.title);
+    CHECK(bm_parse(d, n, &c, err, sizeof err) == 0, "parse mapkit: %s", err);
+    CHECK(strcmp(c.title, "Map Kit") == 0, "title '%s'", c.title);
     CHECK(c.width == 640 && c.height == 360 && c.pixel_format == 1, "video mode");
     CHECK(c.lua && c.lua_size > 100 && memcmp(c.lua, "--", 2) == 0, "lua section");
-    CHECK(c.sheet_w == 128 && c.sheet_h == 128 && c.sheet_rgba, "sheet");
-    CHECK(c.map_w == 160 && c.map_h == 90 && c.map_cells, "map");
+    CHECK(c.sheet_w == 64 && c.sheet_h == 32 && c.sheet_rgba, "sheet");
+    CHECK(c.map_w == 16 && c.map_h == 16 && c.map_cells, "map");
 
     /* the square resolution, 256x256; any other size is refused */
     {
@@ -401,7 +821,7 @@ static void test_format(const char *path)
             CHECK(bm_parse(r, n4, &c4, err, sizeof err) != 0, "256x180 refused");
         }
         free(r);
-        /* the .b16's square, 360x360 (docs/B16.md section 0) */
+        /* a square page, 360x360 */
         r = bm_rewrite(d, n, code, sizeof code - 1, "Square", "", 360, &n4);
         CHECK(r && bm_parse(r, n4, &c4, err, sizeof err) == 0, "360x360 parses: %s", err);
         CHECK(c4.width == 360 && c4.height == 360, "360x360 header %ux%u", c4.width, c4.height);
@@ -810,6 +1230,149 @@ static void test_pixel(void)
     g16_sspr_zoom(&g, &s, 8, 0, 4, 4, W - 3, H - 3, 0, 0, 2.0f);
     CHECK(at(W - 3, H - 3) == 1 && at(W - 1, H - 3) == 2 && at(W - 1, H - 1) == 0, "clipped at the edge");
     g16_sheet_free(&s);
+
+    /* sprite stacking: 3 slices of 4x3 side by side, a distinct colour per pixel */
+    CHECK(g16_sheet_alloc(&s, 12, 3) == 0, "stack sheet");
+    for (int y = 0; y < 3; y++)
+        for (int x = 0; x < 12; x++)
+            g16_sheet_set(&s, x, y, (uint16_t)(100 + x + y * 12), !(x == 5 && y == 1));
+    static uint16_t ref[W * H];
+    g16_cls(&g, 0x7777);
+    for (int i = 0; i < 3; i++) g16_sspr(&g, &s, i * 4, 0, 4, 3, 38, 39 - i * 2, 0, 0);
+    memcpy(ref, fb, sizeof ref);
+    g16_cls(&g, 0x7777);
+    g16_stack(&g, &s, 0, 0, 4, 3, 3, 40, 40, 0.0f, 1.0f, 2.0f);
+    CHECK(memcmp(ref, fb, sizeof ref) == 0, "stack rz=0 scale=1 equals sspr per slice");
+    g16_cls(&g, 0);
+    g16_stack(&g, &s, 0, 0, 4, 3, 3, 40, 40, 0.0f, 1.0f, 2.0f);
+    CHECK(at(38, 41) == 124 && at(38, 39) == 128 && at(38, 37) == 132 && at(39, 38) == 0,
+          "stack order: the upper slice covers the lower one, a transparent pixel shows nothing");
+    /* stackv: the same slices one under the other (the 4x3 boxes of the sheet above, moved down) */
+    {
+        g16_sheet_t v;
+        CHECK(g16_sheet_alloc(&v, 4, 9) == 0, "stackv sheet");
+        for (int i = 0; i < 3; i++)
+            for (int y = 0; y < 3; y++)
+                for (int x = 0; x < 4; x++)
+                    g16_sheet_set(&v, x, i * 3 + y, (uint16_t)(100 + i * 4 + x + y * 12), !(i * 4 + x == 5 && y == 1));
+        static uint16_t refh[W * H];
+        const float rots[3][3] = { { 0.0f, 1.0f, 2.0f }, { 0.7f, 2.0f, 1.0f }, { 1.57079633f, 1.0f, 3.0f } };
+        for (int k = 0; k < 3; k++) {
+            g16_cls(&g, 0x7777);
+            g16_stack(&g, &s, 0, 0, 4, 3, 3, 40, 40, rots[k][0], rots[k][1], rots[k][2]);
+            memcpy(refh, fb, sizeof refh);
+            g16_cls(&g, 0x7777);
+            g16_stackv(&g, &v, 0, 0, 4, 3, 3, 40, 40, rots[k][0], rots[k][1], rots[k][2]);
+            CHECK(memcmp(refh, fb, sizeof refh) == 0, "stackv equals stack of the same slices (case %d)", k);
+        }
+        g16_cls(&g, 0);
+        g16_stackv(&g, &v, 0, 0, 4, 3, 3, 40, 40, 0.0f, 1.0f, 2.0f);
+        CHECK(at(38, 41) == 124 && at(38, 37) == 132, "stackv order: the upper slice covers the lower one");
+        g16_cls(&g, 0);
+        g16_stackv(&g, &v, 0, 14, 4, 3, 1, 40, 40, 0.0f, 1.0f, 2.0f);   /* the sheet is 16 high: 14 + 3 is under it */
+        CHECK(at(38, 41) == 0, "stackv: a slice under the sheet is skipped");
+        g16_cls(&g, 0);
+        g16_stackv(&g, &v, 6, 0, 4, 3, 3, 40, 40, 0.0f, 1.0f, 2.0f);     /* the sheet is 8 wide: 6 + 4 is over it */
+        CHECK(at(38, 41) == 0, "stackv: a box over the right edge draws nothing");
+        g16_sheet_free(&v);
+    }
+    g16_cls(&g, 0);
+    g16_stack(&g, &s, 0, 0, 4, 3, 0, 40, 40, 0.0f, 1.0f, 2.0f);
+    memset(ref, 0, sizeof ref);
+    CHECK(memcmp(ref, fb, sizeof ref) == 0, "stack n=0 draws nothing");
+    g16_cls(&g, 0);
+    g16_stack(&g, &s, 0, 0, 4, 3, 1, 1, 1, 0.0f, 1.0f, 0.0f);
+    CHECK(at(0, 0) == 101 && at(2, 1) == 115, "stack clipped at the top left");
+    g16_cls(&g, 0);
+    g16_stack(&g, &s, 0, 0, 4, 3, 1, W - 1, H - 1, 0.0f, 1.0f, 0.0f);
+    CHECK(at(W - 3, H - 2) == 100 && at(W - 1, H - 1) == 114 && at(W - 3, H - 3) == 0,
+          "stack clipped at the bottom right");
+    /* NaN and inf from Lua draw nothing (and never reach the float to int casts) */
+    {
+        const float nanf = nanf_(), inff = 1.0f / 0.0f;
+        const float bad[3][3] = { { nanf, 1.0f, 1.0f }, { 0.0f, inff, 1.0f }, { 0.0f, 1.0f, inff } };
+        for (int k = 0; k < 3; k++) {
+            g16_cls(&g, 0);
+            g16_stack(&g, &s, 0, 0, 4, 3, 3, 40, 40, bad[k][0], bad[k][1], bad[k][2]);
+            memset(ref, 0, sizeof ref);
+            CHECK(memcmp(ref, fb, sizeof ref) == 0, "stack with NaN or inf (case %d) draws nothing", k);
+        }
+        g16_cls(&g, 0);
+        g16_stack(&g, &s, 0, 0, 4, 3, 1, 40, 40, -inff, 1.0f, 1.0f);
+        g16_stack(&g, &s, 0, 0, 4, 3, 1, 40, 40, 0.0f, -inff, 1.0f);
+        CHECK(memcmp(ref, fb, sizeof ref) == 0, "stack with -inf draws nothing");
+        /* a huge finite step lifts every slice but the first off the screen: only slice 0 shows.
+         * smoke test: checks the picture, not UB (x86 gives INT_MIN for a bad cast, which is off screen
+         * too); build with -fsanitize=float-cast-overflow to see the cast. */
+        g16_cls(&g, 0);
+        g16_stack(&g, &s, 0, 0, 4, 3, 1, 40, 40, 0.0f, 1.0f, 0.0f);
+        memcpy(ref, fb, sizeof ref);
+        const float huge[] = { 1.0e30f, -1.0e30f, 3.0e38f, -3.0e38f };
+        for (unsigned k = 0; k < sizeof huge / sizeof *huge; k++) {
+            g16_cls(&g, 0);
+            g16_stack(&g, &s, 0, 0, 4, 3, 3, 40, 40, 0.0f, 1.0f, huge[k]);
+            CHECK(memcmp(ref, fb, sizeof ref) == 0, "stack with a huge step (case %u) shows only slice 0", k);
+            g16_cls(&g, 0);
+            g16_stack(&g, &s, 0, 0, 4, 3, 3, 40, 40, 0.0f, 64.0f, huge[k]);
+            CHECK(1, "smoke test: huge step with scale 64 (case %u) runs", k);
+        }
+        /* a huge finite rz: sin and cos stay in -1..1, the stack is drawn and nothing crashes.
+         * smoke test: checks nothing drawn outside the guard, not UB */
+        g16_cls(&g, 0);
+        g16_stack(&g, &s, 0, 0, 4, 3, 3, 40, 40, 1.0e30f, 1.0f, 2.0f);
+        g16_stack(&g, &s, 0, 0, 4, 3, 3, 40, 40, -3.0e38f, 64.0f, 2.0f);
+        CHECK(1, "smoke test: huge rz runs");
+    }
+
+    /* a stack partly outside the clip rectangle and the screen: nothing is written outside the
+     * clip, not even in a guard band around the framebuffer */
+    {
+        enum { G = 16, SW = W + 2 * G, SH = H + 2 * G };
+        static uint16_t gb[SH * SW], want[SH * SW];
+        g16_t gg;
+        g16_target(&gg, gb + G * SW + G, SW, W, H, &font);
+        const struct { int cx, cy, x, y; float rz, sc; } cases[] = {
+            { 0, 0, 0, 0, 0.0f, 1.0f },                    /* the whole screen: only the guard band */
+            { 10, 8, 20, 16, 0.0f, 1.0f },                 /* a clip inside the screen */
+            { 10, 8, 20, 16, 0.6f, 3.0f },                 /* turned and bigger than the clip */
+            { 0, 0, 2, 2, 0.4f, 4.0f },                    /* over the top left edge */
+            { 0, 0, W - 2, H - 2, 1.0f, 4.0f },            /* over the bottom right edge */
+        };
+        for (unsigned k = 0; k < sizeof cases / sizeof *cases; k++) {
+            for (int i = 0; i < SH * SW; i++) gb[i] = 0xABCD;
+            memcpy(want, gb, sizeof gb);
+            g16_clip(&gg, cases[k].cx, cases[k].cy, cases[k].cx ? 12 : 0, cases[k].cx ? 10 : 0);
+            g16_stack(&gg, &s, 0, 0, 4, 3, 3, cases[k].x, cases[k].y, cases[k].rz, cases[k].sc, 2.0f);
+            const int c0 = cases[k].cx ? cases[k].cx : 0, c1 = cases[k].cx ? cases[k].cx + 12 : W;
+            const int r0 = cases[k].cx ? cases[k].cy : 0, r1 = cases[k].cx ? cases[k].cy + 10 : H;
+            int bad_px = 0, inside = 0;
+            for (int y = 0; y < SH; y++)
+                for (int x = 0; x < SW; x++) {
+                    const int px = x - G, py = y - G;
+                    const int in = px >= c0 && px < c1 && py >= r0 && py < r1;
+                    if (in) inside += gb[y * SW + x] != want[y * SW + x];
+                    else bad_px += gb[y * SW + x] != want[y * SW + x];
+                }
+            CHECK(bad_px == 0, "stack case %u wrote %d pixels outside the clip and the screen", k, bad_px);
+            if (k >= 1 && k <= 2) CHECK(inside > 0, "stack case %u drew inside the clip", k);
+        }
+        g16_clip(&gg, 0, 0, 0, 0);
+    }
+    g16_sheet_free(&s);
+
+    /* a quarter turn of a square slice is exact */
+    CHECK(g16_sheet_alloc(&s, 4, 4) == 0, "stack square sheet");
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++)
+            g16_sheet_set(&s, x, y, (uint16_t)(200 + x + y * 4), 1);
+    g16_cls(&g, 0);
+    g16_stack(&g, &s, 0, 0, 4, 4, 1, 40, 40, 1.5707963267948966f, 1.0f, 1.0f);
+    int exact = 1;
+    for (int ly = 0; ly < 4; ly++)
+        for (int lx = 0; lx < 4; lx++)
+            if (at(41 - ly, 38 + lx) != 200 + lx + ly * 4) exact = 0;
+    CHECK(exact, "stack: a 90 degree turn moves every pixel to its exact place");
+    g16_sheet_free(&s);
 }
 
 /* A cartridge with a skeleton (tests/studio/anim_figure.py): the kernel
@@ -878,19 +1441,241 @@ static void test_console_cart(const char *path)
     free(d);
 }
 
+static void test_type_bits(void)
+{
+    unsigned char h[128] = {0};
+    CHECK(bm_type_of_head(h) == BM_TYPE_GAME, "type 0: a game");
+    h[18] = 4;
+    CHECK(bm_type_of_head(h) == BM_TYPE_APP, "type 1: an app");
+    h[18] = 8;
+    CHECK(bm_type_of_head(h) == BM_TYPE_UTILITY, "type 2: a utility");
+    h[18] = 12;
+    CHECK(bm_type_of_head(h) == BM_TYPE_GAME, "3 is reserved: a game");
+    h[18] = 5;
+    CHECK(bm_type_of_head(h) == BM_TYPE_APP, "project + app");
+    h[18] = 2 | 8;
+    CHECK(bm_type_of_head(h) == BM_TYPE_UTILITY, "b16 + utility");
+    CHECK(strcmp(bm_type_name(BM_TYPE_APP), "app") == 0, "type name");
+}
+
+/* the compatibility block (bytes 120..127, flag bit 4), the old files, the writers, no 8 MB limit */
+static void test_compat(void)
+{
+    static const char code[] = "function _draw() cls(0) end\n";
+    size_t n = 0;
+    uint8_t *d = bm_rewrite(NULL, 0, code, sizeof code - 1, "Compat", "t", 640, &n);
+    char err[96];
+    bm_cart_t c;
+    CHECK(d && bm_parse(d, n, &c, err, sizeof err) == 0, "compat: a new cartridge parses (%s)", err);
+    if (!d)
+        return;
+    CHECK(!c.compat.declared && c.compat.targets == BM_TARGET_PI && !c.compat.input && !c.compat.min_ram_mib,
+          "an old .bm (zeros at 120..127) reads as the old rules: Pi only, nothing declared");
+    d[18] |= BM_FLAG_B16;
+    bm_compat_read(d, &c.compat);
+    CHECK(!c.compat.declared && c.compat.targets == BM_TARGET_ALL, "an old .b16 reads as the Pi and the RGB30");
+    d[18] &= (uint8_t)~BM_FLAG_B16;
+
+    bm_compat_t w = { 1, BM_TARGET_RGB30, BM_IN_PAD | BM_IN_KEYBOARD, BM_ASPECT_SQUARE | BM_ASPECT_SAFE,
+                      BM_NEED_3D | BM_NEED_AUDIO, 700, 4, 45 };
+    bm_compat_write(d, &w);
+    CHECK((d[18] & BM_FLAG_COMPAT) && d[120] == 2 && d[121] == 3 && d[122] == 10 && d[123] == 3 &&
+          d[124] == (700 & 255) && d[125] == (700 >> 8) && d[126] == 4 && d[127] == 45,
+          "the block is written at the bytes of docs/BM-FORMAT.md");
+    CHECK(bm_parse(d, n, &c, err, sizeof err) == 0, "the header block is not covered by the CRC: the file still parses");
+    bm_cart_t r;
+    CHECK(bm_parse(d, n, &r, err, sizeof err) == 0, "a cartridge with the block parses (%s)", err);
+    CHECK(r.compat.declared && r.compat.targets == BM_TARGET_RGB30 && r.compat.input == w.input &&
+          r.compat.aspect == w.aspect && r.compat.needs == w.needs && r.compat.min_ram_mib == 700 &&
+          r.compat.min_spec == 4 && r.compat.min_w16 == 45,
+          "round trip: write then read gives the same fields");
+    CHECK(bm_compat_runs_on(&r.compat, BM_TARGET_RGB30) && !bm_compat_runs_on(&r.compat, BM_TARGET_PI),
+          "targets: RGB30 only");
+
+    /* a flag with targets 0 is invalid: it reads as the old rules */
+    uint8_t save = d[120];
+    d[120] = 0;
+    bm_compat_read(d, &r.compat);
+    CHECK(!r.compat.declared && r.compat.targets == BM_TARGET_PI, "bit 4 with targets 0: the old rules");
+    d[120] = save;
+    /* bytes set but bit 4 clear: ignored (an old file with junk in the reserved bytes) */
+    d[18] &= (uint8_t)~BM_FLAG_COMPAT;
+    bm_compat_read(d, &r.compat);
+    CHECK(!r.compat.declared && r.compat.targets == BM_TARGET_PI, "bytes 120..127 without bit 4: ignored");
+    d[18] |= BM_FLAG_COMPAT;
+
+    /* the writers keep the block: bm_rewrite_with (Studio, Pixel, Code save) */
+    size_t n2 = 0;
+    uint8_t *e = bm_rewrite(d, n, "-- new\n", 7,"Compat", "t", 640, &n2);
+    CHECK(e && bm_parse(e, n2, &r, err, sizeof err) == 0 && r.compat.declared &&
+          r.compat.targets == BM_TARGET_RGB30 && r.compat.min_ram_mib == 700 && r.compat.min_w16 == 45,
+          "bm_rewrite keeps the compatibility block");
+    free(e);
+    /* the "built from" field of project.c: only bytes 104..119 change */
+    bm_set_built_from(d, "PONG.BME");
+    CHECK(memcmp(d + BM_BUILT_FROM, "PONG.BME", 9) == 0 && d[120] == 2 && d[127] == 45 && (d[18] & BM_FLAG_COMPAT),
+          "bm_set_built_from keeps bytes 120..127 and bit 4");
+    bm_set_built_from(d, NULL);
+    CHECK(d[BM_BUILT_FROM] == 0 && d[119] == 0 && d[120] == 2 && d[127] == 45, "built from cleared, the block stays");
+    bm_set_built_from(d, "0123456789ABCDEFXYZ");
+    CHECK(memcmp(d + BM_BUILT_FROM, "0123456789ABCDEF", 16) == 0 && d[120] == 2, "a long name is cut at 16 bytes");
+    /* declared = 0 clears bit 4 and the bytes */
+    bm_compat_t none = { 0 };
+    bm_compat_write(d, &none);
+    CHECK(!(d[18] & BM_FLAG_COMPAT) && d[120] == 0 && d[127] == 0, "declared 0 clears the block and the flag");
+    free(d);
+
+    /* no 8 MB limit: a cartridge of 9 MB (and its code) loads */
+    const size_t big = (size_t)9 << 20;
+    char *lua = malloc(big);
+    CHECK(lua != NULL, "9 MB of code allocated");
+    if (!lua)
+        return;
+    memset(lua, 'x', big);
+    memcpy(lua, "-- ", 3);
+    size_t nb = 0;
+    uint8_t *g = bm_rewrite(NULL, 0, lua, big, "Big", "t", 640, &nb);
+    CHECK(g && nb > ((size_t)8 << 20), "a cartridge file above 8 MB is made");
+    CHECK(g && bm_parse(g, nb, &c, err, sizeof err) == 0 && c.lua_size == big, "a cartridge above 8 MB loads (%s)", err);
+    free(g);
+    free(lua);
+}
+
+/* the compatibility block from the INFO keys of bm.info (bm_compat_from_info, W5 and W6 of
+ * the development notes): the same text and the same bytes as tests/tools/test_mkbm_compat.py */
+static uint8_t *cart_with_info(const char *info, size_t *n)
+{
+    static const char code[] = "function _draw() cls(0) end\n";
+    bm_put_t put = { BM_SEC_INFO, (const uint8_t *)info, (uint32_t)strlen(info) };
+    return bm_rewrite_with(NULL, 0, code, sizeof code - 1, "Info", "t", 640, &put, 1, n);
+}
+
+static void test_compat_info(void)
+{
+    char err[96];
+    bm_compat_t c;
+    size_t n;
+    uint8_t *d = cart_with_info("name: Keys\ntargets: pi, rgb30\ninput: pad,keyboard\naspect: square\nneeds: 3d\n"
+                                "min_ram: 300\nmin_spec: 4\nmin_width: 640\n", &n);
+    CHECK(d && bm_compat_from_info(d, n, &c, err, sizeof err) == 1, "info: all the keys give a block (%s)", err);
+    if (d) {
+        uint8_t head[BM_HEADER_SIZE];
+        memcpy(head, d, sizeof head);
+        bm_compat_write(head, &c);
+        static const uint8_t want[8] = { 3, 3, 2, 1, 300 & 255, 300 >> 8, 4, 40 };
+        CHECK((head[18] & BM_FLAG_COMPAT) && !memcmp(head + 120, want, 8),
+              "info: the bytes 120..127 are those of mkbm.py (3 3 2 1 44 1 4 40)");
+    }
+    free(d);
+
+    d = cart_with_info("name: T\ntargets: RGB30\n", &n);
+    CHECK(d && bm_compat_from_info(d, n, &c, err, sizeof err) == 1 && c.declared && c.targets == BM_TARGET_RGB30 &&
+          !c.input && !c.aspect && !c.needs && !c.min_ram_mib && !c.min_spec && !c.min_w16,
+          "info: targets alone (any case), the other fields 0");
+    free(d);
+
+    d = cart_with_info("name: Plain\ndesc: nothing\n", &n);
+    CHECK(d && bm_compat_from_info(d, n, &c, err, sizeof err) == 0 && !c.declared,
+          "info: no key of the block: 0, the file's own bytes stay");
+    free(d);
+    d = cart_with_info("name: Plain\n[sprite a]\ntargets: pi\n", &n);
+    CHECK(d && bm_compat_from_info(d, n, &c, err, sizeof err) == 0, "info: a key inside a [part] block is not the cartridge's");
+    free(d);
+    d = cart_with_info("targets:\ninput:\n", &n);
+    CHECK(d && bm_compat_from_info(d, n, &c, err, sizeof err) == 0, "info: a key with no value is not there");
+    free(d);
+    d = bm_rewrite(NULL, 0, "x=1", 3, "No info", "t", 640, &n);
+    CHECK(d && bm_compat_from_info(d, n, &c, err, sizeof err) == 0, "info: a cartridge with no INFO: 0");
+    free(d);
+
+    static const char *const bad[] = {
+        "input: pad\n", "aspect: wide\n", "needs: 3d\n", "min_ram: 64\n", "min_spec: 3\n", "min_width: 320\n",
+        "targets: moon\n", "targets: pi\ninput: joystick\n", "targets: pi\nmin_ram: many\n",
+        "targets: pi\nmin_spec: 256\n", "targets: pi\nmin_ram: 65536\n", "targets: pi\nmin_width: 4081\n",
+        "targets: pi\nneeds: 3d,vr\n", "targets: pi\nmin_ram: -5\n",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        d = cart_with_info(bad[i], &n);
+        err[0] = 0;
+        CHECK(d && bm_compat_from_info(d, n, &c, err, sizeof err) == -1 && err[0],
+              "info: an error with a message for \"%.20s\"", bad[i]);
+        free(d);
+    }
+    d = cart_with_info("targets: pi\nmin_width: 4080\nmin_ram: 65535\nmin_spec: 255\n", &n);
+    CHECK(d && bm_compat_from_info(d, n, &c, err, sizeof err) == 1 && c.min_w16 == 255 && c.min_ram_mib == 65535 &&
+          c.min_spec == 255, "info: the largest values");
+    free(d);
+}
+
+/* The DATA section: named blobs of an app, found by name (bm_data_find) and checked by the parser. */
+static void le32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
+
+static void test_data(void)
+{
+    uint8_t sec[4 + 2 * BM_DATA_ENTRY + 8] = { 2, 0, 0, 0 };
+    memcpy(sec + 4, "words.lua", 9);
+    le32(sec + 4 + 16, 4 + 2 * BM_DATA_ENTRY);
+    le32(sec + 4 + 20, 5);
+    memcpy(sec + 4 + BM_DATA_ENTRY, "assist.bin", 10);
+    le32(sec + 4 + BM_DATA_ENTRY + 16, 4 + 2 * BM_DATA_ENTRY + 8);
+    le32(sec + 4 + BM_DATA_ENTRY + 20, 0);
+    memcpy(sec + 4 + 2 * BM_DATA_ENTRY, "hello", 5);
+    CHECK(bm_data_check(sec, sizeof sec) == 2, "data: two blobs");
+    const char lua[] = "x=1";
+    const unsigned lua_pad = 4, off_data = BM_HEADER_SIZE + 32 + lua_pad;
+    static uint8_t cart[BM_HEADER_SIZE + 32 + 4 + sizeof sec];
+    memset(cart, 0, sizeof cart);
+    memcpy(cart, "BMCART\0\0", 8);
+    cart[8] = 1;
+    cart[10] = BM_HEADER_SIZE;
+    cart[12] = 0x80; cart[13] = 0x02; cart[14] = 0x68; cart[15] = 0x01;         /* 640x360 */
+    cart[16] = BM_FMT_RGB565;
+    cart[17] = 2;
+    le32(cart + BM_HEADER_SIZE, BM_SEC_LUA);
+    le32(cart + BM_HEADER_SIZE + 4, BM_HEADER_SIZE + 32);
+    le32(cart + BM_HEADER_SIZE + 8, sizeof lua - 1);
+    le32(cart + BM_HEADER_SIZE + 16, BM_SEC_DATA);
+    le32(cart + BM_HEADER_SIZE + 20, off_data);
+    le32(cart + BM_HEADER_SIZE + 24, sizeof sec);
+    memcpy(cart + BM_HEADER_SIZE + 32, lua, sizeof lua - 1);
+    memcpy(cart + off_data, sec, sizeof sec);
+    le32(cart + 20, crc32(cart + BM_HEADER_SIZE, sizeof cart - BM_HEADER_SIZE));
+    const uint8_t *b = NULL;
+    uint32_t n = 0;
+    CHECK(bm_data_find(cart, sizeof cart, "words.lua", &b, &n) == 0 && n == 5 && !memcmp(b, "hello", 5), "data: find by name");
+    CHECK(bm_data_find(cart, sizeof cart, "assist.bin", &b, &n) == 0 && n == 0, "data: an empty blob");
+    CHECK(bm_data_find(cart, sizeof cart, "nothing", &b, &n) < 0, "data: unknown name");
+    CHECK(bm_data_find(cart, sizeof cart - 4, "words.lua", &b, &n) < 0, "data: truncated file");
+    bm_cart_t c;
+    char err[128];
+    CHECK(bm_parse(cart, sizeof cart, &c, err, sizeof err) == 0, "data: the parser accepts it: %s", err);
+    le32(cart + off_data + 4 + 20, 9999);                                       /* a blob out of the section */
+    le32(cart + 20, crc32(cart + BM_HEADER_SIZE, sizeof cart - BM_HEADER_SIZE));
+    CHECK(bm_data_find(cart, sizeof cart, "words.lua", &b, &n) < 0, "data: a blob out of bounds");
+    CHECK(bm_parse(cart, sizeof cart, &c, err, sizeof err) != 0, "data: the parser refuses it");
+}
+
 int main(int argc, char **argv)
 {
     test_primitives();
     test_sprites();
+    test_map_equiv();
+    test_sspr_equiv();
     test_text();
     test_light();
     test_fade();
     test_3d();
-    test_format(argc > 1 ? argv[1] : "build/demo.bm");
+    test_pfx();
+    test_colour_only();
+    test_format(argc > 1 ? argv[1] : "build/carts/mapkit.bm");
     test_cover_peek();
+    test_type_bits();
+    test_compat();
+    test_compat_info();
     test_sheet8();
     test_mesh();
     test_pixel();
+    test_data();
     if (argc > 2)
         test_anim_cart(argv[2]);
     if (argc > 3)

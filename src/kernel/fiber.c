@@ -1,16 +1,19 @@
 #include "fiber.h"
 #include "drivers/timer.h"
+#include "drivers/watchdog.h"
 #include "lib/printf.h"
 
 #include <stdlib.h>
 #include <string.h>
 
 #define GUARD 0xF1BE5AFEu
+#define PAINT 0x57ACC0DEu      /* unused stack of a job (high-water mark) */
 
 void fiber_switch(uint32_t **save, uint32_t *load);
 void fiber_start(void);
 
-static fiber_t *current;
+static fiber_t *volatile current;     /* read by the tick (fiber_tick) */
+volatile uint8_t fiber_over;
 
 static void fiber_main(fiber_t *f)
 {
@@ -59,6 +62,7 @@ int fiber_resume(fiber_t *f)
     if (f->done || current)
         return !f->done;
     current = f;
+    fiber_over = 0;
     fiber_switch(&f->back, f->sp);
     current = NULL;
     for (int i = 0; i < 16; i++)
@@ -79,6 +83,14 @@ void fiber_yield(void)
     current = NULL;
     fiber_switch(&f->sp, f->back);
     current = f;
+}
+
+/* In the 1 kHz tick (IRQ): one timer read, and a store when the running fiber is late. */
+void fiber_tick(void)
+{
+    fiber_t *f = current;
+    if (f && (int32_t)(timer_ticks() - f->until) >= 0)
+        fiber_over = 1;
 }
 
 fiber_t *fiber_current(void)
@@ -104,9 +116,19 @@ int fiber_run(fiber_t *f, uint32_t until)
 
 void fiber_slice(void)
 {
+    watchdog_progress();        /* a long loop that calls this is alive, in a fiber or not (SYS-2) */
     fiber_t *f = current;
     if (f && (int32_t)(timer_ticks() - f->until) >= 0)
         fiber_yield();
+}
+
+uint32_t fiber_budget_us(void)
+{
+    const fiber_t *f = current;
+    if (!f)
+        return UINT32_MAX;
+    const int32_t left = (int32_t)(f->until - timer_ticks());
+    return left > 0 ? (uint32_t)left : 0;
 }
 
 int fiber_slice_tick(void)
@@ -126,6 +148,9 @@ int fiber_job_start(fiber_job_t *j, size_t stack, void (*fn)(void *), void *arg)
         if (!(j->stack = malloc(stack)))
             return -1;
         j->size = stack;
+        /* painted once: the report finds how far down the stack went (never repainted) */
+        for (size_t i = 16; i < stack / 4; i++)
+            ((uint32_t *)j->stack)[i] = PAINT;
         if (njobs < JOBS_MAX)
             jobs[njobs++] = j;
     }
@@ -139,6 +164,9 @@ static void account(fiber_job_t *j, uint32_t t0, uint32_t until)
 {
     const uint32_t now = timer_ticks();
     const int32_t over = (int32_t)(now - until);
+    if (fiber_over && over > (int32_t)FIBER_STALL_US && over > (int32_t)j->longest)
+        kprintf("fiber: %s did not yield: %lu.%lu ms past its slice\n", j->name ? j->name : "job",
+                (unsigned long)(over / 1000), (unsigned long)(over / 100 % 10));
     j->took += now - t0;
     if (over > (int32_t)j->worst)
         j->worst = (uint32_t)over;
@@ -212,6 +240,18 @@ int fiber_jobs_report(char *buf, size_t n)
             k += (size_t)ksnprintf(buf + k, n - k, "%s%s %lu ms (+%lu.%lu", any ? ", " : "",
                                    j->name ? j->name : "job", (unsigned long)(j->took / 1000),
                                    (unsigned long)(j->worst / 1000), (unsigned long)(j->worst / 100 % 10));
+        if (n > k) {
+            /* the stack: from the first word below the top that is not paint */
+            const uint32_t *w = (const uint32_t *)j->stack;
+            size_t i = 16;
+            while (i < j->size / 4 && w[i] == PAINT)
+                i++;
+            const size_t used = j->size - i * 4;
+            if (used > j->hw)
+                j->hw = (uint32_t)used;
+            k += (size_t)ksnprintf(buf + k, n - k, ", stk %lu.%lu/%luK", (unsigned long)(j->hw / 1024),
+                                   (unsigned long)(j->hw * 10 / 1024 % 10), (unsigned long)(j->size / 1024));
+        }
         if (n > k && j->stopped)
             k += (size_t)ksnprintf(buf + k, n - k, ", stop %lu.%lu", (unsigned long)(j->stopped / 1000),
                                    (unsigned long)(j->stopped / 100 % 10));
@@ -222,3 +262,4 @@ int fiber_jobs_report(char *buf, size_t n)
     }
     return any;
 }
+
